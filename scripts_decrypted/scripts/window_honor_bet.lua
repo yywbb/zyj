@@ -1,0 +1,350 @@
+--新增的押注界面
+local honorBet = {
+    cellSize1 = {width = 920, height = 350},
+    cellSize2 = {width = 920, height = 430},
+
+    rootNode = nil,
+    rootItems = nil,
+
+    --listTableView = nil,
+    minNum = 1,
+    maxNum = 10,
+    ccbDocument = {},
+}
+--TODO   add  new  Window
+function honorBet.close(self)
+    --gameTouch:UnrigistFunc("begin", "honorBattleOdds")
+    --gameTouch:UnrigistFunc("end", "honorBattleOdds")
+    --for i=1,3 do
+    --    local _timerName = "honorBattleOdds"..i
+    --    gameTimer:UnrigistTime(_timerName)
+    --    gameTimer:UnrigistTimeFunc(_timerName)
+    --end
+    self.ccbDocument = {}
+
+    --self.listTableView = nil
+
+    self.rootNode:removeAllChildrenWithCleanup(true)
+    self.rootNode:removeFromParentAndCleanup(true)
+
+    self.rootNode = nil
+    self.rootItems = nil
+    self.selectOdds =1
+end
+
+function honorBet.open(self, touchPriority, data, callback)
+    --tableview  不用了
+    self.listTableView = nil
+    self:initNode(touchPriority)
+    --列表 注释
+    --self:initActivityScroll()
+    self:initCloseBtn()
+    self.oddsCount = 1
+    self.data = data
+    self.battledata = data.battledata
+    if data.betdata then
+        self.betdata = data.betdata
+        self:initConfig()
+        self.floorOdds = self:getFloorOdds()
+        self:reloadOdds()--这个不需要请求了  就直接在这儿处理
+        self:initIcon()
+        self.rootItems.label_l_name:setString(data.player1.name)
+        self.rootItems.label_r_name:setString(data.player2.name)
+        self.rootItems.label_l_power:setString(gameConfig.strings:string_common("honorBattle2", 6)..self:getTotalPower("a"))
+
+        self.rootItems.label_r_power:setString(gameConfig.strings:string_common("honorBattle2", 6)..self:getTotalPower("b"))
+        self:initMinusBtn()
+        self:initAddBtn()
+        self:initMinusTenBtn()
+        self:initAddTenBtn()
+        --必然会有数据  和之前的处理不一样了
+    --else
+     --   self.rootItems.oddsNode:setVisible(false)
+       -- self.rootItems.detailnode:setPositionY(260)
+    end
+    --这个里边不需要请求界面数据  都是上一层直接传过来就行了
+    --self:refreshData()
+
+    return self.rootNode
+end
+--TODO  addTen  change  choosechange
+function honorBet.initIcon(self)
+    printT(self.data.player1)
+    ui.setNewIcon(self.rootItems,{cid = self.data.player1.profile},0)
+    ui.setNewIcon(self.rootItems,{cid = self.data.player2.profile},1)
+end
+--[[function honorBattleOdds.refreshData( self )
+    UIRequest({type=6506,phase = self.data.phase,id = self.data.id})
+end
+--]]
+
+-- 初始化界面
+function honorBet.initNode(self, touchPriority)
+    self.rootNode, self.rootItems = CCBReaderLoad("rongyaozhizhan/tc_jingcai", nil, true, "tc_jingcai")
+    self.touchPriority = touchPriority
+    self.rootItems.oddsNode:setVisible(true)
+    --ui.setLabelString(self.rootItems.titleTxt,"比赛详情",65)
+end
+
+-- 初始化配置表
+function honorBet.initConfig(self)
+    self.oddsConfig = gamedata.config.glory_battle_odds
+    self.lvbetConfig = gamedata.config.glory_battle_lvbet
+    self.maxrate = tonumber(gamedata.config.global_kv.glory_fudong_up.value)
+    self.minrate = tonumber(gamedata.config.global_kv.glory_fudong_down.value)
+
+    --add property
+    self.oddsConfig = gamedata.config.glory_battle_odds
+    self.lvbetConfig = gamedata.config.glory_battle_lvbet
+    self.globalkvConfig = gamedata.config.global_kv
+    self.maxNum = self.betdata.restbetcount--tonumber(self.globalkvConfig.glory_battle_yazhu.value)
+end
+
+-- 初始化关闭按钮
+function honorBet.initCloseBtn(self)
+    ui.setLabelString(self.rootItems.betconcelTxt, gameConfig.strings:string_common("honorBattle2", 19), 19)
+    local _cb = function()
+        gameWindows:closeWindow("honorBet")
+    end
+
+    self:commonBtn(self.rootItems, "cancelBtn", _cb)
+end
+
+------------------------------------------------------
+
+function honorBet.reloadOdds( self )
+
+    if self.data.betdata.result>=0 then
+        if self.data.betdata.bet>0 then
+            self.selectOdds = self.data.betdata.betnum
+        else
+            self.selectOdds = 0
+        end
+    else
+        if self.data.betdata.bet>0 then
+            self.selectOdds = self.data.betdata.betnum
+        else
+            self.selectOdds = self.selectOdds or 1
+        end
+    end
+
+    self:chooseOdds()
+
+    for i = 1, 6 do
+        self:initChooseOddsBtn(i,self.data.betdata.result<0 and self.data.betdata.bet<=0)
+    end
+
+    self:initOddsBtn()
+
+    self:initFixedString() --显示当前的押注情况 
+    --TODO. addMax
+    --self:initBetBtnIsShow() --显示押注按钮  或者文本  不需要处理
+end
+
+function honorBet.getTotalPower(self, powerType)
+    local _totalPower = 0
+
+    local rid = self.battledata.players["rid_"..powerType]
+
+    for i=1,3 do
+        local onebattle = self.battledata[tostring(i)]
+        if onebattle.rid_a == rid then
+            _totalPower = _totalPower + onebattle.power_a
+        elseif onebattle.rid_b == rid then
+            _totalPower = _totalPower + onebattle.power_b
+        end
+    end
+
+    return _totalPower
+end
+
+function honorBet.getOdds( self,idx )
+    local _odds = math.pow(math.pow(self:getTotalPower("a") / self:getTotalPower("b"), 2.3), self.oddsConfig[tostring(idx)].odds) + 1
+    _odds = _odds - _odds%0.01
+    _odds = math.max(_odds,self.minrate)
+    _odds = math.min(_odds,self.maxrate)
+    return _odds
+end
+
+function honorBet.getBetNum( self,num )
+    return (4-num)..":"..(num-1)
+end
+--获取底注
+function honorBet.getFloorOdds(self)
+    local idx = 1
+    local _row = self.lvbetConfig[tostring(idx)]
+    while _row and GameScene.roleinfo.level >= _row.interval do
+        idx = idx + 1
+        _row = self.lvbetConfig[tostring(idx)]
+    end
+    return self.lvbetConfig[tostring(idx-1)].lv_bet
+end
+
+function honorBet.chooseOdds(self)
+    for i = 1, 6 do
+        self.rootItems["oddsEffect"..i]:setVisible(self.selectOdds == i)
+    end
+    self:getCurrentPayback()
+end
+
+function honorBet.initChooseOddsBtn(self, index,iscanbet)
+    if index <= 6 then
+        self.rootItems["oddsTxt"..index]:setString(gameConfig.strings:string_common("honorBattle2", 8)..self:getOdds(index))
+    end
+
+    local _cb = function()
+        self.selectOdds = index
+        self:chooseOdds()
+    end
+    self:commonBtn(self.rootItems, "chooseOddsBtn"..index, iscanbet and _cb or function() end)
+end
+
+function honorBet.initOddsBtn(self)
+
+    ui.setLabelString(self.rootItems.betBtnTxt, gameConfig.strings:string_common("honorBattle2", 10), 19)
+    local honorwarstatus = GameScene.layers["honorBattle"].module.HonorWarStatus.status
+    if honorwarstatus > self.betdata.betstatus then
+        ui.addGray("CCControlButton", self.rootItems.betBtn)
+    else
+        ui.removeGray("CCControlButton", self.rootItems.betBtn)
+    end
+
+    --[[local _cb = function()
+        -- 比赛开始前
+        local honorwarstatus = GameScene.layers["honorBattle"].module.HonorWarStatus.status
+        if honorwarstatus > self.betdata.betstatus then
+            runGamePrompt({msg = "押注时间已过"})
+        elseif self.betdata.bet > 0 then
+            runGamePrompt({msg = "您已押注"})
+        else
+            gameWindows:openWindow("honorBattleProperty", {
+                    id = self.data.id,
+                    mark = self.selectOdds,
+                    odds = self:getOdds(self.selectOdds), 
+                    isBet = self.betdata.bet, 
+                    floorOdds = self:getFloorOdds()
+                })
+        end
+    end
+    --]]
+    ---add
+    local _cb = function()
+        if self.betdata.bet == 0 then
+            if self:getPlayerCoin() >= self:getCurrentPrice() then
+                --todo ? self:getCurrentPrice() or self.oddsCount
+                UIRequest({
+                    type = 6509, 
+                    id = self.data.id,
+                    mark=self.selectOdds,
+                    money=self:getCurrentPrice()
+                    })
+                gameWindows:closeAllWindowDirect()
+            else
+                runGamePrompt({msg = gameConfig.strings:string_common("honorBattle2", 23)})
+            end
+        end
+    end
+    self:commonBtn(self.rootItems, "betBtn", _cb)
+end
+--------------------------------------------------------------------
+
+-- 通用按钮
+function honorBet.commonBtn(self, item, btnName, callback, touchPriority, isSwallows)
+    print(btnName)
+    if isSwallows == false then
+        item[btnName]:setSwallowsTouch(isSwallows)
+    else
+        item[btnName]:setSwallowsTouch(true)
+    end
+
+    item[btnName]:setTouchPriority(touchPriority or (self.touchPriority - 1))
+    item[btnName]:addHandleOfControlEvent(callback, CCControlEventTouchUpInside)
+end
+---add  property function 
+function honorBet.initFixedString(self)
+    self.rootItems.label_limt:setString(gameConfig.strings:string_common("honorBattle2", 21)..self:getMaxPrice())
+    self.rootItems.label_canuse:setString(gameConfig.strings:string_common("honorBattle2", 22)..self:getPlayerCoin())
+    self.rootItems.buynum:setString(self:getCurrentPrice())
+end
+
+function honorBet.getCurrentPayback( self, count )
+    return self.rootItems.label_totalGet:setString(gameConfig.strings:string_common("honorBattle2", 18).. self.floorOdds * self:getOdds(self.selectOdds) * (count and count or self.oddsCount))
+end
+
+function honorBet.getCurrentPrice(self, count)
+    return self.floorOdds * (count and count or self.oddsCount)
+end
+
+function honorBet.getMaxPrice(self)
+    return self.floorOdds * self.maxNum
+end
+
+function honorBet.getPlayerCoin(self)
+    local _price = 0
+
+    --todo
+    -- if self.globalkvConfig[""].value then
+
+    local _coinType = 0 
+
+    if _coinType == 0 then
+        _price = GameScene.roleinfo.coin
+    elseif _coinType == 1 then
+        _price = GameScene.roleinfo.gold
+    end
+
+    return _price
+end
+function honorBet.initMinusBtn(self)
+    local _cb = function()
+        if self.oddsCount > self.minNum then
+            self.oddsCount = self.oddsCount - 1
+            self.rootItems.buynum:setString(self:getCurrentPrice())
+            self:getCurrentPayback()
+        end
+    end
+
+    self:commonBtn(self.rootItems, "sub1", _cb)
+end
+function honorBet.initMinusTenBtn(self)
+    local _cb = function()
+        if self.oddsCount - 10 < self.minNum then
+            self.oddsCount = self.minNum
+        else
+            self.oddsCount = self.oddsCount-10
+        end
+        self.rootItems.buynum:setString(self:getCurrentPrice())
+        self:getCurrentPayback()
+    end
+
+    self:commonBtn(self.rootItems, "sub10", _cb)
+end
+function honorBet.initAddTenBtn(self)
+    local _cb = function()
+        if self.oddsCount+10 > self.maxNum and self:getCurrentPrice(maxNum) <= self:getPlayerCoin() then
+            self.oddsCount = self.maxNum
+        else
+            if self:getCurrentPrice(self.oddsCount+10) <= self:getPlayerCoin() then
+            self.oddsCount = self.oddsCount+10  
+            end
+        end
+        self.rootItems.buynum:setString(self:getCurrentPrice())
+        self:getCurrentPayback()
+    end
+
+    self:commonBtn(self.rootItems, "add10", _cb)
+end
+function honorBet.initAddBtn(self)
+    local _cb = function()
+        if self.oddsCount < self.maxNum and self:getCurrentPrice(self.oddsCount + 1) <= self:getPlayerCoin() then
+            self.oddsCount = self.oddsCount + 1
+            self.rootItems.buynum:setString(self:getCurrentPrice())
+            self:getCurrentPayback()
+        end
+    end
+
+    self:commonBtn(self.rootItems, "add1", _cb)
+end
+
+
+return honorBet�,  

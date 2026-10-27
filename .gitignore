@@ -1,0 +1,22 @@
+# Large binaries / artifacts
+*.apk
+*.zip
+*.pcap
+*.idsig
+*.log
+debug.keystore
+phone_screen.png
+
+# Recorded frame data
+recorded_frames.json
+recorded_frames.json.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,370 @@
+--
+-- Created by IntelliJ IDEA.
+-- User: lichungeng
+-- Date: 16/6/17
+-- Time: 下午3:54
+-- To change this template use File | Settings | File Templates.
+--
+
+local gamblingshop = {
+    rewardCellSize = {x=1080, y=320},
+
+    resource = nil,
+
+    rootNode = nil,
+    rootItems = nil,
+    rewardListTableView = nil,
+
+    rewards = {},
+    rewardData = {},
+    myData = {},
+
+    costid = 1021,
+    costone = 0,
+    hasnum = 0,
+
+    isscrolltouched = false,
+}
+
+function gamblingshop.init(self,size)
+    self.contentsize = size
+    self.show = true
+
+    self.rootNode,self.rootItems = CCBReaderLoad("activitylaohuji/laohuji_duihuan", nil, true, "shop")
+
+    self.rootItems.topnode:setPositionY(self.contentsize.y-180)
+    self.rootItems.rewardScroll:setContentSize(CCSizeMake(gameConfig.originSize.width,self.contentsize.y-180-gameConfig.maiscenebottomheight-520))
+
+    self.rewards = gamedata.config.game_consoles_shop or {}
+    --
+    local endString = ""
+    if gamedata.config.activity_time["75"]["open_type"] and gamedata.config.activity_time["75"]["open_type"] == 1 then
+        local nowtime = gamedata:time()
+        local temp = os.date("*t", GameScene.roleinfo.servertime)
+        local timediff = 0
+        timediff = GameScene.roleinfo.servertime + 86400*(gamedata.config.activity_time["75"]["continued_time"]+(gamedata.config.activity_time["75"]["days_later"] or 0)) - temp.hour*3600 - temp.min*60 - temp.sec
+        if timediff < nowtime then
+            timediff = GameScene.roleinfo.servertime + 86400*(gamedata.config.activity_time["75"]["continued_time"]+(gamedata.config.activity_time["75"]["days_later2"] or 0)) - temp.hour*3600 - temp.min*60 - temp.sec
+        end
+        local endtab = os.date("*t", timediff-1)
+        endString = endtab.year.."年"..endtab.month.."月"..endtab.day.."日24时"
+
+    elseif gamedata.config.activity_time["75"]["end"] and gamedata.config.activity_time["75"]["end"] ~= "" then
+        local year, month, day, hour, min, sec = ui.getDate(gamedata.config.activity_time["75"]["end"])
+        endString = year.."年"..month.."月"..day.."日"
+        if tonumber(hour) < 1 and tonumber(min) < 1 and tonumber(sec) < 1 then
+            local endt = os.time({year=tonumber(year),month=tonumber(month),day=tonumber(day),hour=tonumber(hour),min=tonumber(min),sec=tonumber(sec),isdst=false}) - 1
+            local endtab = os.date("*t",endt)
+            endString = endtab.year.."年"..endtab.month.."月"..endtab.day.."日24时"
+        end
+    end
+    ui.setLabelString(self.rootItems.timedes,"结束时间: "..endString,14)
+    --
+    local function touchbegin(pos)
+        self.isscrolltouched = false
+        self.touchbegin = {x = pos.x, y = pos.y}
+    end
+
+    gameTouch:rigistFunc("begin","gamblingshop",touchbegin)
+
+    local function touchend(pos)
+        if math.abs(pos.x - (self.touchbegin and self.touchbegin.x or pos.x)) > 20 or math.abs(pos.y - (self.touchbegin and self.touchbegin.y or pos.y)) > 20 then
+            self.isscrolltouched = false
+        elseif self.rootItems.rewardScroll and ui.isTouched(self.rootItems.rewardScroll,pos.x,pos.y) then
+            self.isscrolltouched = true
+        end
+    end
+
+    gameTouch:rigistFunc("end","gamblingshop",touchend)
+    --
+    if gamedata.config.global_kv["game_consoles_consume"] and tonumber(gamedata.config.global_kv["game_consoles_consume"].value) then
+        self.costid = 1021
+    else
+        self.costid,self.costone = ui.getIDandNUM(gamedata.config.global_kv["game_consoles_consume"].value)
+    end    
+
+    if self.rootItems.costicon then
+        setSpriteFrameByName(self.rootItems.costicon, ui.IDconfig(self.costid) and ui.IDconfig(self.costid).icon or "alpha")
+        --
+        self.rootItems.costiconbtn:addHandleOfControlEvent(function()
+            if GameScene.layers["activity"].module.isContentScroll then  return end
+            ui.setPopwindowByCid(self.costid)
+        end, CCControlEventTouchUpInside)
+        self.rootItems.costiconbtn:setSwallowsTouch(true)
+        self.rootItems.costiconbtn:setTouchPriority(-102)
+        --
+    end    
+
+    --
+    if self.rootItems.general and self.rootItems.bgicon then
+        local activityConfig = gamedata.config.activity_time
+        local generalConfig = gamedata.config.generalanimation
+        if activityConfig[tostring(75)].generalanimation and activityConfig[tostring(75)].generalanimation > 0 then
+            self.rootItems["general"]:removeAllChildrenWithCleanup(true)
+            local name = generalConfig[tostring(activityConfig[tostring(75)].generalanimation)].name
+            local Gneral1 = CCSkeletonAnimation:create(name .."/" .. name .. ".json", name .."/" .. name .. ".atlas",1)
+            Gneral1:setAnimation("stand",true,0)
+            Gneral1:setScale(2)
+            Gneral1:setPosition(0,0)
+            self.rootItems["general"]:addChild(Gneral1)
+            --
+            self.rootItems.general:setVisible(true)
+            self.rootItems.bgicon:setVisible(false)
+        else
+            self.rootItems.general:setVisible(false)
+            self.rootItems.bgicon:setVisible(true)
+        end    
+    end
+
+    return self.rootNode
+end
+
+function gamblingshop.relaodpoint(self,data)
+    if not self.show then return end
+    self.myData = {point = data.points}
+    if self.costid == 1021 then
+        self.hasnum = self.myData.point or 0
+        ui.setLabelString(self.rootItems.pointnum,self.myData.point or 0,21)
+    else
+        self.hasnum = data.hasnum or 0
+        ui.setLabelString(self.rootItems.pointnum,data.hasnum or 0,21)
+    end    
+    if  self.rewardListTableView then
+        self.rewardListTableView:reloadData()
+    end
+end
+
+
+function gamblingshop.reloaddata(self,data)
+    print("tigerchickenshop.reloadrank==")
+    if not self.show then return end
+
+    if data then
+        self.rewardData = data.data or {}
+        self:relaodpoint(data)
+    else
+        --return
+    end
+
+
+    if not self.rewardListTableView then
+        self:createRewardList()
+    else
+        if self.rewardListTableView:getLuaContentOffsetY() < self.rootItems.rewardScroll:getContentSize().height - table.getTableLength(self.rewards)*self.rewardCellSize.y then
+            self.rewardListTableView:setLuaContentOffset(0, self.rootItems.rewardScroll:getContentSize().height - table.getTableLength(self.rewards)*self.rewardCellSize.y)
+        end
+        self.rewardListTableView:reloadData()
+    end
+
+end
+
+
+function gamblingshop.createRewardList(self)
+    local celldict = {}
+    local rankListHandle = LuaEventHandler:create(function(fn, myTable, a1, a2)
+        local r
+        if fn == "cellSize" then
+            r = CCSizeMake(self.rewardCellSize.x, self.rewardCellSize.y)
+        elseif fn == "cellAtIndex" then
+
+            local cellCCB,ccbDocumentControler = 0,0
+            local first = true
+            if not a2 then
+                a2 = CCTableViewCell:create()
+                cellCCB, ccbDocumentControler = CCBReaderLoad("activitylaohuji/cell_laohuji_shop.ccbi", nil, true, "duihuan")
+                celldict[a2] = {cellCCB=cellCCB,ccbDocumentControler=ccbDocumentControler }
+                --ui.tableviewAnimation(self.rewardListTableView,cellCCB,self.rewardCellSize.x/2, 0,a1)
+            else
+                first = false
+                cellCCB = celldict[a2].cellCCB
+                ccbDocumentControler = celldict[a2].ccbDocumentControler
+            end
+
+            self:setone(self.rewards[tostring((a1+1)*2-1)],ccbDocumentControler,1)
+            self:setone(self.rewards[tostring((a1+1)*2)],ccbDocumentControler,2)
+
+            --if self.rewardListTableView then
+            cellCCB:setPosition(self.rewardCellSize.x/2, 0)
+            --end
+
+            if first then
+                a2:addChild(cellCCB)
+            end
+
+            r = a2
+        elseif fn == "numberOfCells" then
+            r = table.getTableLength(self.rewards)/2
+        elseif fn == "cellTouched" then
+
+        elseif fn == "scrollViewDidScroll" then
+            --gameTouch.isScrollling = true
+        end
+        return r
+    end)
+
+    self.rewardListTableView = ui.createLuaTableView({
+        handle = rankListHandle,
+        viewwidth = self.rootItems.rewardScroll:getContentSize().width,
+        viewheight = self.rootItems.rewardScroll:getContentSize().height,
+        dire = 1
+    })
+    self.rewardListTableView:setTouchPriority(-102)
+    self.rootItems.rewardScroll:addChild(self.rewardListTableView)
+end
+
+
+function gamblingshop.setone(self,data,items,index)
+    print("index==",index)
+    -- printT(data)
+
+    local key_Ex
+    local icon_key
+    local exchangeNum = 9999
+    if index == nil or index == 1 then
+        key_Ex = ""
+        icon_key = ""
+    else
+        key_Ex = "_1"
+        icon_key = "_1"
+    end
+
+
+    if not data then
+        return
+    end
+
+    if (data.limit and data.limit > 0) and (self.rewardData[tostring(data.id)] and self.rewardData[tostring(data.id)] >= 0) then
+        items["changenum"..key_Ex]:setString("可兑换次数"..(data.limit-(self.rewardData[tostring(data.id)] or 0)))
+    else
+        items["changenum"..key_Ex]:setString("")
+    end
+    ui.setLabelString(items["changenum"..key_Ex],nil,13)
+
+    if data.item and data.item ~= "" then
+        local id1,num1 = ui.getIDandNUM(data.item)
+        ui.setNewIconName(items,{cid = id1, num = num1},index-1)
+        --
+        items["in_button"..key_Ex]:addHandleOfControlEvent(function()
+            if not self.isscrolltouched then return end
+            if GameScene.layers["activity"].module.isContentScroll then  return end
+            ui.setPopwindowByCid(id1)
+        end, CCControlEventTouchUpInside)
+        items["in_button"..key_Ex]:setTouchPriority(-102)
+        --
+    end
+
+    if data.number and data.number ~= "" then
+        items["pointnode"..key_Ex]:setVisible(true)
+        local id1,num1 = ui.getIDandNUM(data.number)
+        ui.setLabelString(items["pointnum"..key_Ex],num1,14)
+        exchangeNum = exchangeNum > math.floor((self.myData.point or 0)/num1) and math.floor((self.myData.point or 0)/num1) or exchangeNum
+        if (self.myData.point or 0) < num1 then
+            ui.setLabelString(items["pointnum"..key_Ex],num1,24)
+        end    
+    else
+        items["pointnode"..key_Ex]:setVisible(false)
+    end
+
+    if data.num and data.num ~= "" then
+        items["propnode"..key_Ex]:setVisible(true)
+        local id1,num1 = ui.getIDandNUM(data.num)
+        ui.setLabelString(items["propnum"..key_Ex],num1,14)
+        ui.setNewIcon(items,{cid = id1},index-1)
+        --
+        items["i_button_"..(2*(index-1)+1)]:addHandleOfControlEvent(function()
+            if not self.isscrolltouched then return end
+            if GameScene.layers["activity"].module.isContentScroll then  return end
+            ui.setPopwindowByCid(id1)
+        end, CCControlEventTouchUpInside)
+        items["i_button_"..(2*(index-1)+1)]:setTouchPriority(-102)
+        --
+        if id1 == 1001 then
+            exchangeNum = exchangeNum > math.floor((GameScene.roleinfo.gold or 0)/num1) and math.floor((GameScene.roleinfo.gold or 0)/num1) or exchangeNum 
+            if (GameScene.roleinfo.gold or 0) < num1 then
+                ui.setLabelString(items["propnum"..key_Ex],num1,24)
+            end      
+        elseif id1 == 1000 then
+            exchangeNum = exchangeNum > math.floor((GameScene.roleinfo.coin or 0)/num1) and math.floor((GameScene.roleinfo.coin or 0)/num1) or exchangeNum
+            if (GameScene.roleinfo.coin or 0) < num1 then
+                ui.setLabelString(items["propnum"..key_Ex],num1,24)
+            end   
+        elseif id1 == self.costid then
+            exchangeNum = exchangeNum > math.floor((self.hasnum or 0)/num1) and math.floor((self.hasnum or 0)/num1) or exchangeNum
+            if (self.hasnum or 0) < num1 then
+                ui.setLabelString(items["propnum"..key_Ex],num1,24)
+            end   
+        end      
+        --
+    else
+        items["propnode"..key_Ex]:setVisible(false)
+    end
+
+    --
+    ui.setLabelString(items["buttontext"..key_Ex],nil,18)
+
+
+    items["button"..key_Ex]:setTouchPriority(-102)
+    items["button"..key_Ex]:addHandleOfControlEvent(function()
+        if not self.isscrolltouched then return end
+        if GameScene.layers["activity"].module.isContentScroll then  return end
+        gameTouch:clickprofbytime(1)
+        --
+        if self.rewardData[tostring(data.id)] and self.rewardData[tostring(data.id)] < 0 then           
+            runGamePrompt({msg = gameConfig.strings:string_common("activity_fashion",2)})
+        else    
+            if (data.limit and data.limit > 0) and ((data.limit-(self.rewardData[tostring(data.id)] or 0)) < exchangeNum) then
+                exchangeNum = data.limit-(self.rewardData[tostring(data.id)] or 0)
+            end
+            if (data.limit and data.limit > 0) and ((data.limit-(self.rewardData[tostring(data.id)] or 0)) <= 0) then
+                runGamePrompt({msg = "兑换次数不足"})
+            else
+                if exchangeNum then -- > 5 then
+                    local cb = function( num )
+                        UIRequest({type = 3863, pos = data.id,num = num})
+                    end
+                    ui.exchangeMore(cb,exchangeNum)
+                else
+                    UIRequest({type = 3863, pos = data.id,num = 1})
+                end    
+            end
+        end
+
+    end, CCControlEventTouchUpInside)
+
+    if self.rewardData[tostring(data.id)] and self.rewardData[tostring(data.id)] < 0 then 
+        ui.addGray("CCControlButton",items["button"..key_Ex])
+    elseif (data.limit and data.limit > 0) and ((data.limit-(self.rewardData[tostring(data.id)] or 0)) <= 0) then
+        ui.addGray("CCControlButton",items["button"..key_Ex])
+    else
+        ui.removeGray("CCControlButton",items["button"..key_Ex])
+    end
+
+end
+
+
+
+function gamblingshop.clear(self)
+    self.show = false
+
+    gameTouch:UnrigistFunc("begin","gamblingshop")
+    gameTouch:UnrigistFunc("end","gamblingshop")
+
+    self.costid = 1021
+
+    self.rewards = {}
+    self.rewardData = {}
+    self.myData = {}
+
+    self.rewardListTableView = nil
+
+    if self.rootNode then
+        self.rootNode:removeAllChildrenWithCleanup(true)
+        self.rootNode:removeFromParentAndCleanup(true)
+        self.rootNode = nil
+        self.rootItems = nil
+    end
+
+end
+
+
+return gamblingshop
