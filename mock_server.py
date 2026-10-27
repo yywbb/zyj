@@ -8,8 +8,15 @@
    - 玩家选择的初始武将 (Opcode 202) -> 实时记录武将 ID
    - 玩家推进引导步骤 (Opcode 201) -> 实时更新 guide.step
 3. 断点续玩支持: 若中途退出，下次登录根据玩家实际游玩进度平滑继续，绝不漏步也绝不强关。
-4. 唯有当新手引导真正全部完成时，才标记 status = 2。
-5. 命令行重置: `python3 mock_server.py --reset` 清空存档从 0 开始。
+4. 引导状态严格对齐客户端 (guideControl.lua / guidequery_pb.lua):
+   - status = 1 -> 该段引导进行中, 客户端从 step+1 恢复
+   - status = 2 -> 该段已完成
+   - sections 为空 -> 全新号, 客户端从头播开场剧情
+   - 完成判定依据 configs_sec5.zip 里 guide_step.json 的真实步数 (Section 1 = 83 步),
+     不再写死阈值, 避免客户端判定"无引导"而静默跳主城。
+5. 命令行:
+   - `python3 mock_server.py --reset`        清空整个存档, 从 0 开始
+   - `python3 mock_server.py --reset-guide`  只清引导进度(保留角色名), 可重播新手引导
 """
 
 import functools
@@ -23,11 +30,35 @@ import sys
 import subprocess
 import threading
 import time
+import zipfile
 
 PORT = 14600
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RECORD_PATH = os.path.join(BASE_DIR, "recorded_frames.json")
 SAVE_PATH = os.path.join(BASE_DIR, "role_save.json")
+CONFIG_ZIP = os.path.join(BASE_DIR, "configs_sec5.zip")
+
+# ==================== 0. 真实引导配置 ====================
+# 客户端 guideControl.lua 完全依据 guide_step.json / guide_section.json 推进引导,
+# 服务端不能再拍脑袋定"第几步算完成", 必须按真实配置判定。
+# 语义 (见 guideControl.lua 的 _guide.Init):
+#   status == 1 -> 该 Section 引导进行中, 客户端从 step+1 恢复
+#   status == 2 -> 该 Section 已完成
+#   status == 0 -> 客户端不认, 等于"没有引导在跑", 会直接跳主城 (历史 Bug 根因)
+
+def load_guide_step_counts():
+    counts = {}
+    try:
+        with zipfile.ZipFile(CONFIG_ZIP) as z:
+            step_cfg = json.loads(z.read("5/guide_step.json").decode("utf-8"))
+            for sec, steps in step_cfg.items():
+                counts[int(sec)] = len(steps)
+        print_flush(f"[*] 引导配置就绪: 共 {len(counts)} 个 Section, Section 1 共 {counts.get(1, 0)} 步")
+    except Exception as e:
+        print_flush(f"[!] 读取引导配置失败 ({e})，完成判定将退化为仅依赖客户端上报")
+    return counts
+
+GUIDE_STEP_COUNTS = load_guide_step_counts()
 
 # ==================== 1. 渐进式存档管理 ====================
 
@@ -40,21 +71,68 @@ def get_default_save():
         "gold": 0,
         "silver": 0,
         "energy": 50,
-        "guide": {
-            "section": 1,
-            "status": 0,    # 0 = 引导进行中，必须正常跑流程；2 = 全部完成
-            "step": 0       # 0 = 从开场漫画第一幕开始
-        },
+        # sections: { "<section号>": {"status": 1|2, "step": 最后完成的步数} }
+        # 空字典 = 全新号, 客户端会从头播开场剧情
+        "guide": {"sections": {}},
         "created_at": time.time(),
         "last_login": time.time()
     }
+
+def normalize_sections(sections):
+    """按真实配置纠正状态: 步数已达上限 -> 2(已完成); 否则只要起步就是 1(进行中)。"""
+    fixed = {}
+    for sec, st in sections.items():
+        try:
+            sec_i = int(sec)
+        except Exception:
+            continue
+        step = int(st.get("step", 0) or 0)
+        status = int(st.get("status", 0) or 0)
+        total = GUIDE_STEP_COUNTS.get(sec_i, 0)
+        if step <= 0 and not st.get("steps"):
+            continue
+        # 保留客户端上报过的完整步骤轨迹 (用于排障; 200 应答只回传最后一步)
+        history = st.get("steps") or []
+        if isinstance(history, list):
+            history = sorted({int(x) for x in history if str(x).isdigit()})
+            if step > 0 and step not in history:
+                history.append(step)
+                history.sort()
+        else:
+            history = [step] if step > 0 else []
+        # 对齐官方抓包: 200 应答里的 step = 客户端"最后上报的那一步"
+        # (官方样例 0a06080110021851 -> section=1, status=2, step=81)
+        # redo==0 的步骤客户端不上报 (section 1 里是 78/79/80), 所以轨迹跳号是正常的
+        if total and step >= total:
+            status = 2
+        elif status != 2:
+            status = 1
+        fixed[str(sec_i)] = {"status": status, "step": step, "steps": history}
+    return fixed
+
+def migrate_guide(save):
+    """兼容旧存档: 旧结构是 {section,status,step}, 且 status 只会是 0/2。"""
+    g = save.get("guide")
+    if not isinstance(g, dict):
+        save["guide"] = {"sections": {}}
+        return save
+    if "sections" not in g:
+        sec = int(g.get("section", 1) or 1)
+        step = int(g.get("step", 0) or 0)
+        sections = {}
+        if step > 0:
+            # 旧版本用 0 表示"进行中", 客户端不认, 这里纠正为 1
+            sections[str(sec)] = {"status": int(g.get("status", 0) or 0), "step": step}
+        save["guide"] = {"sections": sections}
+    save["guide"]["sections"] = normalize_sections(save["guide"].get("sections", {}))
+    return save
 
 def load_save():
     if os.path.exists(SAVE_PATH):
         try:
             with open(SAVE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data
+                return migrate_guide(data)
         except Exception as e:
             print_flush(f"[!] 读取存档失败 ({e})，使用默认空存档")
     return get_default_save()
@@ -64,8 +142,7 @@ def save_role(save_data):
         save_data["last_login"] = time.time()
         with open(SAVE_PATH, "w", encoding="utf-8") as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
-        step_str = f"Section {save_data.get('guide', {}).get('section', 1)} Step {save_data.get('guide', {}).get('step', 0)}"
-        print_flush(f"[✓] 进度实时落盘: 角色【{save_data.get('role_name', '未起名')}】 (Lv.{save_data.get('level', 1)}, 引导: {step_str})")
+        print_flush(f"[✓] 进度实时落盘: 角色【{save_data.get('role_name', '未起名')}】 (Lv.{save_data.get('level', 1)}, 引导: {describe_guide(get_guide_sections(save_data))})")
     except Exception as e:
         print_flush(f"[!] 保存存档失败: {e}")
 
@@ -122,20 +199,48 @@ def get_comb_ids(raw):
             break
     return tuple(sorted(ids))
 
-def build_guide_query_pb(section, status, step):
-    sec = bytearray()
-    sec.extend(encode_varint((1 << 3) | 0))
-    sec.extend(encode_varint(section))
-    sec.extend(encode_varint((2 << 3) | 0))
-    sec.extend(encode_varint(status))
-    sec.extend(encode_varint((3 << 3) | 0))
-    sec.extend(encode_varint(step))
-    
+def encode_guide_section(sec_i, status, step):
+    """GuideSection { 1:section, 2:status, 3:step }"""
+    sub = bytearray()
+    sub.extend(encode_varint((1 << 3) | 0))
+    sub.extend(encode_varint(sec_i))
+    sub.extend(encode_varint((2 << 3) | 0))
+    sub.extend(encode_varint(status))
+    sub.extend(encode_varint((3 << 3) | 0))
+    sub.extend(encode_varint(step))
+    return bytes(sub)
+
+def build_guide_query_pb(sections):
+    """GuideQuery { repeated GuideSection sections = 1; }
+    sections: { "<段号>": {"status":1|2, "step":n} }"""
     gq = bytearray()
-    gq.extend(encode_varint((1 << 3) | 2))
-    gq.extend(encode_varint(len(sec)))
-    gq.extend(sec)
+    for sec in sorted(sections.keys(), key=lambda x: int(x)):
+        st = sections[sec]
+        sub = encode_guide_section(int(sec), int(st.get("status", 0)), int(st.get("step", 0)))
+        gq.extend(encode_varint((1 << 3) | 2))
+        gq.extend(encode_varint(len(sub)))
+        gq.extend(sub)
     return bytes(gq)
+
+def describe_guide(sections):
+    """生成人可读的引导进度描述。"""
+    if not sections:
+        return "全新号 (未开始引导)"
+    parts = []
+    for sec in sorted(sections.keys(), key=lambda x: int(x)):
+        st = sections[sec]
+        total = GUIDE_STEP_COUNTS.get(int(sec), 0)
+        tag = "已完成" if st.get("status") == 2 else "进行中"
+        hist = st.get("steps") or []
+        extra = f" 已记录{len(hist)}步" if hist else ""
+        parts.append(f"S{sec} {tag} step {st.get('step')}/{total or '?'}{extra}")
+    return ", ".join(parts)
+
+def get_guide_sections(save):
+    g = save.get("guide")
+    if not isinstance(g, dict):
+        return {}
+    return normalize_sections(g.get("sections", {}))
 
 def parse_set_name(body):
     try:
@@ -177,6 +282,121 @@ def parse_guide_excute(body):
         pass
     return 1, 1
 
+# ---- 角色状态持久化相关 (客户端通过 999898 上报, 服务端在 1001 应答里回填) ----
+
+# role_pb.Role 的字段号: id=1 gender=2 name=3 vip=4 level=5 exp=6 nextexp=7
+#                        coin=8 gold=9 stamina=10 maxstamina=11 energy=12
+#                        maxenergy=13 power=14
+ROLE_FIELD_MAP = {
+    "level": 5,
+    "exp": 6,
+    "coin": 8,
+    "gold": 9,
+    "power": 14,
+}
+
+def parse_ids_pb(body):
+    """解析 ids_pb.Ids (repeated int32, field 1, varint)"""
+    out = []
+    pos = 0
+    while pos < len(body):
+        try:
+            tag, pos = parse_varint(body, pos)
+        except Exception:
+            break
+        fn = tag >> 3
+        wt = tag & 7
+        if wt == 0:
+            v, pos = parse_varint(body, pos)
+            if fn == 1:
+                out.append(v)
+        elif wt == 2:
+            ln, pos = parse_varint(body, pos)
+            pos += ln
+        elif wt == 5:
+            pos += 4
+        elif wt == 1:
+            pos += 8
+        else:
+            break
+    return out
+
+def pb_set_varint(body, field, value):
+    """把顶层 varint 字段 field 设为 value；字段不存在则追加。其它字段原样保留。"""
+    out = bytearray()
+    pos = 0
+    found = False
+    while pos < len(body):
+        start = pos
+        try:
+            tag, pos = parse_varint(body, pos)
+        except Exception:
+            out.extend(body[start:])
+            break
+        fn = tag >> 3
+        wt = tag & 7
+        if wt == 0:
+            _, pos = parse_varint(body, pos)
+            if fn == field:
+                out.extend(encode_varint((field << 3) | 0))
+                out.extend(encode_varint(value))
+                found = True
+            else:
+                out.extend(body[start:pos])
+        elif wt == 2:
+            ln, pos = parse_varint(body, pos)
+            pos += ln
+            out.extend(body[start:pos])
+        elif wt == 5:
+            pos += 4
+            out.extend(body[start:pos])
+        elif wt == 1:
+            pos += 8
+            out.extend(body[start:pos])
+        else:
+            out.extend(body[start:])
+            break
+    if not found:
+        out.extend(encode_varint((field << 3) | 0))
+        out.extend(encode_varint(value))
+    return bytes(out)
+
+def pb_get_varint(body, field):
+    """读取顶层 varint 字段的值，不存在返回 None。"""
+    pos = 0
+    while pos < len(body):
+        try:
+            tag, pos = parse_varint(body, pos)
+        except Exception:
+            return None
+        fn = tag >> 3
+        wt = tag & 7
+        if wt == 0:
+            v, pos = parse_varint(body, pos)
+            if fn == field:
+                return v
+        elif wt == 2:
+            ln, pos = parse_varint(body, pos)
+            pos += ln
+        elif wt == 5:
+            pos += 4
+        elif wt == 1:
+            pos += 8
+        else:
+            return None
+    return None
+
+def apply_role_state(body, save):
+    """把存档里的角色状态回填进 Role 消息，避免回放录制数据时把等级/货币冲掉。"""
+    st = save.get("role_state")
+    if not st:
+        return body
+    for k, fn in ROLE_FIELD_MAP.items():
+        v = st.get(k)
+        if isinstance(v, int) and v > 0:
+            body = pb_set_varint(body, fn, v)
+    return body
+
 # ==================== 3. 封包与路由构建 ====================
 
 def pack_frame(opcode, seq, payload_bytes):
@@ -206,7 +426,20 @@ def build_routing_tables(frames):
             while j < len(frames) and not frames[j]["c2s"]:
                 resps.append(frames[j])
                 j += 1
-            
+
+            # 关键净化：官方通信是严格一问一答（录制里 167 条请求全部满足
+            # "首条应答 opcode == 请求 opcode"，且无一问多答）。
+            # 录制时夹杂的服务端主动推送（seq=0 的 999/3501/5207/1027/205/1024/111 等）
+            # 会被上面的连续帧扫描误并进应答组。若不剔除，客户端会收到不该收的推送，
+            # 触发错误的 UIUpdate 并打断流程（典型现象：引导卡在 step 24）。
+            resps = [r for r in resps if r["opcode"] == op]
+
+            # 只收录非空应答组：空组会让轮询命中"录制缺失"分支而补发空包，
+            # 客户端因此拿不到真实数据（例如 2000 的 1113B 应答）。
+            if not resps:
+                i = j
+                continue
+
             if op == 999900:
                 sig = get_comb_ids(raw)
                 if sig not in comb_routes:
@@ -226,21 +459,40 @@ def build_routing_tables(frames):
             master_comb_packets = resps_list[0]
             break
 
-    return opcode_routes, comb_routes, master_comb_packets
+    # 按 seq 精确配对（录制帧里每条都带 seq）。
+    # 官方通信是严格一问一答：应答 opcode 恒等于请求 opcode，且 seq 与请求一致。
+    # 而"请求之后紧跟的连续帧"这种分组会把服务端主动推送（seq=0 的 999/3501/5207/111 等）
+    # 误并进应答组，导致客户端收到不该收的数据、流程被打断。
+    # 这里以 (seq, opcode) 双重校验为准，只收录 opcode 与请求一致、且 seq 非 0 的应答。
+    resp_by_seq = {}
+    req_op_by_seq = {}
+    for f in frames:
+        if f["c2s"]:
+            req_op_by_seq[f["seq"]] = f["opcode"]
+        else:
+            resp_by_seq.setdefault(f["seq"], []).append(f)
+
+    # 双重校验：seq 必须对应一个真实请求，且应答 opcode 必须等于该请求的 opcode
+    verified = {}
+    for seq, rs in resp_by_seq.items():
+        if seq in req_op_by_seq and rs[0]["opcode"] == req_op_by_seq[seq]:
+            verified[seq] = rs
+    print_flush(f"[*] seq 精确路由就绪: {len(verified)} 个请求可获得逐字节还原的官方应答")
+    return opcode_routes, comb_routes, master_comb_packets, verified
 
 # ==================== 4. 会话与真实交互推进 ====================
 
-def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets):
+def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets, resp_by_seq):
     print_flush(f"\n[+] 新客户端连入: {addr}")
     save = load_save()
     has_role = save.get("has_role", False)
-    guide_status = save.get("guide", {}).get("status", 0)
-    guide_step = save.get("guide", {}).get("step", 0)
-    
-    if guide_status == 2:
-        print_flush(f"[★] 状态: 玩家【{save.get('role_name', '主角')}】新手引导已全部通关，直接进入主城！")
-    elif guide_step > 0:
-        print_flush(f"[★] 状态: 玩家【{save.get('role_name', '未命名')}】断点恢复 (进行到 Section {save.get('guide', {}).get('section', 1)}, Step {guide_step})")
+    sections = get_guide_sections(save)
+    in_progress = [s for s in sections.values() if s.get("status") == 1]
+
+    if sections and not in_progress:
+        print_flush(f"[★] 状态: 玩家【{save.get('role_name', '主角')}】引导段均已完结，直接进入主城！")
+    elif in_progress:
+        print_flush(f"[★] 状态: 玩家【{save.get('role_name', '未命名')}】断点续玩 -> {describe_guide(sections)}")
     else:
         print_flush(f"[★] 状态: 全新玩家连入，正常跑完整新手流程 (剧情动画 -> 起名 -> 选将 -> 第一战)！")
 
@@ -278,22 +530,19 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets):
                 
                 # ----------------- A. Opcode 200 (引导状态查询) -----------------
                 if opcode == 200:
-                    # 只有在引导真正完成 (status=2) 或有明确断点进度时，才下发 PB；否则返回空让客户端正常播漫画
-                    if guide_status == 2:
-                        pb = build_guide_query_pb(1, 2, guide_step if guide_step else 81)
-                        conn.sendall(pack_frame(200, seq, pb))
-                        print_flush(f"  └── [S->C] 应答 Opcode 200: 引导已完成 (Status 2)")
-                        continue
-                    elif guide_step > 0:
-                        pb = build_guide_query_pb(save.get("guide", {}).get("section", 1), 0, guide_step)
-                        conn.sendall(pack_frame(200, seq, pb))
-                        print_flush(f"  └── [S->C] 应答 Opcode 200: 断点恢复至 Step {guide_step}")
-                        continue
-                    else:
-                        # 全新号: 返回空，客户端正常调用 LoginScene:enterToGame() 播放剧情与起名
+                    sections = get_guide_sections(save)
+                    if not sections:
+                        # 全新号: 返回空 sections，客户端 next(cache.guide)==nil，
+                        # 走 LoginScene:enterToGame() 完整播开场剧情、起名、选将
                         conn.sendall(pack_frame(200, seq, b""))
-                        print_flush(f"  └── [S->C] 应答 Opcode 200: 新角色初始状态，开启完整开场流程！")
+                        print_flush(f"  └── [S->C] 应答 Opcode 200: 空引导表 (全新号)，开启完整开场流程！")
                         continue
+                    # 下发真实结构: repeated GuideSection{section,status,step}
+                    # 关键点: 进行中的段必须是 status=1，否则客户端判定"无引导"直接跳主城
+                    pb = build_guide_query_pb(sections)
+                    conn.sendall(pack_frame(200, seq, pb))
+                    print_flush(f"  └── [S->C] 应答 Opcode 200: {describe_guide(sections)} | hex={pb.hex()}")
+                    continue
                 
                 # ----------------- B. Opcode 101 (玩家确定起名) -----------------
                 if opcode == 101:
@@ -309,22 +558,98 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets):
                 # ----------------- C. Opcode 201 (引导步数推进) -----------------
                 if opcode == 201:
                     sec_v, step_v = parse_guide_excute(body)
-                    guide_step = step_v
-                    if "guide" not in save:
-                        save["guide"] = {}
-                    save["guide"]["section"] = sec_v
-                    save["guide"]["step"] = step_v
+                    print_flush(f"  [201] 原始载荷 hex={body.hex()} -> section={sec_v}, step={step_v}")
+                    sections = get_guide_sections(save)
                     
-                    # 引导推进到第一章末尾 (例如 Step >= 80) 时才标记 status = 2
-                    if step_v >= 80:
-                        save["guide"]["status"] = 2
-                        guide_status = 2
-                    
+                    # 完成判定依据真实配置: 客户端 CompleteSection 会上报该段的最后一步
+                    # (Section 1 共 83 步)，达到即标记 status=2，否则一律 status=1
+                    total = GUIDE_STEP_COUNTS.get(sec_v, 0)
+                    done = bool(total and step_v >= total)
+                    # 逐步记录: 保留该段上报过的完整步骤轨迹
+                    rec = sections.get(str(sec_v), {})
+                    history = set(rec.get("steps") or [])
+                    history.add(step_v)
+                    sections[str(sec_v)] = {
+                        "status": 2 if done else 1,
+                        "step": step_v,
+                        "steps": sorted(history),
+                    }
+                    save["guide"] = {"sections": sections}
+
                     save_role(save)
                     conn.sendall(pack_frame(201, seq, b"\x08\x01"))
-                    print_flush(f"  └── [S->C] 应答 Opcode 201: 引导步数推进至 (Section {sec_v}, Step {step_v})")
+                    tag = "已完结" if done else "进行中"
+                    print_flush(f"  └── [S->C] 应答 Opcode 201: Section {sec_v} Step {step_v}/{total or '?'} [{tag}] 已记录 {len(history)} 步")
                     continue
                 
+                # ---------- C2. Opcode 999898 (客户端角色状态上报, 本地化扩展协议) ----------
+                if opcode == 999898:
+                    ids = parse_ids_pb(body)
+                    if len(ids) >= 5:
+                        prev = save.get("role_state") or {}
+                        # 关键: 重连时 Comb 全量包会先把客户端等级冲回录制值(1)，
+                        # 随后客户端上报的就是被污染的值。因此这里一律取历史最大值，
+                        # 保证升级进度只增不减。
+                        def _mx(key, val):
+                            old = prev.get(key)
+                            return max(old, val) if isinstance(old, int) else val
+                        save["role_state"] = {
+                            "level": _mx("level", ids[0]),
+                            "exp":   _mx("exp", ids[1]),
+                            "coin":  _mx("coin", ids[2]),
+                            "gold":  _mx("gold", ids[3]),
+                            "power": _mx("power", ids[4]),
+                        }
+                        save["level"] = save["role_state"]["level"]
+                        save["silver"] = save["role_state"]["coin"]
+                        save["gold"] = save["role_state"]["gold"]
+                        save_role(save)
+                        st = save["role_state"]
+                        changed = "" if prev.get("level") == st["level"] else f" (等级 {prev.get('level', '?')} -> {st['level']})"
+                        print_flush(f"  └── [S->C] 已持久化角色状态: Lv.{st['level']} 银币={st['coin']} 元宝={st['gold']} 战力={st['power']}{changed}")
+                    conn.sendall(pack_frame(999898, seq, b"\x08\x01"))
+                    continue
+
+                # ---------- C3. seq 精确回放（优先，逐字节还原官方应答） ----------
+                # 录制帧自带 seq。当客户端 seq 与录制对齐时，直接按 (seq, opcode) 精确回放，
+                # 得到与官方完全一致的应答（包括 2000 那 1113B 的真实数据）。
+                hit = resp_by_seq.get(seq)
+                if hit and hit[0]["opcode"] == opcode:
+                    if opcode == 999900:
+                        sig = get_comb_ids(body)
+                        print_flush(f"  [*] Comb 签名 IDs: {sig[:8]}{'...' if len(sig) > 8 else ''} (共 {len(sig)} 项)")
+                        if 202 in sig:
+                            print_flush(f"[★] 玩家已确认选择初始武将！")
+                            save["has_role"] = True
+                            save_role(save)
+                    for rf in hit:
+                        resp_op = rf["opcode"]
+                        resp_body = bytes.fromhex(rf["hex"])
+                        if resp_op == 1001:
+                            resp_body = apply_role_state(resp_body, save)
+                            save["role_snapshot"] = resp_body.hex()
+                            lv = pb_get_varint(resp_body, 5)
+                            if lv:
+                                save["level"] = lv
+                            coin = pb_get_varint(resp_body, 8)
+                            gold = pb_get_varint(resp_body, 9)
+                            if coin is not None: save["silver"] = coin
+                            if gold is not None: save["gold"] = gold
+                            save_role(save)
+                        conn.sendall(pack_frame(resp_op, seq, resp_body))
+                        print_flush(f"  └── [S->C] [seq精确] Opcode: {resp_op:6d}, Seq: {seq:3d}, Len: {len(resp_body):4d} B")
+                    # 主城全量包之后补发角色快照（重连时客户端不会主动请求 1001）
+                    if opcode == 999900:
+                        sig = get_comb_ids(body)
+                        if (1001 in sig and len(sig) >= 20) or (1002 in sig and len(sig) >= 20):
+                            snap = save.get("role_snapshot")
+                            if snap:
+                                sbody = bytes.fromhex(snap)
+                                conn.sendall(pack_frame(1001, 0, sbody))
+                                print_flush(f"  └── [S->C] [重连补发角色] Opcode:  1001, Seq:   0, Len: {len(sbody):4d} B "
+                                            f"(Lv.{pb_get_varint(sbody, 5)})")
+                    continue
+
                 # ----------------- D. Opcode 999900 (Comb 智能复合路由) -----------------
                 if opcode == 999900:
                     sig = get_comb_ids(body)
@@ -345,6 +670,17 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets):
                             pkt = pack_frame(resp_op, send_seq, resp_body)
                             conn.sendall(pkt)
                             print_flush(f"  └── [S->C] [初始化全量包] Opcode: {resp_op:6d}, Seq: {send_seq:3d}, Len: {len(resp_body):4d} B")
+
+                        # 主城全量包携带的是"录制当时"的角色数据(永远是 Lv.1)，
+                        # 而重连后客户端不再主动请求 1001，等级/银币就会回退。
+                        # 官方服务器下发的是账号当前真实数据，这里按官方协议
+                        # 主动补推一次上次下发过的角色快照(seq=0 表示服务端推送)。
+                        snap = save.get("role_snapshot")
+                        if snap:
+                            sbody = bytes.fromhex(snap)
+                            conn.sendall(pack_frame(1001, 0, sbody))
+                            print_flush(f"  └── [S->C] [重连补发角色] Opcode:  1001, Seq:   0, Len: {len(sbody):4d} B "
+                                        f"(Lv.{pb_get_varint(sbody, 5)} 银币={pb_get_varint(sbody, 8)} 元宝={pb_get_varint(sbody, 9)})")
                         continue
                     
                     # 3. 按签名精确匹配其他业务 (主城模块、副本战斗等)
@@ -377,14 +713,38 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets):
                     continue
                 
                 if candidates:
-                    chosen_resps = candidates[(cnt - 1) % len(candidates)]
+                    # 按请求顺序依次取应答组。注意不能用 (cnt-1)：cnt=0 时 Python
+                    # 负数取模会绕到最后一组（导致第一次 1001 就返回录制末尾的 Lv.6）。
+                    chosen_resps = candidates[cnt % len(candidates)]
+                    has_own_resp = False
                     for rf in chosen_resps:
                         resp_op = rf["opcode"]
                         resp_body = bytes.fromhex(rf["hex"])
+                        # 角色信息应答: 用客户端上报过的真实状态覆盖录制时的旧值
+                        if resp_op == 1001:
+                            resp_body = apply_role_state(resp_body, save)
+                            # 记录本次下发的角色快照，供会话重连后补发
+                            save["role_snapshot"] = resp_body.hex()
+                            lv = pb_get_varint(resp_body, 5)
+                            if lv:
+                                save["level"] = lv
+                            coin = pb_get_varint(resp_body, 8)
+                            gold = pb_get_varint(resp_body, 9)
+                            if coin is not None: save["silver"] = coin
+                            if gold is not None: save["gold"] = gold
+                            save_role(save)
                         send_seq = seq if resp_op == opcode else 0
                         pkt = pack_frame(resp_op, send_seq, resp_body)
                         conn.sendall(pkt)
+                        if resp_op == opcode:
+                            has_own_resp = True
                         print_flush(f"  └── [S->C] 应答 Opcode: {resp_op:6d} (0x{resp_op:04x}), Seq: {send_seq:3d}, Len: {len(resp_body):3d} B")
+                    # 关键兜底: 录制时服务端主动推送帧(如 999 globalparam / 5207 等)常被误当成
+                    # 上一个请求的应答, 导致该 opcode 自身的应答缺失。客户端会一直等待这个应答,
+                    # Loading_Ultimate 的全屏触摸遮罩因此永不销毁 -> 所有点击被吞 -> 引导卡死。
+                    if not has_own_resp:
+                        conn.sendall(pack_frame(opcode, seq, b""))
+                        print_flush(f"  └── [S->C] 补发自应答 Opcode: {opcode:6d} (0x{opcode:04x}), Seq: {seq:3d}, Len:   0 B (录制缺失, 防遮罩残留)")
                 else:
                     print_flush(f"  [!] 未匹配到历史应答 Opcode: {opcode}，返回安全空应答")
                     conn.sendall(pack_frame(opcode, seq, b""))
@@ -411,10 +771,20 @@ def main():
         if os.path.exists(SAVE_PATH):
             os.remove(SAVE_PATH)
             print_flush("[✓] 已成功清空角色存档 role_save.json，重新启动将进入全新号完整新手流程。")
+
+    if "--reset-guide" in sys.argv:
+        if os.path.exists(SAVE_PATH):
+            cur = load_save()
+            cur["guide"] = {"sections": {}}
+            with open(SAVE_PATH, "w", encoding="utf-8") as f:
+                json.dump(cur, f, ensure_ascii=False, indent=2)
+            print_flush("[✓] 已清空引导进度（保留角色信息），下次登录将从开场剧情重播新手引导。")
+        else:
+            print_flush("[!] 未找到存档，无需重置引导。")
     
     setup_adb_reverse()
     frames = load_recordings()
-    opcode_routes, comb_routes, master_comb_packets = build_routing_tables(frames)
+    opcode_routes, comb_routes, master_comb_packets, resp_by_seq = build_routing_tables(frames)
     print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个独立 Opcode, {len(comb_routes)} 个 Comb 业务复合签名, {len(master_comb_packets)} 个主城初始化子帧")
     
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -426,18 +796,13 @@ def main():
     print_flush(f"\n=======================================================")
     print_flush(f"  《作妖记》本地 Mock 模拟服务端 (全流程引导与持久化版) 已启动")
     print_flush(f"  监听地址: 0.0.0.0:{PORT}")
-    if cur_save.get("has_role") and cur_save.get("guide", {}).get("status") == 2:
-        print_flush(f"  当前存档: 玩家【{cur_save.get('role_name')}】 (Lv.{cur_save.get('level', 1)}) [引导已通关]")
-    elif cur_save.get("guide", {}).get("step", 0) > 0:
-        print_flush(f"  当前存档: 玩家【{cur_save.get('role_name', '未命名')}】 [进行至 Step {cur_save.get('guide', {}).get('step')}]")
-    else:
-        print_flush(f"  当前存档: 全新初始状态 (完整走完开场剧情、起名、选将与新手战斗！)")
+    print_flush(f"  当前存档: 玩家【{cur_save.get('role_name') or '未创建'}】 (Lv.{cur_save.get('level', 1)}) -> {describe_guide(get_guide_sections(cur_save))}")
     print_flush(f"=======================================================\n")
     
     try:
         while True:
             conn, addr = server.accept()
-            t = threading.Thread(target=handle_client, args=(conn, addr, opcode_routes, comb_routes, master_comb_packets), daemon=True)
+            t = threading.Thread(target=handle_client, args=(conn, addr, opcode_routes, comb_routes, master_comb_packets, resp_by_seq), daemon=True)
             t.start()
     except KeyboardInterrupt:
         print_flush("\n[*] 服务端已停止")

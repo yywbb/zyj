@@ -65,7 +65,7 @@ def xxtea_decrypt(data, key):
         sum_val = (sum_val - DELTA) & 0xFFFFFFFF
     return struct.pack(f"<{n}I", *v)
 
-SRC_APK = "/home/linux/games/zyj/z7_7_4.apk"
+SRC_APK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "z7_7_4.apk")
 
 def read_script(rel):
     """从原版 APK 解密脚本, 并按末尾长度字截取真实原文(磁盘上的 scripts_decrypted/*.lua 末尾带有填充垃圾, 不能直接使用)。"""
@@ -133,12 +133,46 @@ def patch_config_json(raw_bytes):
     print("  [Config] androidPackageName -> com.ldfs.zyjyg.local, isshowlog -> True, isupdate -> false")
     return json.dumps(cfg, ensure_ascii=False, indent=4).encode("utf-8")
 
+# 引导里"关闭弹窗"类步骤的原始配置是 clickxy1="5000,5000"（热区在屏幕外）+ special="hide"，
+# 设计意图是"隐藏引导层、让玩家自由点击"。
+# 但 guide.setGuideLayerVisible(false) 只把 rootNode 设为不可见，并不解除触摸拦截；
+# 而引导层 touchPriority = -800，恒高于普通窗口的 -200 ~ -500，于是永远先收到触摸，
+# 并把"不在热区内"的点击坐标改写成 (-10000,-10000) 继续下传（swallowsTouches=false），
+# 结果窗口上的按钮永远点不中 -> 引导卡死在该步骤。
+# 修正方式（只改配置数据，不动任何客户端逻辑）：把热区对准该弹窗的"确定"按钮，
+# 引导层就会按正常机制把点击重定向到按钮上，流程可继续推进。
+GUIDE_CLOSE_STEPS = ("24", "41", "50", "53")
+# 反推自 gameConfig: scaleNum=1152/1080, fixH=(topposY-2160)*0.5*scaleNum=36, topposY=2160
+# 该值使引导层重定向落点为设备坐标(580,1710)，即"恭喜获得"弹窗确定按钮中心
+GUIDE_CONFIRM_XY = "544,1329;"
+
+
+def patch_guide_step(raw_bytes):
+    try:
+        data = json.loads(raw_bytes.decode("utf-8"))
+    except Exception:
+        return raw_bytes
+    sec1 = data.get("1")
+    if not isinstance(sec1, dict):
+        return raw_bytes
+    changed = []
+    for k in GUIDE_CLOSE_STEPS:
+        v = sec1.get(k)
+        if isinstance(v, dict) and "5000" in (v.get("clickxy1") or ""):
+            v["clickxy1"] = GUIDE_CONFIRM_XY
+            changed.append(k)
+    if changed:
+        print(f"  [Config] guide_step: 修正关闭类步骤热区 {changed} -> {GUIDE_CONFIRM_XY}")
+        return json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return raw_bytes
+
+
 def patch_game_server_json(raw_bytes):
     servers = json.loads(raw_bytes.decode("utf-8", errors="ignore"))
     for k, s in servers.items():
         s["ip"] = "127.0.0.1"
         s["port"] = 14600
-        s["name"] = "【本地服】开发测试"
+        s["name"] = "忽而今夏"
     print("  [GameServer] Redirected all server targets to 127.0.0.1:14600")
     return json.dumps(servers, ensure_ascii=False, indent=2).encode("utf-8")
 
@@ -160,7 +194,7 @@ def get_patched_lua_scripts():
     t1b = b"function uisdklogin( t )\n    gamedata.sdk:Login()\n    LoginScene:showNode(LoginScene.enterLayerItem.channel_loginnode,true)\nend"
     r1b = b"""function uisdklogin( t )
     print("[LocalMock] \xe7\x9b\xb4\xe6\x8e\xa5\xe5\x88\x86\xe5\x8f\x91\xe6\x9c\xac\xe5\x9c\xb0\xe7\x99\xbb\xe5\xbd\x95\xe6\x80\x81")
-    local local_srv = { id = 1, name = "\xe3\x80\x90\xe6\x9c\xac\xe5\x9c\xb0\xe6\x9c\x8d\xe3\x80\x91\xe5\xbc\x80\xe5\x8f\x91\xe6\xb5\x8b\xe8\xaf\x95", ip = "127.0.0.1", port = 14600, status = "1" }
+    local local_srv = { id = 1, name = "\xe5\xbf\xbd\xe8\x80\x8c\xe4\xbb\x8a\xe5\xa4\x8f", ip = "127.0.0.1", port = 14600, status = "1" }
     local mock_data = {
         type = 3,
         user = "local_dev",
@@ -331,16 +365,137 @@ end"""
     end"""
     assert old_gexec in code
     code = code.replace(old_gexec, new_gexec)
+
     patched["assets/scripts/guideControl.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched guideControl.so (defensive fallback on missing steps)")
 
     return patched
 
+
+def _disabled_patches():
+    """以下补丁已停用 —— 用户要求不改客户端逻辑，改为让服务端忠实复现官方抓包数据。
+    保留在此仅作记录。"""
+    code = read_script("GameRole").decode("utf-8")
+    old_role = """function UIRoleInfoCallBack(uireq)
+    print("请求角色信息1001 接收UI请求")"""
+    new_role = """function UIRoleInfoCallBack(uireq)
+    print("请求角色信息1001 接收UI请求")
+    -- [LocalMock] 先把客户端当前的角色状态上报给 Mock 服务端持久化，
+    -- 否则服务端回放录制数据时会把等级/银币冲回初始值。
+    if gamedata and gamedata.cache and gamedata.cache.role and gamedata.cache.role.level then
+        local _r = gamedata.cache.role
+        UIRequest({type = 999898, level = _r.level or 0, exp = _r.exp or 0,
+                   coin = _r.coin or 0, gold = _r.gold or 0, power = _r.power or 0})
+    end
+    -- [LocalMock] 登录后客户端用的是主城全量包里的旧数据，不会主动拉角色信息，
+    -- 这里强制刷新一次，取回服务端已回填的正确等级/银币。
+    if not _G.__zyj_role_refreshed then
+        _G.__zyj_role_refreshed = true
+        UIRequest({type = 1001, param = "resume"})
+    end"""
+    assert old_role in code, "old_role not found in GameRole"
+    code = code.replace(old_role, new_role)
+
+    # 收到服务端角色数据时，若本地进度更高则保留本地值（服务端回放的是旧录制数据）
+    old_netrole = """function NetRoleInfoCallBack(fd)
+    print("请求角色信息1001 接收服务器返回数据")
+    local result = role_pb.Role()
+    result:ParseFromString(fd.rbuf)"""
+    new_netrole = """function NetRoleInfoCallBack(fd)
+    print("请求角色信息1001 接收服务器返回数据")
+    local result = role_pb.Role()
+    result:ParseFromString(fd.rbuf)
+    -- [LocalMock] 先记录本地已达成进度，稍后取较大值，防止被回放的旧数据冲掉
+    local _oldr = (gamedata and gamedata.cache and gamedata.cache.role) or nil
+    local _ol = (_oldr and _oldr.level) or 0
+    local _oe = (_oldr and _oldr.exp) or 0
+    local _oc = (_oldr and _oldr.coin) or 0
+    local _og = (_oldr and _oldr.gold) or 0"""
+    assert old_netrole in code, "old_netrole not found in GameRole"
+    code = code.replace(old_netrole, new_netrole)
+
+    old_roleafter = """    gamedata:RoleData(result, gamedata.role.uuid)
+    gamedata.ext.RoleDataReceiveTime = gamedata:time()"""
+    new_roleafter = """    gamedata:RoleData(result, gamedata.role.uuid)
+    -- [LocalMock] 以本地已达成进度为准（Mock 服务端回放的是录制时的旧数据）
+    if _oldr and gamedata.cache.role then
+        if _ol > (gamedata.cache.role.level or 0) then gamedata.cache.role.level = _ol end
+        if _oe > (gamedata.cache.role.exp or 0) then gamedata.cache.role.exp = _oe end
+        if _oc > (gamedata.cache.role.coin or 0) then gamedata.cache.role.coin = _oc end
+        if _og > (gamedata.cache.role.gold or 0) then gamedata.cache.role.gold = _og end
+    end
+    gamedata.ext.RoleDataReceiveTime = gamedata:time()"""
+    assert old_roleafter in code, "old_roleafter not found in GameRole"
+    code = code.replace(old_roleafter, new_roleafter)
+
+    code += """
+
+-- [LocalMock] 角色状态上报 (999898)
+function UIRoleStateReportCallBack(uireq)
+    local ids_pb2 = require("ids_pb")
+    local d = ids_pb2.Ids()
+    table.insert(d.ids, uireq.level or 0)
+    table.insert(d.ids, uireq.exp or 0)
+    table.insert(d.ids, uireq.coin or 0)
+    table.insert(d.ids, uireq.gold or 0)
+    table.insert(d.ids, uireq.power or 0)
+    return 1, 999898, d:SerializeToString()
+end
+
+function NetRoleStateReportCallBack(fd)
+    return { type = 999898 }
+end
+"""
+    patched["assets/scripts/GameRole.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched GameRole.so (report role state via 999898)")
+
+    # 14. gameserver.so (注册 999898 的 UI/Net 回调)
+    with io.BytesIO(read_script("gameserver")) as f:
+        d = f.read().replace(b"\r\n", b"\n")
+    # 用延迟查找的包裹函数，避免模块加载顺序导致全局函数尚未定义
+    old_ui = b"game_ui_callback = {"
+    new_ui = (b"game_ui_callback = {\n"
+              b"    [999898] = function(...) return UIRoleStateReportCallBack(...) end,")
+    assert old_ui in d, "game_ui_callback not found"
+    d = d.replace(old_ui, new_ui, 1)
+
+    old_net = b"game_net_callback = {"
+    new_net = (b"game_net_callback = {\n"
+               b"    [999898] = function(...) return NetRoleStateReportCallBack(...) end,")
+    assert old_net in d, "game_net_callback not found"
+    d = d.replace(old_net, new_net, 1)
+    patched["assets/scripts/gameserver.so"] = xxtea_encrypt(d, XXTEA_KEY)
+    print("  [Lua] Patched gameserver.so (registered 999898 role state report)")
+
+    return patched
+
+def find_tool(name):
+    """定位 Android 构建工具: 优先 PATH, 其次 ANDROID_HOME/build-tools/<ver>/"""
+    exe = name + (".bat" if name == "apksigner" else ".exe")
+    for base in os.environ.get("PATH", "").split(os.pathsep):
+        cand = os.path.join(base.strip(), exe)
+        if os.path.exists(cand):
+            return cand
+    android_home = os.environ.get("ANDROID_HOME", r"D:\Dev\Env\android")
+    bt = os.path.join(android_home, "build-tools")
+    if os.path.isdir(bt):
+        for ver in sorted(os.listdir(bt), reverse=True):
+            cand = os.path.join(bt, ver, exe)
+            if os.path.exists(cand):
+                return cand
+    raise FileNotFoundError(f"未找到 {exe}，请安装 Android build-tools 并加入 PATH")
+
+def run_tool(path, args):
+    """执行构建工具（.bat 需要经 cmd /c 启动）"""
+    cmd = ["cmd", "/c", path] + args if path.lower().endswith(".bat") else [path] + args
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
 def main():
-    src_apk = "/home/linux/games/zyj/z7_7_4.apk"
-    unaligned_apk = "/home/linux/games/zyj/zyj_local_unaligned.apk"
-    final_apk = "/home/linux/games/zyj/zyj_local.apk"
-    keystore = "/home/linux/games/zyj/debug.keystore"
+    base = os.path.dirname(os.path.abspath(__file__))
+    src_apk = os.path.join(base, "z7_7_4.apk")
+    unaligned_apk = os.path.join(base, "zyj_local_unaligned.apk")
+    final_apk = os.path.join(base, "zyj_local.apk")
+    keystore = os.path.join(base, "debug.keystore")
 
     print("[1/4] Preparing patched Lua scripts...")
     patched_lua = get_patched_lua_scripts()
@@ -375,7 +530,7 @@ def main():
 
             zout.writestr(item, data)
 
-        sec5_zip_path = "/home/linux/games/zyj/configs_sec5.zip"
+        sec5_zip_path = os.path.join(base, "configs_sec5.zip")
         if os.path.exists(sec5_zip_path):
             print("  [Config] Injecting offline JSON configs into APK assets...")
             with zipfile.ZipFile(sec5_zip_path, "r") as zsec:
@@ -384,6 +539,8 @@ def main():
                     base = os.path.basename(zitem.filename)
                     if base.endswith(".json"):
                         cdata = zsec.read(zitem.filename)
+                        if base == "guide_step.json":
+                            cdata = patch_guide_step(cdata)
                         zout.writestr(f"assets/config/1/{base}", cdata)
                         zout.writestr(f"assets/config/5/{base}", cdata)
                         count += 1
@@ -392,20 +549,22 @@ def main():
     print("[3/4] Running zipalign...")
     if os.path.exists(final_apk):
         os.remove(final_apk)
-    subprocess.run(["zipalign", "-p", "-f", "4", unaligned_apk, final_apk], check=True)
+    run_tool(find_tool("zipalign"), ["-p", "-f", "4", unaligned_apk, final_apk])
     os.remove(unaligned_apk)
 
     print("[4/4] Signing APK with apksigner...")
-    subprocess.run([
-        "apksigner", "sign",
+    run_tool(find_tool("apksigner"), [
+        "sign",
         "--ks", keystore,
         "--ks-pass", "pass:android",
         "--key-pass", "pass:android",
         final_apk
-    ], check=True)
+    ])
 
     # Verify signature
-    res = subprocess.run(["apksigner", "verify", "-v", final_apk], capture_output=True, text=True, check=True)
+    apksigner = find_tool("apksigner")
+    cmd = ["cmd", "/c", apksigner, "verify", final_apk] if apksigner.lower().endswith(".bat") else [apksigner, "verify", final_apk]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
     print("Verification result:\n" + res.stdout)
     print("Build complete! Saved to:", final_apk)
 
