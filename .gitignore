@@ -1,14 +1,13 @@
-# Large binaries / artifacts
+# Large binaries / artifacts (sent separately)
 *.apk
-*.zip
-*.pcap
 *.idsig
 *.log
-debug.keystore
 phone_screen.png
 
-# Recorded frame data
-recorded_frames.json
+# Runtime-generated files
+role_save.json
+
+# Recorded frame data backup
 recorded_frames.json.bak
 
 # Python
