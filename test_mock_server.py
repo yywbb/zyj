@@ -1,16 +1,23 @@
+from contextlib import redirect_stdout
+import io
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import mock_server as server
+from zyj_server import guide, player, protocol, replay
+from zyj_server.session import Session
 
 
 class ReplayConnection:
     def __init__(self, requests, chunk_size):
-        stream = b"".join(server.pack_frame(f["opcode"], f["seq"], bytes.fromhex(f["hex"])) for f in requests)
+        stream = b"".join(protocol.pack_frame(f["opcode"], f["seq"], bytes.fromhex(f["hex"])) for f in requests)
         self.chunks = iter(stream[i:i + chunk_size] for i in range(0, len(stream), chunk_size))
         self.responses = []
         self.closed = False
@@ -32,9 +39,11 @@ class ReplayConnection:
 class ReplayRoutingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        with patch.object(server, "print_flush"):
-            cls.frames = server.load_recordings()
-            cls.tables = server.build_routing_tables(cls.frames)
+        with redirect_stdout(io.StringIO()):
+            cls.step_counts = guide.load_guide_step_counts(server.CONFIG_ZIP)
+            cls.role_config = player.load_role_config(server.CONFIG_ZIP)
+            cls.frames = replay.load_recordings(server.RECORD_PATH)
+            cls.tables = replay.build_routing_tables(cls.frames)
         cls.requests = [f for f in cls.frames if f["c2s"]]
         cls.by_seq = {f["seq"]: f for f in cls.requests}
         cls.recorded = {(f["seq"], f["opcode"]): f for f in cls.frames if not f["c2s"] and f["seq"] != 0}
@@ -43,16 +52,16 @@ class ReplayRoutingTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.save_path = Path(temp.name) / "role_save.json"
-        save_patch = patch.object(server, "SAVE_PATH", str(self.save_path))
-        save_patch.start()
-        self.addCleanup(save_patch.stop)
+
+    def run_client(self, conn):
+        server.handle_client(conn, ("test", 0), self.tables, self.save_path, self.step_counts, self.role_config)
 
     def replay(self, requests, chunk_size=4096):
         conn = ReplayConnection(requests, chunk_size)
-        with patch.object(server, "print_flush") as log:
-            server.handle_client(conn, ("test", 0), *self.tables)
+        with redirect_stdout(io.StringIO()) as log:
+            self.run_client(conn)
         self.assertTrue(conn.closed)
-        errors = [str(call) for call in log.call_args_list if "连接异常" in str(call)]
+        errors = [line for line in log.getvalue().splitlines() if "连接异常" in line]
         self.assertEqual(errors, [])
         return conn.responses
 
@@ -63,14 +72,14 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def assert_replayed_payload(self, opcode, actual, expected):
         if opcode == 999900:
-            actual_messages = server.get_comb_messages(bytes.fromhex(actual))
-            expected_messages = server.get_comb_messages(bytes.fromhex(expected))
+            actual_messages = protocol.get_comb_messages(bytes.fromhex(actual))
+            expected_messages = protocol.get_comb_messages(bytes.fromhex(expected))
             self.assertEqual([mid for mid, _ in actual_messages], [mid for mid, _ in expected_messages])
             for (mid, data), (_, recorded) in zip(actual_messages, expected_messages):
                 self.assert_replayed_payload(mid, data.hex(), recorded.hex())
         elif opcode in (1001, 1054):
-            values = {n: value for n, wire, value in server.iter_pb_fields(bytes.fromhex(actual))}
-            recorded = {n: value for n, wire, value in server.iter_pb_fields(bytes.fromhex(expected))}
+            values = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(actual))}
+            recorded = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(expected))}
             # Role timers/stamina now follow local operations, not captured wall-clock regeneration.
             fields = (1, 3, 5, 6, 7, 8, 9, 11, 12, 13, 14, 21, 26, 27) if opcode == 1001 else range(1, 10)
             for field in fields:
@@ -80,7 +89,7 @@ class ReplayRoutingTests(unittest.TestCase):
                     self.assertEqual(values.get(10), recorded[10])
                 elif 10 in values:
                     # Reconnect replies may now include the last known general instead of relying on client cache.
-                    general = {n: v for n, w, v in server.iter_pb_fields(values[10])}
+                    general = {n: v for n, w, v in protocol.iter_pb_fields(values[10])}
                     self.assertEqual((general[2], general[3]), (values[1], values[2]))
         else:
             self.assertEqual(actual, expected)
@@ -88,8 +97,8 @@ class ReplayRoutingTests(unittest.TestCase):
     def role_data(self, response):
         body = bytes.fromhex(response["hex"])
         if response["opcode"] == 999900:
-            body = next(data for mid, data in server.get_comb_messages(body) if mid == 1001)
-        return {n: value for n, wire, value in server.iter_pb_fields(body)}
+            body = next(data for mid, data in protocol.get_comb_messages(body) if mid == 1001)
+        return {n: value for n, wire, value in protocol.iter_pb_fields(body)}
 
     def expected_group(self, recorded_seq, live_seq=None):
         request = self.by_seq[recorded_seq]
@@ -130,9 +139,9 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_unknown_battle_parameters_do_not_receive_a_different_battle(self):
         body = bytes.fromhex(self.by_seq[61]["hex"])
-        point_two = b"\x08" + server.encode_varint(42101) + b"\x08\x02"
+        point_two = b"\x08" + protocol.encode_varint(42101) + b"\x08\x02"
         self.assertEqual(body.count(point_two), 1)
-        body = body.replace(point_two, b"\x08" + server.encode_varint(42101) + b"\x08\x63")
+        body = body.replace(point_two, b"\x08" + protocol.encode_varint(42101) + b"\x08\x63")
         responses = self.replay([dict(self.by_seq[61], seq=10000, hex=body.hex())])
         self.assertEqual(responses, [{"opcode": 999900, "seq": 10000, "hex": ""}])
         self.assertFalse(self.save_path.exists())
@@ -151,6 +160,30 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assert_recorded_response(responses[0], hints[0]["seq"])
         self.assert_recorded_response(responses[1], hints[1]["seq"], 10000)
 
+    def test_sessions_share_recordings_but_not_replay_counters(self):
+        hints = [f for f in self.requests if f["opcode"] == 1032]
+        conn = ReplayConnection([], 4096)
+        with redirect_stdout(io.StringIO()):
+            first = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            second = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            for session in (first, first, second):
+                for packet in session.handle(1032, 10000, bytes.fromhex(hints[0]["hex"])):
+                    conn.sendall(packet)
+        self.assertEqual(len(conn.responses), 3)
+        for response, hint in zip(conn.responses, (hints[0], hints[1], hints[0])):
+            self.assert_recorded_response(response, hint["seq"], 10000)
+
+    def test_session_uses_explicit_save_path_without_entrypoint_patches(self):
+        other_path = self.save_path.with_name("other_role.json")
+        with redirect_stdout(io.StringIO()):
+            first = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            second = Session(self.tables, other_path, self.step_counts, self.role_config)
+            self.assertEqual(first.handle(201, 1, b"\x08\x01\x10\x03"),
+                             [protocol.pack_frame(201, 1, b"\x08\x01")])
+            self.assertEqual(second.handle(200, 2, b""), [protocol.pack_frame(200, 2, b"")])
+        self.assertEqual(json.loads(self.save_path.read_text())["guide"]["sections"]["1"]["step"], 3)
+        self.assertFalse(other_path.exists())
+
     def test_ordinary_sequence_hit_must_match_request_payload(self):
         self.assertNotEqual(self.by_seq[28]["hex"], self.by_seq[31]["hex"])
         responses = self.replay([dict(self.by_seq[28], seq=10000), dict(self.by_seq[31], seq=28)])
@@ -159,17 +192,17 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_city_init_embeds_saved_role_without_stale_initial_role(self):
         snapshot = self.recorded[(41, 1001)]["hex"]
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["role_snapshot"] = snapshot
         self.save_path.write_text(json.dumps(save))
         responses = self.replay([self.by_seq[12]])
         self.assertEqual(len(responses), 1)
-        role = next(data for mid, data in server.get_comb_messages(bytes.fromhex(responses[0]["hex"])) if mid == 1001)
+        role = next(data for mid, data in protocol.get_comb_messages(bytes.fromhex(responses[0]["hex"])) if mid == 1001)
         self.assertEqual(role.hex(), snapshot)
 
     def test_custom_name_reaches_city_init_and_role_query(self):
         name = "本地玩家".encode("utf-8")
-        body = b"\x0a" + server.encode_varint(len(name)) + name
+        body = b"\x0a" + protocol.encode_varint(len(name)) + name
         responses = self.replay([{"opcode": 101, "seq": 10000, "hex": body.hex()}, self.by_seq[11], self.by_seq[12]])
         self.assertEqual(self.role_data(responses[-1])[3], name)
         responses = self.replay([dict(self.by_seq[41], seq=20000)])
@@ -182,7 +215,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertTrue(saved["has_role"])
 
     def test_zero_role_values_override_recorded_nonzero_values(self):
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["role_snapshot"] = self.recorded[(41, 1001)]["hex"]
         save["role_state"] = {"level": 2, "exp": 0, "coin": 0, "gold": 0, "power": 0}
         self.save_path.write_text(json.dumps(save))
@@ -197,7 +230,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(saved["level"], 2)
         self.assertEqual(saved["silver"], 2960)
         self.assertEqual(saved["gold"], 10)
-        values = {n: v for n, w, v in server.iter_pb_fields(bytes.fromhex(saved["role_snapshot"]))}
+        values = {n: v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(saved["role_snapshot"]))}
         self.assertEqual([values[n] for n in (5, 6, 8, 9, 10)], [2, 0, 2960, 10, 49])
 
     def test_reconnect_role_queries_cannot_change_progress_by_recording_sequence(self):
@@ -207,7 +240,7 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual([self.role_data(response)[n] for n in (5, 8, 9)], [2, 2960, 10])
 
     def test_strengthen_spending_can_reach_zero_and_survive_reconnect(self):
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["role_snapshot"] = self.recorded[(90, 1001)]["hex"]
         save["role_state"] = {"level": 4, "exp": 0, "coin": 11200, "gold": 0}
         self.save_path.write_text(json.dumps(save))
@@ -225,29 +258,57 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(saved["role_state"]["power_all"], 5862)
 
     def test_insufficient_funds_do_not_change_save_or_emit_success(self):
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["role_state"] = {"level": 4, "exp": 0, "coin": 1, "gold": 0}
         original = json.dumps(save)
         self.save_path.write_text(original)
         conn = ReplayConnection([self.by_seq[99]], 4096)
-        with patch.object(server, "print_flush"):
-            server.handle_client(conn, ("test", 0), *self.tables)
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
         self.assertTrue(conn.closed)
         self.assertEqual(conn.responses, [])
         self.assertEqual(self.save_path.read_text(), original)
 
     def test_failed_save_keeps_original_and_emits_no_success(self):
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["role_state"] = {"level": 4, "exp": 0, "coin": 11200, "gold": 0}
         original = json.dumps(save)
         self.save_path.write_text(original)
         conn = ReplayConnection([self.by_seq[99]], 4096)
-        with patch.object(server, "print_flush"), patch.object(server.os, "replace", side_effect=OSError("disk failure")):
-            server.handle_client(conn, ("test", 0), *self.tables)
+        with redirect_stdout(io.StringIO()), patch.object(player.os, "replace", side_effect=OSError("disk failure")):
+            self.run_client(conn)
         self.assertTrue(conn.closed)
         self.assertEqual(conn.responses, [])
         self.assertEqual(self.save_path.read_text(), original)
         self.assertEqual([p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')], ["role_save.json"])
+
+    def test_entire_recorded_group_is_saved_before_first_push(self):
+        conn = ReplayConnection([self.by_seq[36]], 7)
+        sendall = conn.sendall
+
+        def check_saved_before_send(packet):
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual((saved["level"], saved["silver"], saved["gold"]), (2, 2960, 10))
+            self.assertEqual(saved["guide"]["sections"]["1"]["step"], 8)
+            sendall(packet)
+
+        conn.sendall = check_saved_before_send
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertTrue(conn.closed)
+        self.assertEqual(conn.responses, self.expected_group(36))
+
+    def test_live_updates_do_not_acknowledge_failed_saves(self):
+        original = json.dumps(player.get_default_save())
+        self.save_path.write_text(original)
+        for opcode, body in ((101, "0a046e616d65"), (201, "08011003"), (999898, "08010800080008000800")):
+            with self.subTest(opcode=opcode):
+                conn = ReplayConnection([{"opcode": opcode, "seq": 10000, "hex": body}], 7)
+                with redirect_stdout(io.StringIO()), patch.object(player.os, "replace", side_effect=OSError("disk failure")):
+                    self.run_client(conn)
+                self.assertTrue(conn.closed)
+                self.assertEqual(conn.responses, [])
+                self.assertEqual(self.save_path.read_text(), original)
 
     def test_corrupt_save_is_not_silently_replaced(self):
         original = '{"unfinished":'
@@ -256,35 +317,43 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(self.save_path.read_text(), original)
 
     def test_malformed_name_does_not_change_existing_save(self):
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["role_name"] = "已保存的名字"
         original = json.dumps(save)
         self.save_path.write_text(original)
         conn = ReplayConnection([{"opcode": 101, "seq": 10000, "hex": "0a05e69cac"}], 7)
-        with patch.object(server, "print_flush"):
-            server.handle_client(conn, ("test", 0), *self.tables)
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
         self.assertEqual(conn.responses, [])
         self.assertEqual(self.save_path.read_text(), original)
 
     def test_legacy_client_report_preserves_extended_fields_and_zero_balances(self):
         self.replay([self.by_seq[12], self.by_seq[36]])
         values = (2, 0, 0, 0, 0)
-        body = b"".join(b"\x08" + server.encode_varint(value) for value in values)
+        body = b"".join(b"\x08" + protocol.encode_varint(value) for value in values)
         self.replay([{"opcode": 999898, "seq": 10000, "hex": body.hex()}])
         saved = json.loads(self.save_path.read_text())
         self.assertEqual([saved["role_state"][k] for k in ("coin", "gold", "power", "power_all", "stamina")], [0, 0, 0, 0, 49])
 
+    def test_legacy_client_lower_experience_does_not_change_save(self):
+        self.replay([self.by_seq[12], self.by_seq[36]])
+        original = self.save_path.read_text()
+        body = b"".join(b"\x08" + protocol.encode_varint(value) for value in (1, 0, 100, 10, 20))
+        responses = self.replay([{"opcode": 999898, "seq": 10000, "hex": body.hex()}])
+        self.assertEqual(responses, [{"opcode": 999898, "seq": 10000, "hex": "0801"}])
+        self.assertEqual(self.save_path.read_text(), original)
+
     def test_field_replacement_preserves_unknown_fields_and_zero(self):
-        raw = b"\x08\x05\x1a\x03old" + server.encode_pb_field(50, 5, b"1234")
-        updated = server.pb_set_field(raw, 3, 2, "新名字".encode("utf-8"))
-        updated = server.pb_set_varint(updated, 1, 0)
-        self.assertEqual(list(server.iter_pb_fields(updated)), [(1, 0, 0), (3, 2, "新名字".encode("utf-8")), (50, 5, b"1234")])
+        raw = b"\x08\x05\x1a\x03old" + protocol.encode_pb_field(50, 5, b"1234")
+        updated = protocol.pb_set_field(raw, 3, 2, "新名字".encode("utf-8"))
+        updated = protocol.pb_set_varint(updated, 1, 0)
+        self.assertEqual(list(protocol.iter_pb_fields(updated)), [(1, 0, 0), (3, 2, "新名字".encode("utf-8")), (50, 5, b"1234")])
 
     def test_protagonist_growth_is_not_general_level2(self):
         self.replay([self.by_seq[11], self.by_seq[12], self.by_seq[36]])
         saved = json.loads(self.save_path.read_text())
-        values = {n: v for n, w, v in server.iter_pb_fields(bytes.fromhex(saved["protagonist_snapshot"]))}
-        general = {n: v for n, w, v in server.iter_pb_fields(values[10])}
+        values = {n: v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(saved["protagonist_snapshot"]))}
+        general = {n: v for n, w, v in protocol.iter_pb_fields(values[10])}
         self.assertEqual((values[3], general[4]), (1, 0))
 
     def test_first_battle_restores_state_pushes_in_recorded_order(self):
@@ -300,7 +369,7 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_ordinary_exact_and_fallback_restore_state_pushes(self):
         for seq in (133, 10000):
             with self.subTest(seq=seq):
-                save = server.get_default_save()
+                save = player.get_default_save()
                 save["role_snapshot"] = self.recorded[(111, 1001)]["hex"]
                 self.save_path.write_text(json.dumps(save))
                 responses = self.replay([dict(self.by_seq[133], seq=seq)])
@@ -318,9 +387,11 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_state_push_without_matching_reply_is_not_attached_to_request(self):
         push = self.expected_group(36)[1]
         frames = [self.by_seq[36], dict(push, c2s=False), dict(self.recorded[(36, 999900)], seq=999)]
-        with patch.object(server, "print_flush"):
-            tables = server.build_routing_tables(frames)
-        self.assertEqual(tables[1], {})
+        with redirect_stdout(io.StringIO()):
+            self.tables = replay.build_routing_tables(frames)
+        responses = self.replay([dict(self.by_seq[36], seq=10000)])
+        self.assertEqual(responses, [{"opcode": 999900, "seq": 10000, "hex": ""}])
+        self.assertFalse(self.save_path.exists())
 
     def test_combination_guide_progress_is_saved_and_returned_after_reconnect(self):
         self.replay([dict(self.by_seq[36], seq=10000)])
@@ -337,7 +408,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(saved["guide"]["sections"]["1"], {"status": 1, "step": 4, "steps": [3, 4]})
 
     def test_combination_progress_preserves_legacy_save_history(self):
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["guide"] = {"section": 1, "status": 0, "step": 7}
         self.save_path.write_text(json.dumps(save))
         self.replay([self.by_seq[36]])
@@ -345,15 +416,15 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(saved["guide"]["sections"]["1"], {"status": 1, "step": 8, "steps": [7, 8]})
 
     def test_completion_uses_configured_step_count(self):
-        total = server.GUIDE_STEP_COUNTS[1]
+        total = self.step_counts[1]
         for step, status in ((total - 1, 1), (total, 2)):
-            body = b"\x08\x01\x10" + server.encode_varint(step)
+            body = b"\x08\x01\x10" + protocol.encode_varint(step)
             self.replay([{"opcode": 201, "seq": 10000, "hex": body.hex()}])
             saved = json.loads(self.save_path.read_text())
             self.assertEqual(saved["guide"]["sections"]["1"]["status"], status)
 
     def test_all_19_combination_guide_steps_are_persisted(self):
-        requests = [f for f in self.requests if f["opcode"] == 999900 and 201 in server.get_comb_ids(bytes.fromhex(f["hex"]))]
+        requests = [f for f in self.requests if f["opcode"] == 999900 and 201 in protocol.get_comb_ids(bytes.fromhex(f["hex"]))]
         self.assertEqual(len(requests), 19)
         self.replay(requests)
         self.assertTrue(self.save_path.exists())
@@ -365,38 +436,38 @@ class ReplayRoutingTests(unittest.TestCase):
         reply = self.recorded[(36, 999900)]
         self.assertTrue(reply["hex"].endswith("0801"))
         frames = [self.by_seq[36], dict(reply, hex=reply["hex"][:-2] + "00")]
-        with patch.object(server, "print_flush"):
-            self.tables = server.build_routing_tables(frames)
+        with redirect_stdout(io.StringIO()):
+            self.tables = replay.build_routing_tables(frames)
         self.replay([self.by_seq[36]])
         self.assertEqual(json.loads(self.save_path.read_text())["guide"]["sections"], {})
 
     def test_malformed_guide_report_does_not_overwrite_save(self):
-        save = server.get_default_save()
+        save = player.get_default_save()
         save["guide"]["sections"] = {"1": {"status": 1, "step": 5, "steps": [5]}}
         original = json.dumps(save)
         self.save_path.write_text(original)
         for body in ("", "0801", "08011080", "08011000", "080110" + "ff" * 10):
             with self.subTest(body=body):
                 conn = ReplayConnection([{"opcode": 201, "seq": 10000, "hex": body}], 7)
-                with patch.object(server, "print_flush"):
-                    server.handle_client(conn, ("test", 0), *self.tables)
+                with redirect_stdout(io.StringIO()):
+                    self.run_client(conn)
                 self.assertTrue(conn.closed)
                 self.assertEqual(conn.responses, [])
                 self.assertEqual(self.save_path.read_text(), original)
 
     def test_combination_parser_validates_lengths_and_required_ids(self):
-        messages = server.get_comb_messages(bytes.fromhex(self.by_seq[11]["hex"]))
+        messages = protocol.get_comb_messages(bytes.fromhex(self.by_seq[11]["hex"]))
         self.assertEqual(messages, [(202, b"\x08\x03"), (201, b"\x08\x01\x10\x04")])
         for raw in (b"\x0a\x05\x08\xca", b"\x0a\x02\x12\x00", b"\x0a\x04\x08\xca\x01\x12", b"\x00", b"\x0e", b"\x80" * 11):
             with self.subTest(raw=raw):
                 with self.assertRaises(ValueError):
-                    server.get_comb_messages(raw)
+                    protocol.get_comb_messages(raw)
 
     def test_parser_accepts_optional_data_unknown_fields_and_uint64(self):
-        self.assertEqual(server.get_comb_messages(b"\x0a\x05\x08\xca\x01\x18\x01\x10\x01"), [(202, b"")])
+        self.assertEqual(protocol.get_comb_messages(b"\x0a\x05\x08\xca\x01\x18\x01\x10\x01"), [(202, b"")])
         maximum = (1 << 64) - 1
-        encoded = server.encode_varint(maximum)
-        self.assertEqual(server.parse_varint(encoded, 0), (maximum, len(encoded)))
+        encoded = protocol.encode_varint(maximum)
+        self.assertEqual(protocol.parse_varint(encoded, 0), (maximum, len(encoded)))
 
     def test_recorded_tutorial_responses_survive_combination_sequence_changes(self):
         # The second login is a reconnect; keep the isolated save but reset connection counters.
@@ -426,6 +497,79 @@ class ReplayRoutingTests(unittest.TestCase):
                         self.assertEqual(response["opcode"], request["opcode"])
                         self.assertEqual(response["seq"], request["seq"])
             self.assertEqual(push_count, 33)
+
+
+class EntryPointTests(unittest.TestCase):
+    def test_import_from_other_directory_does_not_load_assets_or_start_io(self):
+        root = Path(server.__file__).parent
+        code = (
+            "from unittest.mock import patch\n"
+            "with patch('zipfile.ZipFile', side_effect=AssertionError('config read')), "
+            "patch('socket.socket', side_effect=AssertionError('socket opened')), "
+            "patch('subprocess.check_output', side_effect=AssertionError('adb run')):\n"
+            "    import mock_server\n"
+            "    print(mock_server.BASE_DIR)\n"
+            "    print(mock_server.RECORD_PATH)\n"
+            "    print(mock_server.CONFIG_ZIP)\n"
+            "    print(mock_server.SAVE_PATH)\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([sys.executable, "-B", "-c", code], cwd=directory,
+                                    env={**os.environ, "PYTHONPATH": str(root)},
+                                    capture_output=True, text=True, check=True, timeout=15)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        self.assertEqual(result.stdout.splitlines(), [str(root), str(root / "recorded_frames.json"),
+                                                     str(root / "configs_sec5.zip"), str(root / "role_save.json")])
+        self.assertEqual(result.stderr, "")
+
+    def test_startup_passes_resources_to_connection_thread(self):
+        conn = ReplayConnection([{"opcode": 200, "seq": 1, "hex": ""}], 7)
+        with tempfile.TemporaryDirectory() as directory:
+            save_path = Path(directory) / "role_save.json"
+            with redirect_stdout(io.StringIO()), patch.object(server, "SAVE_PATH", str(save_path)), \
+                    patch.object(sys, "argv", ["mock_server.py"]), \
+                    patch.object(server, "setup_adb_reverse"), \
+                    patch.object(server.socket, "socket") as socket_factory, \
+                    patch.object(server.threading, "Thread") as thread_factory:
+                socket_factory.return_value.accept.side_effect = [(conn, ("test", 0)), KeyboardInterrupt]
+                server.main()
+                thread_factory.assert_called_once()
+                thread_factory.return_value.start.assert_called_once_with()
+                options = thread_factory.call_args.kwargs
+                self.assertIs(options["target"], server.handle_client)
+                self.assertTrue(options["daemon"])
+                options["target"](*options["args"])
+            self.assertFalse(save_path.exists())
+        self.assertTrue(conn.closed)
+        self.assertEqual(conn.responses, [{"opcode": 200, "seq": 1, "hex": ""}])
+
+    def test_startup_preserves_reset_flag_behavior_with_temporary_save(self):
+        save = player.get_default_save()
+        save.update(role_name="原有玩家", has_role=True, selected_general_id=3)
+        save["guide"]["sections"] = {"1": {"status": 1, "step": 5, "steps": [5]}}
+        original = json.dumps(save)
+        with tempfile.TemporaryDirectory() as directory:
+            save_path = Path(directory) / "role_save.json"
+            for flags in ([], ["--reset-guide"], ["--reset"]):
+                with self.subTest(flags=flags):
+                    save_path.write_text(original)
+                    with redirect_stdout(io.StringIO()), patch.object(server, "SAVE_PATH", str(save_path)), \
+                            patch.object(sys, "argv", ["mock_server.py", *flags]), \
+                            patch.object(server, "setup_adb_reverse") as adb, \
+                            patch.object(server.socket, "socket") as socket_factory:
+                        socket_factory.return_value.accept.side_effect = KeyboardInterrupt
+                        server.main()
+                    adb.assert_called_once_with()
+                    socket_factory.return_value.bind.assert_called_once_with(("0.0.0.0", 14600))
+                    if flags == ["--reset"]:
+                        self.assertFalse(save_path.exists())
+                    elif flags == ["--reset-guide"]:
+                        saved = json.loads(save_path.read_text())
+                        self.assertEqual(saved["guide"], {"sections": {}})
+                        for key in ("role_name", "has_role", "selected_general_id", "created_at"):
+                            self.assertEqual(saved[key], save[key])
+                    else:
+                        self.assertEqual(save_path.read_text(), original)
 
 
 if __name__ == "__main__":
