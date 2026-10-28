@@ -16,6 +16,7 @@ class Session:
         self.step_counts = step_counts
         self.role_config = role_config
         self.save = player.load_save(save_path, step_counts)
+        player.initialize_world_state(self.save, self.replay.master_comb_packets)
 
         sections = guide.get_guide_sections(self.save, step_counts)
         in_progress = [s for s in sections.values() if s.get("status") == 1]
@@ -56,7 +57,10 @@ class Session:
                     raise OSError("角色状态保存失败")
             return [pack_frame(999898, seq, b"\x08\x01")]
 
-        responses = self.replay.match(opcode, seq, body)
+        if opcode in player.WORLD_QUERY_IDS:
+            responses = [{"opcode": opcode, "seq": seq, "hex": self.save["world_state"][str(opcode)]}]
+        else:
+            responses = self.replay.match(opcode, seq, body)
         if responses is None:
             return [pack_frame(opcode, seq, b"")]
         packets = player.prepare_recorded_responses(seq, responses, self.save, body,

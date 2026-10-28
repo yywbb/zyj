@@ -31,7 +31,8 @@ def handle_client(conn, addr, tables, save_path, step_counts, role_config):
     print_flush(f"\n[+] 新客户端连入: {addr}")
     try:
         session = Session(tables, save_path, step_counts, role_config)
-    except Exception:
+    except Exception as e:
+        print_flush(f"[!] 载入玩家状态失败: {e}")
         conn.close()
         return
     recv_buf = bytearray()

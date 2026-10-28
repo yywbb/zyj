@@ -61,9 +61,19 @@ class ReplayRoutingTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as log:
             self.run_client(conn)
         self.assertTrue(conn.closed)
-        errors = [line for line in log.getvalue().splitlines() if "连接异常" in line]
+        errors = [line for line in log.getvalue().splitlines() if "连接异常" in line or "载入玩家状态失败" in line]
         self.assertEqual(errors, [])
         return conn.responses
+
+    def assert_rejected(self, request, reason):
+        original = self.save_path.read_bytes()
+        conn = ReplayConnection([request], 7)
+        with redirect_stdout(io.StringIO()) as log:
+            self.run_client(conn)
+        self.assertTrue(conn.closed)
+        self.assertEqual(len(conn.responses), 0)
+        self.assertEqual(self.save_path.read_bytes(), original)
+        self.assertIn(reason, log.getvalue())
 
     def assert_recorded_response(self, response, recorded_seq, live_seq=None):
         expected = self.recorded[(recorded_seq, response["opcode"])]
@@ -99,6 +109,18 @@ class ReplayRoutingTests(unittest.TestCase):
         if response["opcode"] == 999900:
             body = next(data for mid, data in protocol.get_comb_messages(body) if mid == 1001)
         return {n: value for n, wire, value in protocol.iter_pb_fields(body)}
+
+    def query_world(self, opcode):
+        responses = self.replay([{"opcode": opcode, "seq": 20000, "hex": ""}])
+        self.assertEqual(len(responses), 1)
+        self.assertEqual((responses[0]["opcode"], responses[0]["seq"]), (opcode, 20000))
+        return bytes.fromhex(responses[0]["hex"])
+
+    def entity_records(self, body, field, key_field):
+        return {protocol.pb_get_varint(value, key_field): value for n, wire, value in protocol.iter_pb_fields(body) if n == field and wire == 2}
+
+    def replay_through(self, seq):
+        return self.replay([f for f in self.requests if f["seq"] <= seq])
 
     def expected_group(self, recorded_seq, live_seq=None):
         request = self.by_seq[recorded_seq]
@@ -313,7 +335,7 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_corrupt_save_is_not_silently_replaced(self):
         original = '{"unfinished":'
         self.save_path.write_text(original)
-        self.assertEqual(self.replay([self.by_seq[12]]), [])
+        self.assert_rejected(self.by_seq[12], "存档读取失败")
         self.assertEqual(self.save_path.read_text(), original)
 
     def test_malformed_name_does_not_change_existing_save(self):
@@ -356,6 +378,165 @@ class ReplayRoutingTests(unittest.TestCase):
         general = {n: v for n, w, v in protocol.iter_pb_fields(values[10])}
         self.assertEqual((values[3], general[4]), (1, 0))
 
+    def test_recruit_and_slot_updates_survive_reconnect_and_init(self):
+        self.replay_through(56)
+        roster = self.query_world(1002)
+        generals = self.entity_records(roster, 1, 2)
+        slots = self.entity_records(roster, 4, 1)
+        self.assertTrue({7059, 7060}.issubset(generals))
+        self.assertEqual(protocol.pb_get_varint(slots[2], 2), 7060)
+        responses = self.replay([dict(self.by_seq[12], seq=30000)])
+        restored = dict(protocol.get_comb_messages(bytes.fromhex(responses[0]["hex"])))[1002]
+        self.assertEqual(restored, roster)
+
+    def test_equipment_updates_merge_without_deleting_old_equipment(self):
+        self.replay_through(99)
+        roster = self.query_world(1002)
+        equips = self.entity_records(roster, 2, 1)
+        self.assertTrue({10719, 10720, 10721}.issubset(equips))
+        reward = dict(protocol.get_comb_messages(bytes.fromhex(self.recorded[(99, 999900)]["hex"])))[1109]
+        updated = [v for n, w, v in protocol.iter_pb_fields(reward) if n == 6 and w == 2]
+        self.assertTrue(updated)
+        for equip in updated:
+            self.assertEqual(equips[protocol.pb_get_varint(equip, 1)], equip)
+
+    def test_recruit_token_is_spent_and_starter_gift_is_preserved(self):
+        self.replay_through(76)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20111], 2), 1)
+        self.assertNotIn(20100, props)
+
+    def test_gift_rewards_consumption_and_training_cost_survive_reconnect(self):
+        self.replay_through(148)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertNotIn(20111, props)
+        self.assertEqual(protocol.pb_get_varint(props[20100], 2), 5)
+        self.assertEqual(protocol.pb_get_varint(props[20161], 2), 47)
+        fragments = self.entity_records(self.query_world(1012), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(fragments[10204], 2), 20)
+
+    def test_item_and_fragment_deltas_add_consume_and_remove_zero(self):
+        self.replay_through(12)
+        saved = json.loads(self.save_path.read_text())
+        for cid, query, key in ((20100, "1200", 20100), (11204, "1012", 10204), (10204, "1012", 10204)):
+            with self.subTest(cid=cid):
+                player.change_item_count(saved, cid, 2, self.role_config)
+                record = protocol.encode_pb_field(1, 0, cid) + protocol.encode_pb_field(2, 0, 1)
+                used = protocol.encode_pb_field(10, 2, protocol.encode_pb_field(1, 2, record))
+                player.apply_reward(saved, used, self.role_config)
+                records = self.entity_records(bytes.fromhex(saved["world_state"][query]), 1, 1)
+                self.assertEqual(protocol.pb_get_varint(records[key], 2), 1)
+                player.change_item_count(saved, cid, -1, self.role_config)
+                self.assertNotIn(key, self.entity_records(bytes.fromhex(saved["world_state"][query]), 1, 1))
+                for delta in (-1, 1 << 31):
+                    with self.assertRaises(ValueError):
+                        player.change_item_count(saved, cid, delta, self.role_config)
+
+    def test_cleared_maps_and_claimed_box_survive_reconnect(self):
+        self.replay_through(138)
+        maps = self.entity_records(self.query_world(1300), 1, 1)
+        self.assertTrue({42101, 42102}.issubset(maps))
+        self.assertEqual(protocol.pb_get_varint(maps[42101], 2), 3)
+        self.assertEqual(protocol.pb_get_varint(maps[42101], 6), 3)
+        points = self.entity_records(maps[42101], 7, 1)
+        self.assertEqual(set(points), {1, 2, 3, 4, 5})
+        self.assertTrue(all(protocol.pb_get_varint(p, 3) == 3 and protocol.pb_get_varint(p, 4) == 1 for p in points.values()))
+        point = self.entity_records(maps[42102], 7, 1)[1]
+        self.assertEqual(protocol.pb_get_varint(point, 3), 3)
+
+    def test_consumed_gift_cannot_grant_rewards_twice(self):
+        self.replay_through(148)
+        self.assert_rejected(self.by_seq[148], "道具 20111 数量不足")
+
+    def test_replayed_old_battle_cannot_overwrite_newer_state(self):
+        self.replay_through(61)
+        self.assert_rejected(self.by_seq[36], "已通关关卡不支持重复录制战斗")
+
+    def test_missing_legacy_world_history_does_not_allow_old_battle(self):
+        self.replay_through(138)
+        saved = json.loads(self.save_path.read_text())
+        del saved["world_state"]
+        self.save_path.write_text(json.dumps(saved))
+        self.assert_rejected(self.by_seq[36], "战斗录制经验已过期")
+
+    def test_existing_role_cannot_be_recreated_by_old_selection(self):
+        self.replay_through(61)
+        self.assert_rejected(self.by_seq[11], "角色已创建")
+
+    def test_empty_saved_inventory_is_not_reseeded_on_reconnect(self):
+        self.replay_through(12)
+        saved = json.loads(self.save_path.read_text())
+        saved["world_state"]["1200"] = ""
+        saved["world_state"]["1012"] = ""
+        self.save_path.write_text(json.dumps(saved))
+        for _ in range(2):
+            self.assertEqual(self.query_world(1200), b"")
+            self.assertEqual(self.query_world(1012), b"")
+        self.assert_rejected(self.by_seq[148], "道具 20111 数量不足")
+
+    def test_invalid_world_cache_is_not_sent_or_overwritten(self):
+        self.replay_through(12)
+        valid = json.loads(self.save_path.read_text())
+        cases = (("1002", []), ("1200", "zz"), ("1300", "0a"),
+                 ("1200", "0a03080180"), ("1002", "0a020801"),
+                 ("1300", "0a0508013a0180"), ("1200", "0a020801"))
+        for opcode, invalid in cases:
+            with self.subTest(opcode=opcode, invalid=invalid):
+                saved = json.loads(json.dumps(valid))
+                saved["world_state"][opcode] = invalid
+                self.save_path.write_text(json.dumps(saved))
+                self.assert_rejected(self.by_seq[12], "载入玩家状态失败")
+
+    def test_partial_slot_updates_preserve_other_entities_and_unknown_fields(self):
+        extra = protocol.encode_pb_field(50, 2, b"keep")
+        first = b"\x08\x01\x10\x09"
+        second = b"\x08\x02\x10\x08"
+        base = protocol.encode_pb_field(4, 2, first) + extra + protocol.encode_pb_field(4, 2, second)
+        cleared = b"\x08\x01\x10\x00"
+        merged = player.merge_pb_records(base, protocol.encode_pb_field(4, 2, cleared), player.SLOT_RECORD_KEYS)
+        self.assertEqual(self.entity_records(merged, 4, 1), {1: cleared, 2: second})
+        self.assertIn((50, 2, b"keep"), list(protocol.iter_pb_fields(merged)))
+
+    def test_locked_copy_box_cannot_grant_rewards(self):
+        self.replay_through(12)
+        self.assert_rejected(self.by_seq[119], "副本宝箱未解锁或已领取")
+
+    def test_claimed_copy_box_cannot_grant_rewards_twice(self):
+        self.replay_through(119)
+        self.assert_rejected(self.by_seq[119], "副本宝箱未解锁或已领取")
+
+    def test_gift_save_failure_keeps_items_rewards_and_guide_atomic(self):
+        self.replay_through(138)
+        with patch.object(player.os, "replace", side_effect=OSError("disk failure")):
+            self.assert_rejected(self.by_seq[148], "保存失败")
+        self.assertEqual([p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')], ["role_save.json"])
+
+    def test_recruit_requires_a_token_and_cannot_reset_owned_generals(self):
+        self.replay_through(12)
+        self.assert_rejected(self.by_seq[76], "道具 20100 数量不足")
+        self.replay([f for f in self.requests if 12 < f["seq"] <= 148])
+        for seq in (49, 76):
+            with self.subTest(seq=seq):
+                self.assert_rejected(self.by_seq[seq], "不支持重复录制招募")
+
+    def test_old_training_and_advancement_cannot_revert_newer_growth(self):
+        self.replay_through(138)
+        self.assert_rejected(self.by_seq[131], "已过期的主角培养")
+        self.assert_rejected(self.by_seq[133], "已过期的主角进阶")
+
+    def test_tutorial_reconnect_after_every_request_keeps_world_state(self):
+        self.replay(self.requests)
+        expected = {opcode: self.query_world(opcode) for opcode in player.WORLD_QUERY_IDS}
+        expected_role = json.loads(self.save_path.read_text())["role_state"]
+        self.save_path.unlink()
+        for request in self.requests:
+            self.replay([request], chunk_size=7)
+            self.replay([dict(self.by_seq[12], seq=30000)])
+        for opcode, body in expected.items():
+            with self.subTest(opcode=opcode):
+                self.assertEqual(self.query_world(opcode), body)
+        self.assertEqual(json.loads(self.save_path.read_text())["role_state"], expected_role)
+
     def test_first_battle_restores_state_pushes_in_recorded_order(self):
         responses = self.replay([dict(self.by_seq[36], seq=10000)], chunk_size=7)
         self.assertEqual([f["opcode"] for f in responses], [1027, 205, 1024, 999900])
@@ -386,7 +567,8 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_state_push_without_matching_reply_is_not_attached_to_request(self):
         push = self.expected_group(36)[1]
-        frames = [self.by_seq[36], dict(push, c2s=False), dict(self.recorded[(36, 999900)], seq=999)]
+        frames = [self.by_seq[12], self.recorded[(12, 999900)], self.by_seq[36],
+                  dict(push, c2s=False), dict(self.recorded[(36, 999900)], seq=999)]
         with redirect_stdout(io.StringIO()):
             self.tables = replay.build_routing_tables(frames)
         responses = self.replay([dict(self.by_seq[36], seq=10000)])
@@ -435,7 +617,7 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_failed_combination_guide_ack_does_not_advance_progress(self):
         reply = self.recorded[(36, 999900)]
         self.assertTrue(reply["hex"].endswith("0801"))
-        frames = [self.by_seq[36], dict(reply, hex=reply["hex"][:-2] + "00")]
+        frames = [self.by_seq[12], self.recorded[(12, 999900)], self.by_seq[36], dict(reply, hex=reply["hex"][:-2] + "00")]
         with redirect_stdout(io.StringIO()):
             self.tables = replay.build_routing_tables(frames)
         self.replay([self.by_seq[36]])
