@@ -6,7 +6,7 @@
 
 ## Run and verify
 
-- Python uses only the standard library. Run regressions with `python3 -B -m unittest -v test_mock_server`; one case: `python3 -B -m unittest -v test_mock_server.ReplayRoutingTests.test_select_does_not_receive_city_init_at_same_sequence`. Tests use temporary saves, not the real `role_save.json`. Syntax check: `python3 -m compileall -q mock_server.py zyj_server build_local_apk.py test_mock_server.py`. No CI, linter, or formatter is configured.
+- Python uses only the standard library. Run regressions with `python3 -B -m unittest -v test_mock_server`; one case: `python3 -B -m unittest -v test_mock_server.ReplayRoutingTests.test_select_does_not_receive_city_init_at_same_sequence`. Tests use temporary saves, not the real `role_save.json`. Syntax check: `python3 -m compileall -q -x "[.]_" mock_server.py zyj_server build_local_apk.py test_mock_server.py` (skip AppleDouble metadata). No CI, linter, or formatter is configured.
 - Neither entrypoint implements `--help` or a dry-run: unknown flags still run the server/build. Do not invoke them just to inspect usage.
 - `python3 mock_server.py` starts TCP port **14600** and attempts `adb reverse` for devices connected at startup. Missing `adb` only logs a warning; a listening server does not prove device connectivity. For a later-connected device, run `adb reverse tcp:14600 tcp:14600`.
 - Despite the local-client address, the server binds **`0.0.0.0:14600`**, not loopback; keep it on a trusted network.
