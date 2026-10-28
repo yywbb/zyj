@@ -64,6 +64,13 @@ class Session:
             responses = [{"opcode": opcode, "seq": seq, "hex": self.save["world_state"][str(opcode)]}]
         elif opcode in activities.OPCODES or opcode == 999905:
             responses = [{"opcode": opcode, "seq": seq, "hex": ""}]
+        elif opcode == 1201:
+            ids = player.parse_prop_use(body)
+            prop = self.role_config["props"].get(str(ids[0]), {})
+            if prop.get("type") == "value":
+                responses = [{"opcode": opcode, "seq": seq, "hex": ""}]
+            else:
+                responses = self.replay.match(opcode, seq, body)
         else:
             responses = self.replay.match(opcode, seq, body)
         if responses is None:

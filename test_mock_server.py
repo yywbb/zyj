@@ -151,6 +151,14 @@ class ReplayRoutingTests(unittest.TestCase):
         saved["role_state"] = {"level": 1, "exp": 0, "stamina": amount, "maxstamina": 50}
         self.save_path.write_text(json.dumps(saved))
 
+    def give_props(self, amounts):
+        saved = json.loads(self.save_path.read_text())
+        with redirect_stdout(io.StringIO()):
+            player.initialize_world_state(saved, self.tables[2])
+            for cid, count in amounts.items():
+                player.change_item_count(saved, cid, count, self.role_config)
+        self.save_path.write_text(json.dumps(saved))
+
     def query_role(self):
         response = self.replay([dict(self.by_seq[41], seq=20000)])
         self.assertEqual(len(response), 1)
@@ -511,6 +519,131 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(protocol.pb_get_varint(props[20161], 2), 47)
         fragments = self.entity_records(self.query_world(1012), 1, 1)
         self.assertEqual(protocol.pb_get_varint(fragments[10204], 2), 20)
+
+    def test_resource_props_use_configured_delta_and_persist_batch_consumption(self):
+        for cid, field, initial, delta in ((20014, 3, 0, 25), (20019, 3, 0, 50),
+                                           (20015, 4, 20, 10), (20020, 4, 20, 20)):
+            with self.subTest(cid=cid):
+                self.seed_stamina(0)
+                self.give_props({cid: 3})
+                response = self.replay([self.activity_request(1201, (cid, 2))])[0]
+                fields = list(protocol.iter_pb_fields(bytes.fromhex(response["hex"])))
+                self.assertEqual(fields, [(field, 0, 2 * delta), (5, 2, b""), (7, 2, b""), (10, 2, b"")])
+                role = self.query_role()
+                self.assertEqual(role[{3: 10, 4: 12}[field]], initial + 2 * delta)
+                props = self.entity_records(self.query_world(1200), 1, 1)
+                self.assertEqual(protocol.pb_get_varint(props[cid], 2), 1)
+                init = self.replay([dict(self.by_seq[12], seq=30000)])[0]
+                self.assertEqual(self.role_data(init)[{3: 10, 4: 12}[field]], initial + 2 * delta)
+
+    def test_claimed_daily_stamina_prop_is_usable_at_recorded_gift_sequence(self):
+        self.replay(self.requests)
+        self.replay([self.activity_request(3611, (80001,))])
+        before = json.loads(self.save_path.read_text())["role_state"]
+        request = dict(self.activity_request(1201, (20014, 1)), seq=148)
+        response = self.replay([request])[0]
+        self.assertEqual((response["opcode"], response["seq"]), (1201, 148))
+        self.assertEqual(protocol.pb_get_varint(bytes.fromhex(response["hex"]), 3), 25)
+        self.assertNotIn(20014, self.entity_records(self.query_world(1200), 1, 1))
+        after = json.loads(self.save_path.read_text())["role_state"]
+        self.assertEqual(after, {**before, "stamina": before["stamina"] + 25})
+        self.assert_rejected(request, "道具 20014 数量不足")
+
+    def test_resource_prop_reward_survives_later_tutorial_recordings(self):
+        self.replay(self.requests)
+        baseline = json.loads(self.save_path.read_text())["role_state"]
+        self.save_path.unlink()
+        self.replay_through(12)
+        self.replay([self.activity_request(3611, (80001,)), self.activity_request(1201, (20014, 1))])
+        self.replay([f for f in self.requests if f["seq"] > 12])
+        saved = json.loads(self.save_path.read_text())["role_state"]
+        self.assertEqual(saved, {**baseline, "coin": baseline["coin"] + 20000,
+                                "gold": baseline["gold"] + 100, "stamina": baseline["stamina"] + 25})
+
+    def test_resource_prop_use_settles_recovery_and_preserves_partial_interval(self):
+        for elapsed, amount, remaining in ((100, 25, 260), (360, 26, 360)):
+            with self.subTest(elapsed=elapsed):
+                self.clock.return_value = self.now
+                self.seed_stamina(0)
+                self.give_props({20014: 1})
+                self.query_role()
+                self.clock.return_value = self.now + elapsed
+                self.replay([self.activity_request(1201, (20014, 1))])
+                role = self.query_role()
+                self.assertEqual((role[10], role[17]), (amount, remaining))
+
+    def test_resource_prop_can_exceed_soft_cap_and_stops_recovery(self):
+        self.seed_stamina(49)
+        self.give_props({20014: 1})
+        self.query_role()
+        self.clock.return_value = self.now + 100
+        self.replay([self.activity_request(1201, (20014, 1))])
+        self.clock.return_value = self.now + 100 * 360
+        role = self.query_role()
+        self.assertEqual((role[10], role[17], role[18]), (74, 0, 0))
+
+    def test_resource_prop_consumes_once_per_request_in_same_session(self):
+        self.seed_stamina(0)
+        self.give_props({20015: 3})
+        conn = ReplayConnection([self.activity_request(1201, (20015, 1)),
+                                 self.activity_request(1201, (20015, 2))], 7)
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertTrue(conn.closed)
+        self.assertEqual([protocol.pb_get_varint(bytes.fromhex(f["hex"]), 4) for f in conn.responses], [10, 20])
+        self.assertEqual(self.query_role()[12], 50)
+        self.assertNotIn(20015, self.entity_records(self.query_world(1200), 1, 1))
+
+    def test_resource_prop_batch_allows_client_limit_of_100(self):
+        self.seed_stamina(0)
+        self.give_props({20020: 101})
+        self.replay([self.activity_request(1201, (20020, 100))])
+        self.assertEqual(self.query_role()[12], 2020)
+        self.assert_rejected(self.activity_request(1201, (20020, 101)), "恢复道具使用参数无效")
+
+    def test_resource_prop_insufficient_quantity_does_not_partially_consume(self):
+        self.seed_stamina(0)
+        self.give_props({20014: 1})
+        self.assert_rejected(self.activity_request(1201, (20014, 2)), "道具 20014 数量不足")
+
+    def test_resource_prop_integer_overflow_keeps_inventory_and_role(self):
+        for cid, name in ((20014, "stamina"), (20020, "energy")):
+            with self.subTest(cid=cid):
+                self.seed_stamina(0)
+                self.give_props({cid: 1})
+                saved = json.loads(self.save_path.read_text())
+                saved["role_state"][name] = (1 << 31) - 10
+                self.save_path.write_text(json.dumps(saved))
+                self.assert_rejected(self.activity_request(1201, (cid, 1)), "恢复资源超出范围")
+
+    def test_resource_prop_save_failure_is_atomic_with_due_recovery(self):
+        self.seed_stamina(0)
+        self.give_props({20014: 1})
+        self.query_role()
+        self.clock.return_value = self.now + 360
+        with patch.object(player.os, "replace", side_effect=OSError("disk failure")):
+            self.assert_rejected(self.activity_request(1201, (20014, 1)), "保存失败")
+        self.assertEqual(self.query_role()[10], 1)
+        self.assertEqual(protocol.pb_get_varint(self.entity_records(self.query_world(1200), 1, 1)[20014], 2), 1)
+
+    def test_malformed_resource_prop_use_does_not_change_save(self):
+        self.seed_stamina(0)
+        self.give_props({20014: 2})
+        valid = bytes.fromhex(self.activity_request(1201, (20014, 1))["hex"])
+        for body in (b"", valid[:-2], valid[:-1], valid + b"\x08\x01", valid + b"\x10\x01",
+                     valid[:-1] + b"\x00", valid[:-2] + b"\x0a\x01\x01",
+                     valid[:-1] + protocol.encode_varint((1 << 64) - 1)):
+            with self.subTest(body=body):
+                self.assert_rejected({"opcode": 1201, "seq": 20000, "hex": body.hex()}, "道具")
+
+    def test_resource_prop_use_without_created_role_is_rejected(self):
+        self.save_path.write_text(json.dumps(player.get_default_save()))
+        self.assert_rejected(self.activity_request(1201, (20014, 1)), "角色尚未创建")
+
+    def test_unsupported_resource_prop_is_not_silently_consumed(self):
+        self.seed_stamina(0)
+        self.give_props({20013: 1})
+        self.assert_rejected(self.activity_request(1201, (20013, 1)), "暂不支持的恢复道具")
 
     def test_item_and_fragment_deltas_add_consume_and_remove_zero(self):
         self.replay_through(12)

@@ -105,6 +105,17 @@ def parse_set_name(body):
     return name
 
 
+def parse_prop_use(body):
+    try:
+        fields = list(iter_pb_fields(body))
+    except ValueError as e:
+        raise ValueError("道具使用请求格式错误") from e
+    if len(fields) not in (2, 3) or any(n != 1 or w != 0 or not 0 < value < (1 << 31)
+                                      for n, w, value in fields):
+        raise ValueError("道具使用请求格式错误")
+    return [value for _, _, value in fields]
+
+
 def apply_role_state(body, save, now):
     """把存档里的角色状态回填进 Role 消息，避免回放录制数据时把等级/货币冲掉。"""
     st = save.get("role_state") or {}
@@ -483,11 +494,24 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if opcode == 1109:
             activities.record_strengthening(save, body, role_config)
         if opcode == 1201:
-            ids = parse_ids_pb(request_body)
-            if len(ids) < 2 or ids[1] <= 0:
-                raise ValueError("无效的道具使用请求")
-            change_item_count(save, ids[0], -ids[1], role_config)
+            ids = parse_prop_use(request_body)
             config = role_config["props"][str(ids[0])]
+            if config["type"] == "value":
+                if not save.get("has_role"):
+                    raise ValueError("角色尚未创建")
+                if len(ids) != 2 or ids[1] > 100:
+                    raise ValueError("恢复道具使用参数无效")
+                # shortcut: 仅实现体力/精力恢复；挑战次数等需对应业务状态后再开放。
+                resource = {"stamina": ("stamina", 3), "enery": ("energy", 4)}.get(config["param2"])
+                if config["function"] != "attr" or not resource or config["use_limit"]:
+                    raise ValueError("暂不支持的恢复道具")
+                name, field = resource
+                delta = int(config["param1"]) * ids[1]
+                if delta <= 0 or get_role_state(save, role_config)[name] + delta >= (1 << 31):
+                    raise ValueError("恢复资源超出范围")
+                # 客户端自行扣除使用数量，usedcidnums 必须为空，避免重复扣道具。
+                body = encode_pb_field(field, 0, delta) + b"".join(encode_pb_field(n, 2, b"") for n in (5, 7, 10))
+            change_item_count(save, ids[0], -ids[1], role_config)
             if config["type"] == "keybox":
                 change_item_count(save, int(config["param1"]), -ids[1], role_config)
         elif opcode == 1304:
