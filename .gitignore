@@ -4,6 +4,10 @@
 *.log
 phone_screen.png
 
+# Misc archives not referenced in README
+1.zip
+1255.zip
+
 # Runtime-generated files
 role_save.json
 
