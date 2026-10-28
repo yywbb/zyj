@@ -177,13 +177,13 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertFalse(self.save_path.exists())
 
     def test_exact_ordinary_reply_advances_fallback_counter(self):
-        hints = [f for f in self.requests if f["opcode"] == 1032]
+        hints = [f for f in self.requests if f["opcode"] == 1032 and not f["hex"]]
         responses = self.replay([hints[0], dict(hints[1], seq=10000)])
         self.assert_recorded_response(responses[0], hints[0]["seq"])
         self.assert_recorded_response(responses[1], hints[1]["seq"], 10000)
 
     def test_sessions_share_recordings_but_not_replay_counters(self):
-        hints = [f for f in self.requests if f["opcode"] == 1032]
+        hints = [f for f in self.requests if f["opcode"] == 1032 and not f["hex"]]
         conn = ReplayConnection([], 4096)
         with redirect_stdout(io.StringIO()):
             first = Session(self.tables, self.save_path, self.step_counts, self.role_config)
@@ -211,6 +211,59 @@ class ReplayRoutingTests(unittest.TestCase):
         responses = self.replay([dict(self.by_seq[28], seq=10000), dict(self.by_seq[31], seq=28)])
         self.assert_recorded_response(responses[0], 28, 10000)
         self.assert_recorded_response(responses[1], 31, 28)
+
+    def test_ordinary_parameters_match_without_replaying_other_parameters_first(self):
+        responses = self.replay([dict(self.by_seq[31], seq=10000), dict(self.by_seq[28], seq=10001)])
+        self.assertEqual(len(responses), 2)
+        self.assert_recorded_response(responses[0], 31, 10000)
+        self.assert_recorded_response(responses[1], 28, 10001)
+        self.assertFalse(self.save_path.exists())
+
+    def test_ordinary_payload_counters_are_independent(self):
+        responses = self.replay([self.by_seq[28], self.by_seq[31],
+                                 dict(self.by_seq[124], seq=10000), dict(self.by_seq[52], seq=10001)])
+        self.assertEqual(len(responses), 4)
+        for response, recorded_seq, live_seq in zip(responses, (28, 31, 124, 52), (28, 31, 10000, 10001)):
+            self.assert_recorded_response(response, recorded_seq, live_seq)
+
+    def test_unknown_ordinary_payload_returns_empty_without_advancing_known_payload(self):
+        requests = [dict(self.by_seq[31], seq=10000)]
+        requests.extend({"opcode": 1032, "seq": seq, "hex": "08c404"} for seq in (28, 31, 10001))
+        requests.append(dict(self.by_seq[52], seq=10002))
+        responses = self.replay(requests, chunk_size=7)
+        self.assertEqual(len(responses), len(requests))
+        self.assert_recorded_response(responses[0], 31, 10000)
+        self.assertEqual(responses[1:-1], [{"opcode": 1032, "seq": seq, "hex": ""} for seq in (28, 31, 10001)])
+        self.assert_recorded_response(responses[-1], 52, 10002)
+        self.assertFalse(self.save_path.exists())
+
+    def test_unknown_ordinary_mutation_does_not_apply_pushes_or_spend(self):
+        self.replay_through(131)
+        original = self.save_path.read_bytes()
+        responses = self.replay([dict(self.by_seq[133], hex="0801")])
+        self.assertEqual(responses, [{"opcode": 1057, "seq": 133, "hex": ""}])
+        self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_ordinary_routes_match_each_recorded_payload_from_a_new_replay(self):
+        checked = set()
+        for request in self.requests:
+            opcode, body = request["opcode"], bytes.fromhex(request["hex"])
+            key = opcode, body
+            if opcode in (1000, 101, 200, 201, 999900) or key in checked:
+                continue
+            checked.add(key)
+            with self.subTest(opcode=opcode, body=body), redirect_stdout(io.StringIO()):
+                actual = replay.Replay(self.tables).match(opcode, 10000, body)
+                self.assertEqual(actual, self.tables[3][request["seq"]][2])
+
+    def test_local_login_uuid_remains_compatible_and_shares_login_counter(self):
+        uuid = protocol.encode_pb_field(2, 2, b"local_mock_uuid_10001")
+        login = protocol.encode_pb_field(1, 2, uuid).hex()
+        responses = self.replay([dict(self.by_seq[1], seq=10000, hex=login), dict(self.by_seq[114], seq=10001)])
+        self.assertEqual(len(responses), 2)
+        self.assert_recorded_response(responses[0], 1, 10000)
+        self.assert_recorded_response(responses[1], 114, 10001)
+        self.assertFalse(self.save_path.exists())
 
     def test_city_init_embeds_saved_role_without_stale_initial_role(self):
         snapshot = self.recorded[(41, 1001)]["hex"]

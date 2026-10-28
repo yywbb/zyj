@@ -56,9 +56,9 @@ def build_routing_tables(frames):
                     comb_routes[key] = []
                 comb_routes[key].append(resps)
             else:
-                if op not in opcode_routes:
-                    opcode_routes[op] = []
-                opcode_routes[op].append(resps)
+                # shortcut: 本地单存档登录忽略 UUID，接入真实账号时改为鉴权。
+                key = (op, b"" if op == 1000 else raw)
+                opcode_routes.setdefault(key, []).append(resps)
             i = j
         else:
             i += 1
@@ -70,7 +70,7 @@ def build_routing_tables(frames):
             break
 
     print_flush(f"[*] 带请求校验的录制路由就绪: {len(verified)} 个请求")
-    print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个独立 Opcode, {len(comb_routes)} 个 Comb 请求参数组合, {len(master_comb_packets)} 个主城初始化子帧")
+    print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个普通请求参数组合, {len(comb_routes)} 个 Comb 请求参数组合, {len(master_comb_packets)} 个主城初始化子帧")
     return opcode_routes, comb_routes, master_comb_packets, verified
 
 
@@ -82,9 +82,10 @@ class Replay:
 
     def match(self, opcode, seq, body):
         """返回录制响应组；None 表示未录制，不把空初始化响应组当成未匹配。"""
+        ordinary_key = (opcode, b"" if opcode == 1000 else body)
         recorded_op, recorded_body, hit = self.resp_by_seq.get(seq, (None, None, None))
         if opcode != 999900 and hit and recorded_op == opcode and recorded_body == body:
-            self.op_counters[opcode] = self.op_counters.get(opcode, 0) + 1
+            self.op_counters[ordinary_key] = self.op_counters.get(ordinary_key, 0) + 1
             return hit
 
         if opcode == 999900:
@@ -103,13 +104,13 @@ class Replay:
             print_flush(f"  [!] 未录制的 Comb 请求参数 (IDs={sig})，返回空组合包")
             return None
 
-        cnt = self.op_counters.get(opcode, 0)
-        self.op_counters[opcode] = cnt + 1
-        candidates = self.opcode_routes.get(opcode)
-        if opcode == 200 and candidates and cnt >= len(candidates):
-            return None
+        candidates = self.opcode_routes.get(ordinary_key)
         if candidates:
-            # cnt=0 必须取第一组，不能用 cnt-1 绕到录制末尾。
+            cnt = self.op_counters.get(ordinary_key, 0)
+            if opcode == 200 and cnt >= len(candidates):
+                return None
+            self.op_counters[ordinary_key] = cnt + 1
+            # shortcut: 同参数的多份录制仍按连接内次数轮询，接入真实业务后替换。
             return candidates[cnt % len(candidates)]
-        print_flush(f"  [!] 未匹配到历史应答 Opcode: {opcode}，返回安全空应答")
+        print_flush(f"  [!] 未录制的普通请求参数 (Opcode={opcode})，返回空应答")
         return None
