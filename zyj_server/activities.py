@@ -106,7 +106,7 @@ def prepare_response(opcode, save, request_body, config):
     score = sum(config["liveness"][str(task)]["point"] for task in state["liveness_claimed"])
 
     if opcode == 3610:
-        # shortcut: 仅覆盖抓包首日两项奖励；跨天与其他活动条件待真实时钟/业务接入。
+        # shortcut: 仅覆盖抓包首日两项奖励；跨天与其他活动条件待对应业务和重置规则接入。
         flags = [statuses.get(80000 + i, 0) for i in range(1, max(map(int, config["begin7day_task"])) - 80000 + 1)]
         level = save.get("role_state", {}).get("level", save.get("level", 1))
         groups = ([1], flags, [level] + [0] * 10, [0] * 10)

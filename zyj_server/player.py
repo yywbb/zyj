@@ -19,6 +19,7 @@ print_flush = functools.partial(print, flush=True)
 
 WORLD_QUERY_IDS = (1002, 1012, 1200, 1300)
 SLOT_RECORD_KEYS = {1: 2, 2: 1, 4: 1, 5: 1}
+STAMINA_INTERVAL = 360  # 多份 Role 抓包的全部/下次恢复倒计时之差可交叉验证。
 
 # role_pb.Role 的字段号。
 ROLE_FIELD_MAP = {
@@ -104,7 +105,7 @@ def parse_set_name(body):
     return name
 
 
-def apply_role_state(body, save):
+def apply_role_state(body, save, now):
     """把存档里的角色状态回填进 Role 消息，避免回放录制数据时把等级/货币冲掉。"""
     st = save.get("role_state") or {}
     for k, fn in ROLE_FIELD_MAP.items():
@@ -113,6 +114,12 @@ def apply_role_state(body, save):
             body = pb_set_varint(body, fn, v)
     if save.get("role_name"):
         body = pb_set_field(body, 3, 2, save["role_name"].encode("utf-8"))
+    clock = save.get("stamina_clock")
+    if clock:
+        missing = max(0, st["maxstamina"] - st["stamina"])
+        remaining = max(0, clock["next_at"] - now) if missing else 0
+        body = pb_set_varint(body, 17, remaining)
+        body = pb_set_varint(body, 18, remaining + (missing - 1) * STAMINA_INTERVAL if missing else 0)
     return body
 
 
@@ -139,6 +146,34 @@ def get_role_state(save, role_config):
     return state
 
 
+def validate_stamina_clock(save):
+    if "stamina_clock" not in save:
+        return
+    clock = save["stamina_clock"]
+    if not isinstance(clock, dict) or any(type(clock.get(key)) is not int or not 0 <= clock[key] < (1 << 63)
+                                          for key in ("next_at", "checked_at")):
+        raise ValueError("体力计时存档无效")
+
+
+def settle_stamina(save, role_config, now):
+    if not (save.get("has_role") or save.get("role_state") or save.get("role_snapshot")):
+        return
+    state = get_role_state(save, role_config)
+    # 旧档没有本地锚点时从现在起算，不能按录制时间或创建时间补发。
+    clock = save.setdefault("stamina_clock", {"next_at": 0, "checked_at": now})
+    # 时钟回拨不缩短已排定的恢复期限。
+    checked = max(now, clock["checked_at"])
+    clock["checked_at"] = checked
+    if state["stamina"] >= state["maxstamina"]:
+        clock["next_at"] = 0
+    elif clock["next_at"] == 0:
+        clock["next_at"] = checked + STAMINA_INTERVAL
+    elif checked >= clock["next_at"]:
+        recovered = (checked - clock["next_at"]) // STAMINA_INTERVAL + 1
+        state["stamina"] = min(state["maxstamina"], state["stamina"] + recovered)
+        clock["next_at"] = clock["next_at"] + recovered * STAMINA_INTERVAL if state["stamina"] < state["maxstamina"] else 0
+
+
 def record_legacy_role_state(save, body, role_config):
     ids = parse_ids_pb(body)
     if len(ids) != 5 or str(ids[0]) not in role_config["role_exp"] or any(not 0 <= value < (1 << 31) for value in ids):
@@ -151,7 +186,7 @@ def record_legacy_role_state(save, body, role_config):
     state["power_all"] = ids[4]
     save.update(level=state["level"], silver=state["coin"], gold=state["gold"])
     if save.get("role_snapshot"):
-        save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save).hex()
+        save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save, int(time.time())).hex()
     return True
 
 
@@ -332,7 +367,7 @@ def record_protagonist_general(save, general):
     save["protagonist_snapshot"] = body.hex()
 
 
-def prepare_recorded_response(opcode, body, save, request_body, step_counts, role_config):
+def prepare_recorded_response(opcode, body, save, request_body, step_counts, role_config, now):
     if opcode == 999900:
         requests = dict(get_comb_messages(request_body))
         messages = iter(get_comb_messages(body))
@@ -340,12 +375,17 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         for field, wire, value in iter_pb_fields(body):
             if field == 1 and wire == 2:
                 mid, data = next(messages)
-                updated = prepare_recorded_response(mid, data, save, requests.get(mid, b""), step_counts, role_config)
+                updated = prepare_recorded_response(mid, data, save, requests.get(mid, b""), step_counts, role_config, now)
                 if updated != data:
                     value = pb_set_field(value, 2, 2, updated)
             out.extend(encode_pb_field(field, wire, value))
         return bytes(out)
-    if opcode in activities.OPCODES:
+    if opcode == 999905:
+        if request_body:
+            raise ValueError("时间查询不接受参数")
+        # 客户端把第二项取反作为时区；沿用抓包的 UTC+8，不跟随宿主机时区。
+        body = encode_pb_field(1, 0, now) + encode_pb_field(1, 0, (-8) & ((1 << 64) - 1))
+    elif opcode in activities.OPCODES:
         body = activities.prepare_response(opcode, save, request_body, role_config)
         if opcode in activities.CLAIM_OPCODES:
             apply_reward(save, body, role_config)
@@ -361,7 +401,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             body = bytes.fromhex(save["world_state"]["1002"])
     elif opcode == 1001:
         get_role_state(save, role_config)
-        body = apply_role_state(bytes.fromhex(save["role_snapshot"]) if save.get("role_snapshot") else body, save)
+        settle_stamina(save, role_config, now)
+        body = apply_role_state(bytes.fromhex(save["role_snapshot"]) if save.get("role_snapshot") else body, save, now)
         save["role_snapshot"] = body.hex()
     elif opcode == 201 and request_body and pb_get_varint(body, 1) == 1:
         record_guide_progress(save, request_body, step_counts)
@@ -426,11 +467,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             if (exp[2], exp[3]) <= (state["level"], state["exp"]):
                 raise ValueError("战斗录制经验已过期，拒绝覆盖当前状态")
             apply_reward(save, values[4], role_config)
+            settle_stamina(save, role_config, now)
             config = role_config["role_exp"][str(exp[2])]
             location = parse_ids_pb(request_body)
             state.update(level=exp[2], exp=exp[3], nextexp=config["nextexp"],
                          maxstamina=config["maxstamina"], maxenergy=config["maxenergy"])
-            # shortcut: 体力仅按录制操作消耗，按时间恢复需接入服务端时钟。
             state["stamina"] -= role_config["copy"][str(location[0])][str(location[1])]["physical"]
             if state["stamina"] < 0:
                 raise ValueError("体力不足")
@@ -467,23 +508,26 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         # shortcut: 录制招募仅覆盖各自首次，后续招募及冷却/付费规则需真实业务实现。
         for reward in rewards:
             apply_reward(save, reward, role_config)
+    settle_stamina(save, role_config, now)
     return body
 
 
 def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config):
     before = copy.deepcopy(save)
+    now = int(time.time())
+    settle_stamina(save, role_config, now)
     packets = []
     for response in responses:
         opcode = response["opcode"]
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
-                                         request_body if response["seq"] != 0 else b"", step_counts, role_config)
+                                         request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
     state = save.get("role_state")
     if state:
         for name, key in (("level", "level"), ("coin", "silver"), ("gold", "gold"), ("energy", "energy")):
             save[key] = state[name]
         if save.get("role_snapshot"):
-            save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save).hex()
+            save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now).hex()
     if save != before and not save_role(save, save_path, step_counts):
         raise OSError("角色状态保存失败，不发送成功响应")
     return packets

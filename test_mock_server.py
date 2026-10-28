@@ -53,6 +53,10 @@ class ReplayRoutingTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.save_path = Path(temp.name) / "role_save.json"
+        self.now = 1800000000
+        clock_patch = patch.object(player.time, "time", return_value=self.now)
+        self.clock = clock_patch.start()
+        self.addCleanup(clock_patch.stop)
 
     def run_client(self, conn):
         server.handle_client(conn, ("test", 0), self.tables, self.save_path, self.step_counts, self.role_config)
@@ -96,6 +100,9 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual((groups[1][0], groups[1][29]), (recorded[1][0], recorded[1][29]))
             # Only the two supported rewards are live; unsupported paid gifts stay disabled.
             self.assertTrue(all(value == 0 for i, value in enumerate(groups[1]) if i not in (0, 29)))
+        elif opcode == 999905:
+            values = protocol.parse_ids_pb(bytes.fromhex(actual))
+            self.assertEqual(values, [int(self.clock.return_value), protocol.parse_ids_pb(bytes.fromhex(expected))[1]])
         elif opcode in (1001, 1054):
             values = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(actual))}
             recorded = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(expected))}
@@ -136,6 +143,18 @@ class ReplayRoutingTests(unittest.TestCase):
                 data = next(v for f, t, v in protocol.iter_pb_fields(row) if f == 2 and t == 2)
                 groups[protocol.pb_get_varint(row, 1)] = protocol.parse_ids_pb(data)
         return groups
+
+    def seed_stamina(self, amount):
+        saved = player.get_default_save()
+        saved["has_role"] = True
+        saved["role_snapshot"] = self.recorded[(41, 1001)]["hex"]
+        saved["role_state"] = {"level": 1, "exp": 0, "stamina": amount, "maxstamina": 50}
+        self.save_path.write_text(json.dumps(saved))
+
+    def query_role(self):
+        response = self.replay([dict(self.by_seq[41], seq=20000)])
+        self.assertEqual(len(response), 1)
+        return self.role_data(response[0])
 
     def entity_records(self, body, field, key_field):
         return {protocol.pb_get_varint(value, key_field): value for n, wire, value in protocol.iter_pb_fields(body) if n == field and wire == 2}
@@ -261,6 +280,7 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_unknown_ordinary_mutation_does_not_apply_pushes_or_spend(self):
         self.replay_through(131)
         original = self.save_path.read_bytes()
+        self.clock.return_value = self.now + 360
         responses = self.replay([dict(self.by_seq[133], hex="0801")])
         self.assertEqual(responses, [{"opcode": 1057, "seq": 133, "hex": ""}])
         self.assertEqual(self.save_path.read_bytes(), original)
@@ -294,7 +314,10 @@ class ReplayRoutingTests(unittest.TestCase):
         responses = self.replay([self.by_seq[12]])
         self.assertEqual(len(responses), 1)
         role = next(data for mid, data in protocol.get_comb_messages(bytes.fromhex(responses[0]["hex"])) if mid == 1001)
-        self.assertEqual(role.hex(), snapshot)
+        actual = {n: v for n, w, v in protocol.iter_pb_fields(role) if n not in (17, 18)}
+        expected = {n: v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(snapshot)) if n not in (17, 18)}
+        self.assertEqual(actual, expected)
+        self.assertEqual((protocol.pb_get_varint(role, 17), protocol.pb_get_varint(role, 18)), (360, 1080))
 
     def test_custom_name_reaches_city_init_and_role_query(self):
         name = "本地玩家".encode("utf-8")
@@ -687,6 +710,164 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.replay([{"opcode": 201, "seq": 20000, "hex": body.hex()}])
                 response = self.replay([{"opcode": 200, "seq": 20001, "hex": ""}])[0]
                 self.assertEqual(bytes.fromhex(response["hex"]), guide.build_guide_query_pb({"1": {"status": status, "step": step}}))
+
+    def test_server_time_is_live_and_keeps_captured_timezone(self):
+        timezone = protocol.parse_ids_pb(bytes.fromhex(self.recorded[(3, 999905)]["hex"]))[1]
+        for offset, seq in ((0, 3), (17, 10000)):
+            with self.subTest(offset=offset):
+                self.clock.return_value = self.now + offset
+                responses = self.replay([{"opcode": 999905, "seq": seq, "hex": ""}])
+                self.assertEqual((responses[0]["opcode"], responses[0]["seq"]), (999905, seq))
+                self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(responses[0]["hex"])), [self.now + offset, timezone])
+        self.assertFalse(self.save_path.exists())
+
+    def test_stamina_interval_is_consistent_with_all_captured_countdowns(self):
+        samples = []
+        for frame in self.frames:
+            if frame["c2s"]:
+                continue
+            body = bytes.fromhex(frame["hex"])
+            messages = protocol.get_comb_messages(body) if frame["opcode"] == 999900 else [(frame["opcode"], body)]
+            for opcode, raw in messages:
+                if opcode == 1001:
+                    values = {n: v for n, w, v in protocol.iter_pb_fields(raw)}
+                    missing = values[11] - values[10]
+                    if missing > 1:
+                        self.assertEqual(values[18] - values[17], (missing - 1) * 360)
+                        samples.append(raw)
+        self.assertTrue(samples)
+
+    def test_legacy_stamina_does_not_recover_from_recorded_wall_clock(self):
+        self.seed_stamina(0)
+        role = self.query_role()
+        self.assertEqual((role[10], role[17], role[18]), (0, 360, 50 * 360))
+        snapshot = bytes.fromhex(self.recorded[(41, 1001)]["hex"])
+        for field in (15, 16, 22):
+            self.assertEqual(role.get(field), protocol.pb_get_varint(snapshot, field))
+
+    def test_stamina_recovers_at_boundary_and_preserves_partial_interval(self):
+        self.seed_stamina(0)
+        self.query_role()
+        for elapsed, amount, remaining in ((359, 0, 1), (360, 1, 360), (731, 2, 349)):
+            with self.subTest(elapsed=elapsed):
+                self.clock.return_value = self.now + elapsed
+                role = self.query_role()
+                self.assertEqual((role[10], role[17], role[18]), (amount, remaining, remaining + (50 - amount - 1) * 360))
+                self.assertEqual(json.loads(self.save_path.read_text())["role_state"]["stamina"], amount)
+
+    def test_stamina_offline_recovery_survives_reconnect_without_double_credit(self):
+        self.seed_stamina(5)
+        self.query_role()
+        self.clock.return_value = self.now + 4 * 360 + 21
+        first = self.query_role()
+        second = self.query_role()
+        self.assertEqual((first[10], first[17]), (9, 339))
+        self.assertEqual((second[10], second[17]), (9, 339))
+        init = self.replay([dict(self.by_seq[12], seq=30000)])[0]
+        role = self.role_data(init)
+        self.assertEqual((role[10], role[17], role[18]), (9, 339, 339 + 40 * 360))
+
+    def test_stamina_recovery_caps_without_clamping_reward_overflow(self):
+        for amount in (49, 50, 65):
+            with self.subTest(amount=amount):
+                self.clock.return_value = self.now
+                self.seed_stamina(amount)
+                self.query_role()
+                self.clock.return_value = self.now + 100 * 360
+                role = self.query_role()
+                self.assertEqual((role[10], role[17], role[18]), (max(50, amount), 0, 0))
+
+    def test_full_stamina_does_not_bank_recovery_before_battle(self):
+        self.seed_stamina(50)
+        self.query_role()
+        self.clock.return_value = self.now + 100 * 360
+        self.replay([self.by_seq[36]])
+        role = self.query_role()
+        self.assertEqual((role[10], role[11], role[17], role[18]), (49, 52, 360, 1080))
+
+    def test_stamina_recovery_is_settled_before_battle_cost(self):
+        self.seed_stamina(0)
+        self.query_role()
+        self.clock.return_value = self.now + 359
+        self.assert_rejected(self.by_seq[36], "体力不足")
+        self.clock.return_value = self.now + 360
+        self.replay([self.by_seq[36]])
+        role = self.query_role()
+        self.assertEqual((role[10], role[17]), (0, 360))
+
+    def test_stamina_deadline_survives_spending_in_same_session(self):
+        self.seed_stamina(5)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.handle(1001, 20000, b"")
+            self.clock.return_value = self.now + 100
+            request = self.by_seq[36]
+            session.handle(request["opcode"], request["seq"], bytes.fromhex(request["hex"]))
+            for elapsed, amount, remaining in ((100, 4, 260), (360, 5, 360), (360, 5, 360)):
+                self.clock.return_value = self.now + elapsed
+                packet = session.handle(1001, 20001, b"")[0]
+                role = {n: v for n, w, v in protocol.iter_pb_fields(packet[16:])}
+                self.assertEqual((role[10], role[17]), (amount, remaining))
+
+    def test_recovered_stamina_and_battle_are_saved_before_first_push(self):
+        self.seed_stamina(0)
+        self.query_role()
+        self.clock.return_value = self.now + 360
+        conn = ReplayConnection([self.by_seq[36]], 7)
+        sendall = conn.sendall
+
+        def check_saved_before_send(packet):
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual((saved["role_state"]["stamina"], saved["level"]), (0, 2))
+            self.assertEqual(saved["stamina_clock"]["next_at"], self.now + 720)
+            self.assertEqual(saved["guide"]["sections"]["1"]["step"], 8)
+            self.assertEqual(protocol.pb_get_varint(bytes.fromhex(saved["role_snapshot"]), 17), 360)
+            sendall(packet)
+
+        conn.sendall = check_saved_before_send
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertTrue(conn.closed)
+        self.assertEqual(conn.responses, self.expected_group(36))
+
+    def test_clock_rollback_does_not_grant_stamina_or_shorten_next_recovery(self):
+        self.seed_stamina(0)
+        self.query_role()
+        self.clock.return_value = self.now + 400
+        self.assertEqual(self.query_role()[10], 1)
+        self.clock.return_value = self.now - 100
+        role = self.query_role()
+        self.assertEqual((role[10], role[17]), (1, 820))
+        self.clock.return_value = self.now + 720
+        self.assertEqual(self.query_role()[10], 2)
+
+    def test_stamina_recovery_save_failure_keeps_original_and_emits_no_success(self):
+        self.seed_stamina(0)
+        self.query_role()
+        self.clock.return_value = self.now + 360
+        for request in (dict(self.by_seq[41], seq=20000), self.by_seq[36]):
+            with self.subTest(opcode=request["opcode"]), patch.object(player.os, "replace", side_effect=OSError("disk failure")):
+                self.assert_rejected(request, "保存失败")
+        self.assertEqual(self.query_role()[10], 1)
+
+    def test_invalid_stamina_clock_is_not_overwritten(self):
+        self.seed_stamina(0)
+        original = json.loads(self.save_path.read_text())
+        for invalid in ([], {}, None, {"next_at": self.now + 360},
+                        {"next_at": -1, "checked_at": self.now},
+                        {"next_at": self.now + 360, "checked_at": True},
+                        {"next_at": "old", "checked_at": self.now}):
+            with self.subTest(invalid=invalid):
+                saved = json.loads(json.dumps(original))
+                saved["stamina_clock"] = invalid
+                self.save_path.write_text(json.dumps(saved))
+                self.assert_rejected(dict(self.by_seq[41], seq=20000), "体力计时存档无效")
+
+    def test_malformed_time_query_does_not_change_save(self):
+        self.seed_stamina(0)
+        self.query_role()
+        self.clock.return_value = self.now + 360
+        self.assert_rejected({"opcode": 999905, "seq": 20000, "hex": "0801"}, "时间查询不接受参数")
 
     def test_late_guide_reports_do_not_rewind_or_reopen_completed_sections(self):
         for saved_step, saved_status in ((82, 1), (83, 2), (81, 2)):

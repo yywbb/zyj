@@ -1,6 +1,7 @@
 """处理一条连接的请求，返回有序的完整协议帧；不持有 socket。"""
 
 import functools
+import time
 
 from . import activities, guide, player
 from .protocol import pack_frame
@@ -18,6 +19,7 @@ class Session:
         self.save = player.load_save(save_path, step_counts)
         player.initialize_world_state(self.save, self.replay.master_comb_packets)
         activities.get_state(self.save)
+        player.validate_stamina_clock(self.save)
 
         sections = guide.get_guide_sections(self.save, step_counts)
         in_progress = [s for s in sections.values() if s.get("status") == 1]
@@ -40,7 +42,7 @@ class Session:
         if opcode == 101:
             self.save["role_name"] = player.parse_set_name(body)
             if self.save.get("role_snapshot"):
-                self.save["role_snapshot"] = player.apply_role_state(bytes.fromhex(self.save["role_snapshot"]), self.save).hex()
+                self.save["role_snapshot"] = player.apply_role_state(bytes.fromhex(self.save["role_snapshot"]), self.save, int(time.time())).hex()
             print_flush(f"[★] 玩家确定角色名: 【{self.save['role_name']}】")
             if not player.save_role(self.save, self.save_path, self.step_counts):
                 raise OSError("名字保存失败")
@@ -60,7 +62,7 @@ class Session:
 
         if opcode in player.WORLD_QUERY_IDS:
             responses = [{"opcode": opcode, "seq": seq, "hex": self.save["world_state"][str(opcode)]}]
-        elif opcode in activities.OPCODES:
+        elif opcode in activities.OPCODES or opcode == 999905:
             responses = [{"opcode": opcode, "seq": seq, "hex": ""}]
         else:
             responses = self.replay.match(opcode, seq, body)
