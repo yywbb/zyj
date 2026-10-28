@@ -8,6 +8,7 @@ import tempfile
 import time
 import zipfile
 
+from . import activities
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -40,7 +41,8 @@ ROLE_FIELD_MAP = {
 def load_role_config(config_path):
     with zipfile.ZipFile(config_path) as config_zip:
         return {name: json.loads(config_zip.read(f"5/{name}.json"))
-                for name in ("role_exp", "copy", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic")}
+                for name in ("role_exp", "copy", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
+                             "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip")}
 
 
 def get_default_save():
@@ -343,7 +345,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                     value = pb_set_field(value, 2, 2, updated)
             out.extend(encode_pb_field(field, wire, value))
         return bytes(out)
-    if opcode in WORLD_QUERY_IDS:
+    if opcode in activities.OPCODES:
+        body = activities.prepare_response(opcode, save, request_body, role_config)
+        if opcode in activities.CLAIM_OPCODES:
+            apply_reward(save, body, role_config)
+    elif opcode in WORLD_QUERY_IDS:
         body = bytes.fromhex(save["world_state"][str(opcode)])
         if opcode == 1002 and save.get("protagonist_snapshot"):
             protagonist = bytes.fromhex(save["protagonist_snapshot"])
@@ -433,6 +439,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                     record_protagonist_general(save, value)
                     record_slot_update(save, encode_pb_field(1, 2, value))
     elif opcode in (1109, 1201, 1304):
+        if opcode == 1109:
+            activities.record_strengthening(save, body, role_config)
         if opcode == 1201:
             ids = parse_ids_pb(request_body)
             if len(ids) < 2 or ids[1] <= 0:

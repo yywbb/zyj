@@ -136,10 +136,13 @@ def record_guide_progress(save, body, step_counts):
     section, step = parse_guide_excute(body)
     sections = get_guide_sections(save, step_counts)
     total = step_counts.get(section, 0)
+    if step_counts and (not total or step > total):
+        raise ValueError("引导上报超出配置")
     rec = sections.get(str(section), {})
     history = set(rec.get("steps") or [])
     history.add(step)
-    done = bool(total and step >= total)
+    step = max(step, rec.get("step", 0))
+    done = rec.get("status") == 2 or bool(total and step >= total)
     sections[str(section)] = {"status": 2 if done else 1, "step": step, "steps": sorted(history)}
     save["guide"] = {"sections": sections}
     tag = "已完结" if done else "进行中"

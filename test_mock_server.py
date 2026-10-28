@@ -47,6 +47,7 @@ class ReplayRoutingTests(unittest.TestCase):
         cls.requests = [f for f in cls.frames if f["c2s"]]
         cls.by_seq = {f["seq"]: f for f in cls.requests}
         cls.recorded = {(f["seq"], f["opcode"]): f for f in cls.frames if not f["c2s"] and f["seq"] != 0}
+        cls.activity_frames = json.loads((Path(server.BASE_DIR) / "test_activity_frames.json").read_text())
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -87,6 +88,14 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual([mid for mid, _ in actual_messages], [mid for mid, _ in expected_messages])
             for (mid, data), (_, recorded) in zip(actual_messages, expected_messages):
                 self.assert_replayed_payload(mid, data.hex(), recorded.hex())
+        elif opcode == 3610:
+            groups = self.begin7day_groups(bytes.fromhex(actual))
+            recorded = self.begin7day_groups(bytes.fromhex(expected))
+            self.assertEqual(set(groups), set(recorded))
+            self.assertEqual(groups[0], recorded[0])
+            self.assertEqual((groups[1][0], groups[1][29]), (recorded[1][0], recorded[1][29]))
+            # Only the two supported rewards are live; unsupported paid gifts stay disabled.
+            self.assertTrue(all(value == 0 for i, value in enumerate(groups[1]) if i not in (0, 29)))
         elif opcode in (1001, 1054):
             values = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(actual))}
             recorded = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(expected))}
@@ -115,6 +124,18 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(len(responses), 1)
         self.assertEqual((responses[0]["opcode"], responses[0]["seq"]), (opcode, 20000))
         return bytes.fromhex(responses[0]["hex"])
+
+    def activity_request(self, opcode, values=()):
+        body = b"".join(protocol.encode_pb_field(1, 0, value) for value in values)
+        return {"opcode": opcode, "seq": 20000, "hex": body.hex()}
+
+    def begin7day_groups(self, body):
+        groups = {}
+        for n, w, row in protocol.iter_pb_fields(body):
+            if n == 1 and w == 2:
+                data = next(v for f, t, v in protocol.iter_pb_fields(row) if f == 2 and t == 2)
+                groups[protocol.pb_get_varint(row, 1)] = protocol.parse_ids_pb(data)
+        return groups
 
     def entity_records(self, body, field, key_field):
         return {protocol.pb_get_varint(value, key_field): value for n, wire, value in protocol.iter_pb_fields(body) if n == field and wire == 2}
@@ -657,6 +678,139 @@ class ReplayRoutingTests(unittest.TestCase):
             self.replay([{"opcode": 201, "seq": 10000, "hex": body.hex()}])
             saved = json.loads(self.save_path.read_text())
             self.assertEqual(saved["guide"]["sections"]["1"]["status"], status)
+
+    def test_guide_tail_requires_both_display_steps_and_survives_reconnect(self):
+        self.replay(self.requests)
+        for step, status in ((81, 1), (82, 1), (83, 2)):
+            with self.subTest(step=step):
+                body = protocol.encode_pb_field(1, 0, 1) + protocol.encode_pb_field(2, 0, step)
+                self.replay([{"opcode": 201, "seq": 20000, "hex": body.hex()}])
+                response = self.replay([{"opcode": 200, "seq": 20001, "hex": ""}])[0]
+                self.assertEqual(bytes.fromhex(response["hex"]), guide.build_guide_query_pb({"1": {"status": status, "step": step}}))
+
+    def test_late_guide_reports_do_not_rewind_or_reopen_completed_sections(self):
+        for saved_step, saved_status in ((82, 1), (83, 2), (81, 2)):
+            with self.subTest(saved_step=saved_step, saved_status=saved_status):
+                saved = player.get_default_save()
+                saved["guide"]["sections"]["1"] = {"status": saved_status, "step": saved_step, "steps": [saved_step]}
+                self.save_path.write_text(json.dumps(saved))
+                self.replay([{"opcode": 201, "seq": 20000, "hex": "08011050"}])
+                section = json.loads(self.save_path.read_text())["guide"]["sections"]["1"]
+                self.assertEqual((section["step"], section["status"]), (saved_step, saved_status))
+                self.assertIn(80, section["steps"])
+
+    def test_guide_report_outside_config_cannot_complete_section(self):
+        self.replay_through(12)
+        for section, step in ((1, self.step_counts[1] + 1), (99999, 1)):
+            with self.subTest(section=section, step=step):
+                body = protocol.encode_pb_field(1, 0, section) + protocol.encode_pb_field(2, 0, step)
+                self.assert_rejected({"opcode": 201, "seq": 20000, "hex": body.hex()}, "引导上报超出配置")
+
+    def test_recorded_activity_rewards_are_generated_and_persisted(self):
+        self.replay(self.requests)
+        previous = json.loads(self.save_path.read_text())
+        for frame in self.activity_frames["rewards"]:
+            request = {"opcode": frame["opcode"], "seq": frame["seq"], "hex": frame["request"]}
+            response = self.replay([request])[0]
+            actual = bytes.fromhex(response["hex"])
+            expected = bytes.fromhex(frame["response"])
+            if frame["opcode"] == 3611 and protocol.parse_ids_pb(bytes.fromhex(frame["request"])) == [80030]:
+                actual_equip = next(v for n, w, v in protocol.iter_pb_fields(actual) if n == 6)
+                expected_equip = next(v for n, w, v in protocol.iter_pb_fields(expected) if n == 6)
+                self.assertEqual(protocol.parse_ids_pb(actual_equip)[1:], protocol.parse_ids_pb(expected_equip)[1:])
+                self.assertGreater(protocol.parse_ids_pb(actual_equip)[0], 1000000)
+                self.assertEqual([(n,w,v) for n,w,v in protocol.iter_pb_fields(actual) if n != 6],
+                                 [(n,w,v) for n,w,v in protocol.iter_pb_fields(expected) if n != 6])
+            else:
+                self.assertEqual(actual, expected)
+        saved = json.loads(self.save_path.read_text())
+        self.assertEqual(saved["silver"] - previous["silver"], 32000)
+        self.assertEqual(saved["gold"] - previous["gold"], 150)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20014], 2), 1)
+        equips = self.entity_records(self.query_world(1002), 2, 1)
+        self.assertTrue(any(protocol.parse_ids_pb(equip)[1] == 22204 and iid > 1000000 for iid, equip in equips.items()))
+
+    def test_activity_fixture_frames_match_raw_capture(self):
+        capture = (Path(server.BASE_DIR) / self.activity_frames["source"]).read_bytes()
+        # These selected replies each fit in one captured TCP segment.
+        for frame in self.activity_frames["queries"] + self.activity_frames["rewards"]:
+            with self.subTest(opcode=frame["opcode"], seq=frame["seq"]):
+                packet = protocol.pack_frame(frame["opcode"], frame["seq"], bytes.fromhex(frame["response"]))
+                self.assertTrue(packet in capture, "fixture does not match its source capture")
+
+    def test_activity_claims_are_rejected_when_locked_or_repeated(self):
+        self.replay_through(12)
+        for opcode, values in ((3611, (80030,)), (2411, (116,)), (3611, (80015,)), (3611, (80002,))):
+            with self.subTest(opcode=opcode, values=values):
+                self.assert_rejected(self.activity_request(opcode, values), "活动奖励未解锁或不支持")
+        self.replay([self.activity_request(3611, (80001,))])
+        self.assert_rejected(self.activity_request(3611, (80001,)), "活动奖励已领取")
+        self.replay([f for f in self.requests if f["seq"] > 12])
+        for opcode, values in ((3611, (80030,)), (2411, (116,))):
+            self.replay([self.activity_request(opcode, values)])
+            self.assert_rejected(self.activity_request(opcode, values), "活动奖励已领取")
+
+    def test_activity_queries_restore_claim_flags_and_liveness_score(self):
+        self.replay(self.requests)
+        before = self.begin7day_groups(self.query_world(3610))
+        recorded_before = self.begin7day_groups(bytes.fromhex(self.activity_frames["queries"][0]["response"]))
+        self.assertEqual((before[0], before[1][0], before[1][29]), (recorded_before[0], 1, 1))
+        for opcode, values in ((3611, (80001,)), (3611, (80030,)), (2411, (116,))):
+            self.replay([self.activity_request(opcode, values)])
+        after = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((after[1][0], after[1][29]), (2, 2))
+        liveness = [v for n,w,v in protocol.iter_pb_fields(self.query_world(2410)) if n == 1]
+        recorded = [v for n,w,v in protocol.iter_pb_fields(bytes.fromhex(self.activity_frames["queries"][3]["response"])) if n == 1]
+        self.assertEqual(len(liveness), len(recorded))
+        self.assertEqual((liveness[15], liveness[len(liveness)//2+15]), (2, 4))
+        self.assertEqual(self.query_world(6517).hex(), self.activity_frames["queries"][5]["response"])
+        init = self.replay([dict(self.by_seq[12], seq=30000)])[0]
+        restored = dict(protocol.get_comb_messages(bytes.fromhex(init["hex"])))[3610]
+        self.assertEqual(restored, self.query_world(3610))
+
+    def test_activity_save_failure_is_atomic(self):
+        self.replay(self.requests)
+        for opcode, values in ((3611, (80001,)), (3611, (80030,)), (2411, (116,))):
+            with self.subTest(opcode=opcode, values=values), patch.object(player.os, "replace", side_effect=OSError("disk failure")):
+                self.assert_rejected(self.activity_request(opcode, values), "保存失败")
+
+    def test_activity_equipment_does_not_collide_with_later_recorded_drops(self):
+        self.replay_through(107)
+        reward = self.replay([self.activity_request(3611, (80030,))])[0]
+        equipment = next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(reward["hex"])) if n == 6)
+        iid = protocol.parse_ids_pb(equipment)[0]
+        self.replay([f for f in self.requests if f["seq"] > 107])
+        self.assertEqual(self.entity_records(self.query_world(1002), 2, 1)[iid], equipment)
+
+    def test_activity_inventory_overflow_cannot_partially_grant_reward(self):
+        self.replay_through(12)
+        saved = json.loads(self.save_path.read_text())
+        player.change_item_count(saved, 20014, (1 << 31) - 1, self.role_config)
+        self.save_path.write_text(json.dumps(saved))
+        self.assert_rejected(self.activity_request(3611, (80001,)), "超出范围")
+
+    def test_invalid_activity_state_is_not_overwritten(self):
+        self.replay_through(12)
+        original = json.loads(self.save_path.read_text())
+        for key, value in (("strengthen_count", -1), ("strengthen_count", True),
+                           ("begin7day_claimed", "bad"), ("liveness_claimed", [16, 16])):
+            with self.subTest(key=key, value=value):
+                saved = json.loads(json.dumps(original))
+                saved["activity_state"][key] = value
+                self.save_path.write_text(json.dumps(saved))
+                self.assert_rejected(self.activity_request(3610), "载入玩家状态失败")
+
+    def test_activity_claim_before_role_creation_is_rejected(self):
+        self.save_path.write_text(json.dumps(player.get_default_save()))
+        self.assert_rejected(self.activity_request(3611, (80001,)), "活动奖励未解锁或不支持")
+
+    def test_malformed_activity_claim_does_not_mutate_save(self):
+        self.replay(self.requests)
+        for opcode in (3611, 2411):
+            for body in ("", "0800", "08", "08010802", "0a0101"):
+                with self.subTest(opcode=opcode, body=body):
+                    self.assert_rejected({"opcode": opcode, "seq": 20000, "hex": body}, "活动请求格式错误")
 
     def test_all_19_combination_guide_steps_are_persisted(self):
         requests = [f for f in self.requests if f["opcode"] == 999900 and 201 in protocol.get_comb_ids(bytes.fromhex(f["hex"]))]

@@ -2,7 +2,7 @@
 
 import functools
 
-from . import guide, player
+from . import activities, guide, player
 from .protocol import pack_frame
 from .replay import Replay
 
@@ -17,6 +17,7 @@ class Session:
         self.role_config = role_config
         self.save = player.load_save(save_path, step_counts)
         player.initialize_world_state(self.save, self.replay.master_comb_packets)
+        activities.get_state(self.save)
 
         sections = guide.get_guide_sections(self.save, step_counts)
         in_progress = [s for s in sections.values() if s.get("status") == 1]
@@ -59,6 +60,8 @@ class Session:
 
         if opcode in player.WORLD_QUERY_IDS:
             responses = [{"opcode": opcode, "seq": seq, "hex": self.save["world_state"][str(opcode)]}]
+        elif opcode in activities.OPCODES:
+            responses = [{"opcode": opcode, "seq": seq, "hex": ""}]
         else:
             responses = self.replay.match(opcode, seq, body)
         if responses is None:
