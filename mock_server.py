@@ -65,6 +65,13 @@ with zipfile.ZipFile(CONFIG_ZIP) as config_zip:
     ROLE_EXP_CONFIG = json.loads(config_zip.read("5/role_exp.json"))
     COPY_CONFIG = json.loads(config_zip.read("5/copy.json"))
     PROTAGONIST_GROW_CONFIG = json.loads(config_zip.read("5/protagonist_grow.json"))
+    MAP_CONFIG = json.loads(config_zip.read("5/map.json"))
+    PROPS_CONFIG = json.loads(config_zip.read("5/props.json"))
+    FRAGMENT_CONFIG = json.loads(config_zip.read("5/general_fragment.json"))
+    RECRUIT_CONFIG = json.loads(config_zip.read("5/recruit_basic.json"))
+
+WORLD_QUERY_IDS = (1002, 1012, 1200, 1300)
+SLOT_RECORD_KEYS = {1: 2, 2: 1, 4: 1, 5: 1}
 
 # ==================== 1. 渐进式存档管理 ====================
 
@@ -444,6 +451,139 @@ def get_role_state(save):
         raise ValueError("角色数值必须是非负整数")
     return state
 
+def initialize_world_state(save, master_packets):
+    world = save.setdefault("world_state", {})
+    if not isinstance(world, dict):
+        raise ValueError("world_state 必须是对象")
+    if save.get("has_role") and any(str(mid) not in world for mid in WORLD_QUERY_IDS):
+        print_flush("[!] 旧存档未保存阵容/背包/副本明细，以录制基础建立缓存；无法推断缺失的历史物品。")
+    for frame in master_packets:
+        if frame["opcode"] == 999900:
+            for mid, body in get_comb_messages(bytes.fromhex(frame["hex"])):
+                if mid in WORLD_QUERY_IDS:
+                    world.setdefault(str(mid), body.hex())
+    for mid in WORLD_QUERY_IDS:
+        if str(mid) not in world or not isinstance(world[str(mid)], str):
+            raise ValueError(f"缺少有效的 {mid} 状态基础包")
+        body = bytes.fromhex(world[str(mid)])
+        merge_pb_records(body, b"", SLOT_RECORD_KEYS if mid == 1002 else {1: 1})
+        for field, wire, value in iter_pb_fields(body):
+            if field == 1 and wire == 2:
+                if mid == 1300:
+                    merge_pb_records(value, b"", {7: 1})
+                elif mid in (1012, 1200):
+                    count = pb_get_varint(value, 2)
+                    if count is None or not 0 <= count < (1 << 31):
+                        raise ValueError("存档道具数量无效")
+
+def merge_pb_records(base, update, keys):
+    def identity(field, wire, value):
+        if field not in keys:
+            return field, None
+        if wire != 2:
+            raise ValueError("重复记录必须是嵌套消息")
+        list(iter_pb_fields(value))
+        iid = pb_get_varint(value, keys[field])
+        if iid is None or not 0 < iid < (1 << 31):
+            raise ValueError("重复记录缺少有效标识")
+        return field, iid
+
+    updates = {}
+    for record in iter_pb_fields(update):
+        key = identity(*record)
+        if record[0] in keys:
+            updates[key] = [record]
+        else:
+            updates.setdefault(key, []).append(record)
+    out, written = [], set()
+    for record in iter_pb_fields(base):
+        key = identity(*record)
+        if key not in updates:
+            out.append(record)
+        elif key not in written:
+            out.extend(updates[key])
+            written.add(key)
+    for key, records in updates.items():
+        if key not in written:
+            out.extend(records)
+    return b"".join(encode_pb_field(*record) for record in out)
+
+def record_slot_update(save, body):
+    world = save["world_state"]
+    world["1002"] = merge_pb_records(bytes.fromhex(world["1002"]), body, SLOT_RECORD_KEYS).hex()
+
+def change_item_count(save, cid, delta):
+    if cid in (1000, 1001, 1003):
+        field = {1000: 1, 1001: 2, 1003: 4}[cid]
+        apply_reward(save, encode_pb_field(field, 0, delta & ((1 << 64) - 1)))
+        return
+    fragment = FRAGMENT_CONFIG.get(str(cid))
+    if fragment is None and str(cid) not in PROPS_CONFIG:
+        fragment = next((row for row in FRAGMENT_CONFIG.values() if row["general"] == cid), None)
+    query = "1012" if fragment else "1200"
+    if fragment:
+        cid = fragment["general"]
+    elif str(cid) not in PROPS_CONFIG:
+        raise ValueError(f"未实现的物品类型: {cid}")
+    world = save["world_state"]
+    body = bytes.fromhex(world[query])
+    record = next((v for n, w, v in iter_pb_fields(body) if n == 1 and w == 2 and pb_get_varint(v, 1) == cid), b"")
+    count = (pb_get_varint(record, 2) or 0) + delta
+    if not 0 <= count < (1 << 31):
+        raise ValueError(f"道具 {cid} 数量不足或超出范围")
+    record = pb_set_varint(pb_set_varint(record, 1, cid), 2, count)
+    if fragment:
+        record = pb_set_varint(pb_set_varint(record, 3, 1), 4, fragment["num"])
+    body = merge_pb_records(body, encode_pb_field(1, 2, record), {1: 1})
+    world[query] = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(body)
+                              if not (n == 1 and w == 2 and pb_get_varint(v, 2) == 0)).hex()
+
+def record_copy_win(save, request_body, star):
+    location = parse_ids_pb(request_body)
+    if len(location) != 2 or not 0 < star <= 3:
+        raise ValueError("无效的副本战斗位置或星级")
+    map_id, point_id = location
+    config = COPY_CONFIG[str(map_id)]
+    if str(point_id) not in config:
+        raise ValueError("副本关卡不存在")
+    world = save["world_state"]
+    copies = bytes.fromhex(world["1300"])
+    current = next((v for n, w, v in iter_pb_fields(copies) if n == 1 and w == 2 and pb_get_varint(v, 1) == map_id), b"")
+    if not current:
+        current = b"".join(encode_pb_field(n, 0, v) for n, v in ((1, map_id), (2, 0), (3, 0), (4, 1), (5, 1), (6, 1)))
+    points = {pb_get_varint(v, 1): v for n, w, v in iter_pb_fields(current) if n == 7 and w == 2}
+    # shortcut: 录制战斗只支持首次通关，重复战斗需真实结算；拒绝旧回包覆盖当前属性。
+    if point_id in points and pb_get_varint(points[point_id], 3):
+        raise ValueError("已通关关卡不支持重复录制战斗")
+    point = b"".join(encode_pb_field(n, 0, v) for n, v in ((1, point_id), (2, 0), (3, star), (4, 1)))
+    points[point_id] = point
+    current = merge_pb_records(current, encode_pb_field(7, 2, point), {7: 1})
+    total = sum(pb_get_varint(v, 3) or 0 for v in points.values())
+    for i in (1, 2, 3):
+        if pb_get_varint(current, i + 3) == 1 and total >= MAP_CONFIG[str(map_id)][f"star{i}"]:
+            current = pb_set_varint(current, i + 3, 2)
+    if all(int(p) in points and pb_get_varint(points[int(p)], 3) == 3 for p in config):
+        current = pb_set_varint(current, 2, 3)
+    copies = merge_pb_records(copies, encode_pb_field(1, 2, current), {1: 1})
+    if str(point_id + 1) not in config and str(map_id + 1) in COPY_CONFIG:
+        existing = any(n == 1 and w == 2 and pb_get_varint(v, 1) == map_id + 1 for n, w, v in iter_pb_fields(copies))
+        if not existing:
+            unlocked = b"".join(encode_pb_field(n, 0, v) for n, v in ((1, map_id + 1), (2, 0), (3, 0), (4, 1), (5, 1), (6, 1)))
+            copies += encode_pb_field(1, 2, unlocked)
+    world["1300"] = copies.hex()
+
+def record_copy_box(save, request_body):
+    ids = parse_ids_pb(request_body)
+    if len(ids) != 2 or ids[1] not in (0, 3, 6):
+        raise ValueError("无效的副本宝箱请求")
+    copies = bytes.fromhex(save["world_state"]["1300"])
+    current = next((v for n, w, v in iter_pb_fields(copies) if n == 1 and w == 2 and pb_get_varint(v, 1) == ids[0]), None)
+    field = {0: 4, 3: 5, 6: 6}[ids[1]]
+    if current is None or pb_get_varint(current, field) != 2:
+        raise ValueError("副本宝箱未解锁或已领取")
+    current = pb_set_varint(current, field, 3)
+    save["world_state"]["1300"] = merge_pb_records(copies, encode_pb_field(1, 2, current), {1: 1}).hex()
+
 def apply_reward(save, body):
     state = get_role_state(save)
     for field, wire, value in iter_pb_fields(body):
@@ -454,8 +594,19 @@ def apply_reward(save, body):
             if balance < 0:
                 raise ValueError(f"{name} 不足，拒绝录制操作")
             state[name] = balance
+        elif field in (5, 10) and wire == 2:
+            for n, w, record in iter_pb_fields(value):
+                if n == 1 and w == 2:
+                    cid, count = pb_get_varint(record, 1), pb_get_varint(record, 2)
+                    if cid is None or count is None:
+                        raise ValueError("道具变更缺少 ID/数量")
+                    count = (count & 0xffffffff) - (1 << 32) if count & (1 << 31) else count
+                    change_item_count(save, cid, count if field == 5 else -count)
+        elif field == 6 and wire == 2:
+            record_slot_update(save, encode_pb_field(2, 2, value))
         elif field == 8 and wire == 2:
             record_protagonist_general(save, value)
+            record_slot_update(save, encode_pb_field(1, 2, value))
 
 def record_protagonist_general(save, general):
     snapshot = save.get("protagonist_snapshot")
@@ -482,7 +633,17 @@ def prepare_recorded_response(opcode, body, save, request_body):
                     value = pb_set_field(value, 2, 2, updated)
             out.extend(encode_pb_field(field, wire, value))
         return bytes(out)
-    if opcode == 1001:
+    if opcode in WORLD_QUERY_IDS:
+        body = bytes.fromhex(save["world_state"][str(opcode)])
+        if opcode == 1002 and save.get("protagonist_snapshot"):
+            protagonist = bytes.fromhex(save["protagonist_snapshot"])
+            update = encode_pb_field(6, 2, protagonist)
+            for field, wire, value in iter_pb_fields(protagonist):
+                if field == 10 and wire == 2:
+                    update += encode_pb_field(1, 2, value)
+            record_slot_update(save, update)
+            body = bytes.fromhex(save["world_state"]["1002"])
+    elif opcode == 1001:
         get_role_state(save)
         body = apply_role_state(bytes.fromhex(save["role_snapshot"]) if save.get("role_snapshot") else body, save)
         save["role_snapshot"] = body.hex()
@@ -492,18 +653,33 @@ def prepare_recorded_response(opcode, body, save, request_body):
         ids = parse_ids_pb(request_body)
         if len(ids) != 1 or ids[0] <= 0 or not pb_get_varint(body, 1):
             raise ValueError("无效的选将请求或响应")
+        if save.get("has_role"):
+            raise ValueError("角色已创建，拒绝旧选将录制覆盖")
         save["selected_general_id"] = ids[0]
         save["has_role"] = True
         save["protagonist_snapshot"] = body.hex()
     elif opcode in (1050, 1054):
         body = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else body
     elif opcode == 1055:
+        previous = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
+        ids = parse_ids_pb(request_body)
+        if len(ids) != 2 or ids[0] not in (1, 2, 3) or ids[1] <= 0:
+            raise ValueError("无效的主角培养请求")
+        config = PROTAGONIST_GROW_CONFIG[str((pb_get_varint(body, 3) or 1) + 1)]
+        attribute = {1: "atk", 2: "def", 3: "hp"}[ids[0]]
+        increase = (pb_get_varint(body, ids[0] + 3) or 0) - (pb_get_varint(previous, ids[0] + 3) or 0)
+        if ((pb_get_varint(previous, 3) or 1) != pb_get_varint(body, 3)
+                or (pb_get_varint(previous, 2) or 1) > (pb_get_varint(body, 2) or 1)
+                or increase != ids[1]):
+            raise ValueError("已过期的主角培养录制，拒绝覆盖当前成长")
+        change_item_count(save, int(config[f"{attribute}_cost"]), -increase * config[f"{attribute}_stone"])
         save["protagonist_snapshot"] = body.hex()
     elif opcode == 205:
         ids = parse_ids_pb(body)
         if len(ids) >= 6:
             get_role_state(save).update(power=ids[1], g_power=ids[3], power_all=ids[5])
     elif opcode in (1003, 1007, 1024, 1027, 1057):
+        record_slot_update(save, body)
         old_protagonist = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
         old_growth = pb_get_varint(old_protagonist, 3) or 1
         for field, wire, value in iter_pb_fields(body):
@@ -512,14 +688,13 @@ def prepare_recorded_response(opcode, body, save, request_body):
             elif field == 6 and wire == 2 and opcode == 1057:
                 previous = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
                 level = pb_get_varint(value, 3)
-                if level and level > old_growth:
-                    costs = PROTAGONIST_GROW_CONFIG[str(level)]["consume"]
-                    for cost in costs.split(";"):
-                        if cost:
-                            cid, amount = map(int, cost.split(","))
-                            if cid in (1000, 1001):
-                                reward_field = 1 if cid == 1000 else 2
-                                apply_reward(save, encode_pb_field(reward_field, 0, (-amount) & ((1 << 64) - 1)))
+                if level != old_growth + 1:
+                    raise ValueError("已过期的主角进阶录制，拒绝覆盖当前成长")
+                costs = PROTAGONIST_GROW_CONFIG[str(level)]["consume"]
+                for cost in costs.split(";"):
+                    if cost:
+                        cid, amount = map(int, cost.split(","))
+                        change_item_count(save, cid, -amount)
                 general = next((v for n, w, v in iter_pb_fields(previous) if n == 10 and w == 2), None)
                 save["protagonist_snapshot"] = (pb_set_field(value, 10, 2, general) if general else value).hex()
                 if general:
@@ -527,28 +702,53 @@ def prepare_recorded_response(opcode, body, save, request_body):
     elif opcode == 1306:
         values = {n: v for n, w, v in iter_pb_fields(body)}
         if values.get(1) in (0, 1):
+            if values[1] == 1:
+                record_copy_win(save, request_body, values[2])
             exp = {n: v for n, w, v in iter_pb_fields(values[3])}
             state = get_role_state(save)
             # shortcut: 仅处理录制教程中递增的经验轨迹，任意重复战斗需实现真实结算。
-            if (exp[2], exp[3]) > (state["level"], state["exp"]):
-                apply_reward(save, values[4])
-                config = ROLE_EXP_CONFIG[str(exp[2])]
-                location = parse_ids_pb(request_body)
-                state.update(level=exp[2], exp=exp[3], nextexp=config["nextexp"],
-                             maxstamina=config["maxstamina"], maxenergy=config["maxenergy"])
-                # shortcut: 体力仅按录制操作消耗，按时间恢复需接入服务端时钟。
-                state["stamina"] -= COPY_CONFIG[str(location[0])][str(location[1])]["physical"]
-                if state["stamina"] < 0:
-                    raise ValueError("体力不足")
+            if (exp[2], exp[3]) <= (state["level"], state["exp"]):
+                raise ValueError("战斗录制经验已过期，拒绝覆盖当前状态")
+            apply_reward(save, values[4])
+            config = ROLE_EXP_CONFIG[str(exp[2])]
+            location = parse_ids_pb(request_body)
+            state.update(level=exp[2], exp=exp[3], nextexp=config["nextexp"],
+                         maxstamina=config["maxstamina"], maxenergy=config["maxenergy"])
+            # shortcut: 体力仅按录制操作消耗，按时间恢复需接入服务端时钟。
+            state["stamina"] -= COPY_CONFIG[str(location[0])][str(location[1])]["physical"]
+            if state["stamina"] < 0:
+                raise ValueError("体力不足")
             for field, wire, value in iter_pb_fields(body):
                 if field == 6 and wire == 2:
                     record_protagonist_general(save, value)
+                    record_slot_update(save, encode_pb_field(1, 2, value))
     elif opcode in (1109, 1201, 1304):
+        if opcode == 1201:
+            ids = parse_ids_pb(request_body)
+            if len(ids) < 2 or ids[1] <= 0:
+                raise ValueError("无效的道具使用请求")
+            change_item_count(save, ids[0], -ids[1])
+            config = PROPS_CONFIG[str(ids[0])]
+            if config["type"] == "keybox":
+                change_item_count(save, int(config["param1"]), -ids[1])
+        elif opcode == 1304:
+            record_copy_box(save, request_body)
         apply_reward(save, body)
     elif opcode == 1403:
-        for mid, data in get_comb_messages(body):
-            if mid == 1:
-                apply_reward(save, data)
+        ids = parse_ids_pb(request_body)
+        if len(ids) != 2:
+            raise ValueError("无效的招募请求")
+        rewards = [data for mid, data in get_comb_messages(body) if mid == 1]
+        owned = {pb_get_varint(v, 2) for n, w, v in iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])) if n == 1 and w == 2}
+        for reward in rewards:
+            if any(n == 8 and w == 2 and pb_get_varint(v, 2) in owned for n, w, v in iter_pb_fields(reward)):
+                raise ValueError("不支持重复录制招募，拒绝覆盖已有武将")
+        config = RECRUIT_CONFIG[str(ids[0])]
+        if config["openfreerecruit"] == 1 and ids[1] == 1:
+            change_item_count(save, config["costid"], -config["count"])
+        # shortcut: 录制招募仅覆盖各自首次，后续招募及冷却/付费规则需真实业务实现。
+        for reward in rewards:
+            apply_reward(save, reward)
     return body
 
 def send_recorded_responses(conn, seq, responses, save, request_body):
@@ -649,7 +849,9 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets, r
     print_flush(f"\n[+] 新客户端连入: {addr}")
     try:
         save = load_save()
-    except Exception:
+        initialize_world_state(save, master_comb_packets)
+    except Exception as e:
+        print_flush(f"[!] 载入玩家状态失败: {e}")
         conn.close()
         return
     has_role = save.get("has_role", False)
@@ -751,6 +953,10 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets, r
                     continue
 
                 # ---------- C3. 普通请求校验后回放；Comb 始终按完整请求参数路由 ----------
+                if opcode in WORLD_QUERY_IDS:
+                    response = {"opcode": opcode, "seq": seq, "hex": save["world_state"][str(opcode)]}
+                    send_recorded_responses(conn, seq, [response], save, body)
+                    continue
                 recorded_op, recorded_body, hit = resp_by_seq.get(seq, (None, None, None))
                 if opcode != 999900 and hit and recorded_op == opcode and recorded_body == body:
                     op_counters[opcode] = op_counters.get(opcode, 0) + 1
