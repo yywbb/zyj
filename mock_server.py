@@ -20,6 +20,7 @@
 """
 
 import functools
+import copy
 print_flush = functools.partial(print, flush=True)
 
 import socket
@@ -31,6 +32,7 @@ import subprocess
 import threading
 import time
 import zipfile
+import tempfile
 
 PORT = 14600
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -59,6 +61,10 @@ def load_guide_step_counts():
     return counts
 
 GUIDE_STEP_COUNTS = load_guide_step_counts()
+with zipfile.ZipFile(CONFIG_ZIP) as config_zip:
+    ROLE_EXP_CONFIG = json.loads(config_zip.read("5/role_exp.json"))
+    COPY_CONFIG = json.loads(config_zip.read("5/copy.json"))
+    PROTAGONIST_GROW_CONFIG = json.loads(config_zip.read("5/protagonist_grow.json"))
 
 # ==================== 1. 渐进式存档管理 ====================
 
@@ -70,7 +76,7 @@ def get_default_save():
         "level": 1,
         "gold": 0,
         "silver": 0,
-        "energy": 50,
+        "energy": 20,
         # sections: { "<section号>": {"status": 1|2, "step": 最后完成的步数} }
         # 空字典 = 全新号, 客户端会从头播开场剧情
         "guide": {"sections": {}},
@@ -102,7 +108,7 @@ def normalize_sections(sections):
             history = [step] if step > 0 else []
         # 对齐官方抓包: 200 应答里的 step = 客户端"最后上报的那一步"
         # (官方样例 0a06080110021851 -> section=1, status=2, step=81)
-        # redo==0 的步骤客户端不上报 (section 1 里是 78/79/80), 所以轨迹跳号是正常的
+        # redo==0 的步骤在 Comb 内上报，不能只看独立的 201 请求。
         if total and step >= total:
             status = 2
         elif status != 2:
@@ -134,17 +140,27 @@ def load_save():
                 data = json.load(f)
                 return migrate_guide(data)
         except Exception as e:
-            print_flush(f"[!] 读取存档失败 ({e})，使用默认空存档")
+            print_flush(f"[!] 读取存档失败 ({e})，保留原文件并停止加载")
+            raise ValueError("存档读取失败，拒绝用空进度覆盖") from e
     return get_default_save()
 
 def save_role(save_data):
+    temporary_path = None
     try:
         save_data["last_login"] = time.time()
-        with open(SAVE_PATH, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(SAVE_PATH), delete=False) as f:
+            temporary_path = f.name
             json.dump(save_data, f, ensure_ascii=False, indent=2)
+        os.replace(temporary_path, SAVE_PATH)
+        temporary_path = None
         print_flush(f"[✓] 进度实时落盘: 角色【{save_data.get('role_name', '未起名')}】 (Lv.{save_data.get('level', 1)}, 引导: {describe_guide(get_guide_sections(save_data))})")
+        return True
     except Exception as e:
         print_flush(f"[!] 保存存档失败: {e}")
+        return False
+    finally:
+        if temporary_path is not None:
+            os.unlink(temporary_path)
 
 # ==================== 2. Protobuf 编解码辅助 ====================
 
@@ -161,43 +177,65 @@ def encode_varint(n):
     return bytes(res)
 
 def parse_varint(buf, pos):
-    res, shift = 0, 0
-    while True:
+    res = 0
+    for shift in range(0, 70, 7):
+        if pos >= len(buf):
+            raise ValueError("截断的 Protobuf varint")
         b = buf[pos]
         pos += 1
+        if shift == 63 and b > 1:
+            raise ValueError("Protobuf varint 超出 64 位")
         res |= (b & 0x7f) << shift
         if not (b & 0x80):
-            break
-        shift += 7
-    return res, pos
+            return res, pos
+    raise ValueError("无终止字节的 Protobuf varint")
 
-def get_comb_ids(raw):
+def iter_pb_fields(raw):
     pos = 0
-    ids = []
     while pos < len(raw):
         tag, pos = parse_varint(raw, pos)
-        fn = tag >> 3
-        wt = tag & 7
-        if fn == 1 and wt == 2:
-            length, pos = parse_varint(raw, pos)
-            sub = raw[pos:pos+length]
-            pos += length
-            spos = 0
-            while spos < len(sub):
-                stag, spos = parse_varint(sub, spos)
-                sfn = stag >> 3
-                swt = stag & 7
-                if sfn == 1 and swt == 0:
-                    mid, spos = parse_varint(sub, spos)
-                    ids.append(mid)
-                elif swt == 2:
-                    dlen, spos = parse_varint(sub, spos)
-                    spos += dlen
-                elif swt == 0:
-                    _, spos = parse_varint(sub, spos)
+        fn, wt = tag >> 3, tag & 7
+        if not 0 < fn < (1 << 29):
+            raise ValueError("无效的 Protobuf 字段号")
+        if wt == 0:
+            value, pos = parse_varint(raw, pos)
+        elif wt in (1, 2, 5):
+            if wt == 2:
+                length, pos = parse_varint(raw, pos)
+            else:
+                length = 8 if wt == 1 else 4
+            end = pos + length
+            if end > len(raw):
+                raise ValueError("截断的 Protobuf 字段")
+            value, pos = raw[pos:end], end
         else:
-            break
-    return tuple(sorted(ids))
+            raise ValueError(f"不支持的 Protobuf wire type: {wt}")
+        yield fn, wt, value
+
+def get_comb_messages(raw):
+    messages = []
+    for fn, wt, value in iter_pb_fields(raw):
+        if fn != 1:
+            continue
+        if wt != 2:
+            raise ValueError("Comb messages 字段必须是嵌套消息")
+        mid, data = None, b""
+        for sfn, swt, sub in iter_pb_fields(value):
+            if sfn == 1:
+                if swt != 0:
+                    raise ValueError("Comb id 字段必须是整数")
+                mid = sub
+            elif sfn == 2:
+                if swt != 2:
+                    raise ValueError("Comb data 字段必须是 bytes")
+                data = sub
+        if mid is None or not 0 < mid < (1 << 31):
+            raise ValueError("Comb 消息缺少有效的 id")
+        messages.append((mid, data))
+    return messages
+
+def get_comb_ids(raw):
+    return tuple(sorted(mid for mid, _ in get_comb_messages(raw)))
 
 def encode_guide_section(sec_i, status, step):
     """GuideSection { 1:section, 2:status, 3:step }"""
@@ -243,46 +281,41 @@ def get_guide_sections(save):
     return normalize_sections(g.get("sections", {}))
 
 def parse_set_name(body):
-    try:
-        pos = 0
-        while pos < len(body):
-            tag, pos = parse_varint(body, pos)
-            fn = tag >> 3
-            wt = tag & 7
-            if fn == 1 and wt == 2:
-                length, pos = parse_varint(body, pos)
-                return body[pos:pos+length].decode("utf-8")
-            elif wt == 0:
-                _, pos = parse_varint(body, pos)
-            elif wt == 2:
-                length, pos = parse_varint(body, pos)
-                pos += length
-    except Exception:
-        pass
-    return None
+    name = None
+    for field, wire, value in iter_pb_fields(body):
+        if field == 1:
+            if wire != 2:
+                raise ValueError("名字必须是 UTF-8 字符串")
+            name = value.decode("utf-8")
+    if not name:
+        raise ValueError("缺少玩家名字")
+    return name
 
 def parse_guide_excute(body):
-    try:
-        pos = 0
-        section = 1
-        step = 1
-        while pos < len(body):
-            tag, pos = parse_varint(body, pos)
-            fn = tag >> 3
-            wt = tag & 7
-            if fn == 1 and wt == 0:
-                section, pos = parse_varint(body, pos)
-            elif fn == 2 and wt == 0:
-                step, pos = parse_varint(body, pos)
-            elif wt == 2:
-                length, pos = parse_varint(body, pos)
-                pos += length
-        return section, step
-    except Exception:
-        pass
-    return 1, 1
+    values = {}
+    for fn, wt, value in iter_pb_fields(body):
+        if fn in (1, 2):
+            if wt != 0:
+                raise ValueError("引导 section/step 字段必须是整数")
+            values[fn] = value
+    if any(fn not in values or not 0 < values[fn] < (1 << 31) for fn in (1, 2)):
+        raise ValueError("引导上报缺少有效的 section/step")
+    return values[1], values[2]
 
-# ---- 角色状态持久化相关 (客户端通过 999898 上报, 服务端在 1001 应答里回填) ----
+def record_guide_progress(save, body):
+    section, step = parse_guide_excute(body)
+    sections = get_guide_sections(save)
+    total = GUIDE_STEP_COUNTS.get(section, 0)
+    rec = sections.get(str(section), {})
+    history = set(rec.get("steps") or [])
+    history.add(step)
+    done = bool(total and step >= total)
+    sections[str(section)] = {"status": 2 if done else 1, "step": step, "steps": sorted(history)}
+    save["guide"] = {"sections": sections}
+    tag = "已完结" if done else "进行中"
+    print_flush(f"  [201] Section {section} Step {step}/{total or '?'} [{tag}] 已记录 {len(history)} 步")
+
+# ---- 角色状态持久化 (由录制操作更新；999898 仅兼容旧客户端) ----
 
 # role_pb.Role 的字段号: id=1 gender=2 name=3 vip=4 level=5 exp=6 nextexp=7
 #                        coin=8 gold=9 stamina=10 maxstamina=11 energy=12
@@ -290,9 +323,17 @@ def parse_guide_excute(body):
 ROLE_FIELD_MAP = {
     "level": 5,
     "exp": 6,
+    "nextexp": 7,
     "coin": 8,
     "gold": 9,
+    "stamina": 10,
+    "maxstamina": 11,
+    "energy": 12,
+    "maxenergy": 13,
     "power": 14,
+    "profile": 21,
+    "g_power": 26,
+    "power_all": 27,
 }
 
 def parse_ids_pb(body):
@@ -321,45 +362,29 @@ def parse_ids_pb(body):
             break
     return out
 
-def pb_set_varint(body, field, value):
-    """把顶层 varint 字段 field 设为 value；字段不存在则追加。其它字段原样保留。"""
+def encode_pb_field(field, wire, value):
+    tag = encode_varint((field << 3) | wire)
+    if wire == 0:
+        if not 0 <= value < (1 << 64):
+            raise ValueError("Protobuf 整数字段超出 64 位")
+        return tag + encode_varint(value)
+    if wire == 2:
+        return tag + encode_varint(len(value)) + value
+    return tag + value
+
+def pb_set_field(body, field, wire, value):
     out = bytearray()
-    pos = 0
     found = False
-    while pos < len(body):
-        start = pos
-        try:
-            tag, pos = parse_varint(body, pos)
-        except Exception:
-            out.extend(body[start:])
-            break
-        fn = tag >> 3
-        wt = tag & 7
-        if wt == 0:
-            _, pos = parse_varint(body, pos)
-            if fn == field:
-                out.extend(encode_varint((field << 3) | 0))
-                out.extend(encode_varint(value))
-                found = True
-            else:
-                out.extend(body[start:pos])
-        elif wt == 2:
-            ln, pos = parse_varint(body, pos)
-            pos += ln
-            out.extend(body[start:pos])
-        elif wt == 5:
-            pos += 4
-            out.extend(body[start:pos])
-        elif wt == 1:
-            pos += 8
-            out.extend(body[start:pos])
-        else:
-            out.extend(body[start:])
-            break
+    for fn, wt, old in iter_pb_fields(body):
+        if fn == field:
+            wt, old, found = wire, value, True
+        out.extend(encode_pb_field(fn, wt, old))
     if not found:
-        out.extend(encode_varint((field << 3) | 0))
-        out.extend(encode_varint(value))
+        out.extend(encode_pb_field(field, wire, value))
     return bytes(out)
+
+def pb_set_varint(body, field, value):
+    return pb_set_field(body, field, 0, value)
 
 def pb_get_varint(body, field):
     """读取顶层 varint 字段的值，不存在返回 None。"""
@@ -388,14 +413,164 @@ def pb_get_varint(body, field):
 
 def apply_role_state(body, save):
     """把存档里的角色状态回填进 Role 消息，避免回放录制数据时把等级/货币冲掉。"""
-    st = save.get("role_state")
-    if not st:
-        return body
+    st = save.get("role_state") or {}
     for k, fn in ROLE_FIELD_MAP.items():
         v = st.get(k)
-        if isinstance(v, int) and v > 0:
+        if type(v) is int and v >= 0:
             body = pb_set_varint(body, fn, v)
+    if save.get("role_name"):
+        body = pb_set_field(body, 3, 2, save["role_name"].encode("utf-8"))
     return body
+
+def get_role_state(save):
+    state = save.setdefault("role_state", {})
+    if not isinstance(state, dict):
+        raise ValueError("role_state 必须是对象")
+    if save.get("role_snapshot"):
+        snapshot = bytes.fromhex(save["role_snapshot"])
+        for name, field in ROLE_FIELD_MAP.items():
+            value = pb_get_varint(snapshot, field)
+            if value is not None:
+                state.setdefault(name, value)
+    level = state.setdefault("level", save.get("level", 1))
+    config = ROLE_EXP_CONFIG[str(level)]
+    defaults = {"exp": 0, "nextexp": config["nextexp"], "coin": save.get("silver", 0),
+                "gold": save.get("gold", 0), "stamina": config["maxstamina"],
+                "maxstamina": config["maxstamina"], "energy": save.get("energy", 20),
+                "maxenergy": config["maxenergy"], "power": 0, "g_power": 0, "power_all": 0}
+    for name, value in defaults.items():
+        state.setdefault(name, value)
+    if any(type(value) is not int or value < 0 for name, value in state.items() if name in ROLE_FIELD_MAP):
+        raise ValueError("角色数值必须是非负整数")
+    return state
+
+def apply_reward(save, body):
+    state = get_role_state(save)
+    for field, wire, value in iter_pb_fields(body):
+        if field in (1, 2, 3, 4) and wire == 0:
+            name = {1: "coin", 2: "gold", 3: "stamina", 4: "energy"}[field]
+            delta = value - (1 << 64) if value >= (1 << 63) else value
+            balance = state[name] + delta
+            if balance < 0:
+                raise ValueError(f"{name} 不足，拒绝录制操作")
+            state[name] = balance
+        elif field == 8 and wire == 2:
+            record_protagonist_general(save, value)
+
+def record_protagonist_general(save, general):
+    snapshot = save.get("protagonist_snapshot")
+    if not snapshot:
+        return
+    body = bytes.fromhex(snapshot)
+    if pb_get_varint(general, 2) != pb_get_varint(body, 1):
+        return
+    body = pb_set_field(body, 10, 2, general)
+    body = pb_set_varint(body, 2, pb_get_varint(general, 3))
+    # General_Property.level2 与 Protagonist.level2 不是同一成长级别。
+    save["protagonist_snapshot"] = body.hex()
+
+def prepare_recorded_response(opcode, body, save, request_body):
+    if opcode == 999900:
+        requests = dict(get_comb_messages(request_body))
+        messages = iter(get_comb_messages(body))
+        out = bytearray()
+        for field, wire, value in iter_pb_fields(body):
+            if field == 1 and wire == 2:
+                mid, data = next(messages)
+                updated = prepare_recorded_response(mid, data, save, requests.get(mid, b""))
+                if updated != data:
+                    value = pb_set_field(value, 2, 2, updated)
+            out.extend(encode_pb_field(field, wire, value))
+        return bytes(out)
+    if opcode == 1001:
+        get_role_state(save)
+        body = apply_role_state(bytes.fromhex(save["role_snapshot"]) if save.get("role_snapshot") else body, save)
+        save["role_snapshot"] = body.hex()
+    elif opcode == 201 and request_body and pb_get_varint(body, 1) == 1:
+        record_guide_progress(save, request_body)
+    elif opcode == 202:
+        ids = parse_ids_pb(request_body)
+        if len(ids) != 1 or ids[0] <= 0 or not pb_get_varint(body, 1):
+            raise ValueError("无效的选将请求或响应")
+        save["selected_general_id"] = ids[0]
+        save["has_role"] = True
+        save["protagonist_snapshot"] = body.hex()
+    elif opcode in (1050, 1054):
+        body = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else body
+    elif opcode == 1055:
+        save["protagonist_snapshot"] = body.hex()
+    elif opcode == 205:
+        ids = parse_ids_pb(body)
+        if len(ids) >= 6:
+            get_role_state(save).update(power=ids[1], g_power=ids[3], power_all=ids[5])
+    elif opcode in (1003, 1007, 1024, 1027, 1057):
+        old_protagonist = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
+        old_growth = pb_get_varint(old_protagonist, 3) or 1
+        for field, wire, value in iter_pb_fields(body):
+            if field == 1 and wire == 2:
+                record_protagonist_general(save, value)
+            elif field == 6 and wire == 2 and opcode == 1057:
+                previous = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
+                level = pb_get_varint(value, 3)
+                if level and level > old_growth:
+                    costs = PROTAGONIST_GROW_CONFIG[str(level)]["consume"]
+                    for cost in costs.split(";"):
+                        if cost:
+                            cid, amount = map(int, cost.split(","))
+                            if cid in (1000, 1001):
+                                reward_field = 1 if cid == 1000 else 2
+                                apply_reward(save, encode_pb_field(reward_field, 0, (-amount) & ((1 << 64) - 1)))
+                general = next((v for n, w, v in iter_pb_fields(previous) if n == 10 and w == 2), None)
+                save["protagonist_snapshot"] = (pb_set_field(value, 10, 2, general) if general else value).hex()
+                if general:
+                    get_role_state(save)["profile"] = pb_get_varint(general, 1)
+    elif opcode == 1306:
+        values = {n: v for n, w, v in iter_pb_fields(body)}
+        if values.get(1) in (0, 1):
+            exp = {n: v for n, w, v in iter_pb_fields(values[3])}
+            state = get_role_state(save)
+            # shortcut: 仅处理录制教程中递增的经验轨迹，任意重复战斗需实现真实结算。
+            if (exp[2], exp[3]) > (state["level"], state["exp"]):
+                apply_reward(save, values[4])
+                config = ROLE_EXP_CONFIG[str(exp[2])]
+                location = parse_ids_pb(request_body)
+                state.update(level=exp[2], exp=exp[3], nextexp=config["nextexp"],
+                             maxstamina=config["maxstamina"], maxenergy=config["maxenergy"])
+                # shortcut: 体力仅按录制操作消耗，按时间恢复需接入服务端时钟。
+                state["stamina"] -= COPY_CONFIG[str(location[0])][str(location[1])]["physical"]
+                if state["stamina"] < 0:
+                    raise ValueError("体力不足")
+            for field, wire, value in iter_pb_fields(body):
+                if field == 6 and wire == 2:
+                    record_protagonist_general(save, value)
+    elif opcode in (1109, 1201, 1304):
+        apply_reward(save, body)
+    elif opcode == 1403:
+        for mid, data in get_comb_messages(body):
+            if mid == 1:
+                apply_reward(save, data)
+    return body
+
+def send_recorded_responses(conn, seq, responses, save, request_body):
+    before = copy.deepcopy(save)
+    packets = []
+    for response in responses:
+        opcode = response["opcode"]
+        body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
+                                         request_body if response["seq"] != 0 else b"")
+        packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
+    state = save.get("role_state")
+    if state:
+        for name, key in (("level", "level"), ("coin", "silver"), ("gold", "gold"), ("energy", "energy")):
+            save[key] = state[name]
+        if save.get("role_snapshot"):
+            save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save).hex()
+    if save != before and not save_role(save):
+        raise OSError("角色状态保存失败，不发送成功响应")
+    for packet, response in zip(packets, responses):
+        conn.sendall(packet)
+        send_seq = seq if response["seq"] != 0 else 0
+        print_flush(f"  └── [S->C] Opcode: {response['opcode']:6d}, Seq: {send_seq:3d}, Len: {len(packet) - 16:4d} B")
 
 # ==================== 3. 封包与路由构建 ====================
 
@@ -414,6 +589,11 @@ def load_recordings():
 def build_routing_tables(frames):
     opcode_routes = {}
     comb_routes = {}
+    verified = {}
+    replies = {}
+    for index, frame in enumerate(frames):
+        if not frame["c2s"] and frame["seq"] != 0:
+            replies.setdefault((frame["seq"], frame["opcode"]), []).append((index, frame))
     
     i = 0
     while i < len(frames):
@@ -421,30 +601,31 @@ def build_routing_tables(frames):
         if f["c2s"]:
             op = f["opcode"]
             raw = bytes.fromhex(f["hex"])
-            resps = []
+            events = []
             j = i + 1
             while j < len(frames) and not frames[j]["c2s"]:
-                resps.append(frames[j])
+                r = frames[j]
+                # shortcut: 目前仅恢复教程所需的非空状态推送，其他异步事件待业务实现后补齐。
+                if r["seq"] == 0 and r["opcode"] in (205, 1024, 1027) and r["hex"]:
+                    events.append((j, r))
                 j += 1
 
-            # 关键净化：官方通信是严格一问一答（录制里 167 条请求全部满足
-            # "首条应答 opcode == 请求 opcode"，且无一问多答）。
-            # 录制时夹杂的服务端主动推送（seq=0 的 999/3501/5207/1027/205/1024/111 等）
-            # 会被上面的连续帧扫描误并进应答组。若不剔除，客户端会收到不该收的推送，
-            # 触发错误的 UIUpdate 并打断流程（典型现象：引导卡在 step 24）。
-            resps = [r for r in resps if r["opcode"] == op]
-
-            # 只收录非空应答组：空组会让轮询命中"录制缺失"分支而补发空包，
-            # 客户端因此拿不到真实数据（例如 2000 的 1113B 应答）。
-            if not resps:
+            # 应答可能跨过后续请求才到达，不能只在相邻服务端帧内查找。
+            matched = replies.get((f["seq"], op), [])
+            if not matched:
                 i = j
                 continue
+            events.extend(matched)
+            events.sort(key=lambda item: item[0])
+            resps = [r for _, r in events]
+            verified[f["seq"]] = (op, raw, resps)
 
             if op == 999900:
                 sig = get_comb_ids(raw)
-                if sig not in comb_routes:
-                    comb_routes[sig] = []
-                comb_routes[sig].append(resps)
+                key = (sig, raw)
+                if key not in comb_routes:
+                    comb_routes[key] = []
+                comb_routes[key].append(resps)
             else:
                 if op not in opcode_routes:
                     opcode_routes[op] = []
@@ -454,37 +635,23 @@ def build_routing_tables(frames):
             i += 1
             
     master_comb_packets = []
-    for sig, resps_list in comb_routes.items():
+    for (sig, _), resps_list in comb_routes.items():
         if 1001 in sig and len(sig) >= 20:
             master_comb_packets = resps_list[0]
             break
 
-    # 按 seq 精确配对（录制帧里每条都带 seq）。
-    # 官方通信是严格一问一答：应答 opcode 恒等于请求 opcode，且 seq 与请求一致。
-    # 而"请求之后紧跟的连续帧"这种分组会把服务端主动推送（seq=0 的 999/3501/5207/111 等）
-    # 误并进应答组，导致客户端收到不该收的数据、流程被打断。
-    # 这里以 (seq, opcode) 双重校验为准，只收录 opcode 与请求一致、且 seq 非 0 的应答。
-    resp_by_seq = {}
-    req_op_by_seq = {}
-    for f in frames:
-        if f["c2s"]:
-            req_op_by_seq[f["seq"]] = f["opcode"]
-        else:
-            resp_by_seq.setdefault(f["seq"], []).append(f)
-
-    # 双重校验：seq 必须对应一个真实请求，且应答 opcode 必须等于该请求的 opcode
-    verified = {}
-    for seq, rs in resp_by_seq.items():
-        if seq in req_op_by_seq and rs[0]["opcode"] == req_op_by_seq[seq]:
-            verified[seq] = rs
-    print_flush(f"[*] seq 精确路由就绪: {len(verified)} 个请求可获得逐字节还原的官方应答")
+    print_flush(f"[*] 带请求校验的录制路由就绪: {len(verified)} 个请求")
     return opcode_routes, comb_routes, master_comb_packets, verified
 
 # ==================== 4. 会话与真实交互推进 ====================
 
 def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets, resp_by_seq):
     print_flush(f"\n[+] 新客户端连入: {addr}")
-    save = load_save()
+    try:
+        save = load_save()
+    except Exception:
+        conn.close()
+        return
     has_role = save.get("has_role", False)
     sections = get_guide_sections(save)
     in_progress = [s for s in sections.values() if s.get("status") == 1]
@@ -547,159 +714,72 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets, r
                 # ----------------- B. Opcode 101 (玩家确定起名) -----------------
                 if opcode == 101:
                     new_name = parse_set_name(body)
-                    if new_name:
-                        save["role_name"] = new_name
-                        print_flush(f"[★] 玩家确定角色名: 【{new_name}】")
-                        save_role(save)
+                    save["role_name"] = new_name
+                    if save.get("role_snapshot"):
+                        save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save).hex()
+                    print_flush(f"[★] 玩家确定角色名: 【{new_name}】")
+                    if not save_role(save):
+                        raise OSError("名字保存失败")
                     conn.sendall(pack_frame(101, seq, b"\x08\x01"))
                     print_flush(f"  └── [S->C] 应答 Opcode 101: 起名成功")
                     continue
                 
                 # ----------------- C. Opcode 201 (引导步数推进) -----------------
                 if opcode == 201:
-                    sec_v, step_v = parse_guide_excute(body)
-                    print_flush(f"  [201] 原始载荷 hex={body.hex()} -> section={sec_v}, step={step_v}")
-                    sections = get_guide_sections(save)
-                    
-                    # 完成判定依据真实配置: 客户端 CompleteSection 会上报该段的最后一步
-                    # (Section 1 共 83 步)，达到即标记 status=2，否则一律 status=1
-                    total = GUIDE_STEP_COUNTS.get(sec_v, 0)
-                    done = bool(total and step_v >= total)
-                    # 逐步记录: 保留该段上报过的完整步骤轨迹
-                    rec = sections.get(str(sec_v), {})
-                    history = set(rec.get("steps") or [])
-                    history.add(step_v)
-                    sections[str(sec_v)] = {
-                        "status": 2 if done else 1,
-                        "step": step_v,
-                        "steps": sorted(history),
-                    }
-                    save["guide"] = {"sections": sections}
-
-                    save_role(save)
+                    record_guide_progress(save, body)
+                    if not save_role(save):
+                        raise OSError("引导进度保存失败")
                     conn.sendall(pack_frame(201, seq, b"\x08\x01"))
-                    tag = "已完结" if done else "进行中"
-                    print_flush(f"  └── [S->C] 应答 Opcode 201: Section {sec_v} Step {step_v}/{total or '?'} [{tag}] 已记录 {len(history)} 步")
                     continue
                 
                 # ---------- C2. Opcode 999898 (客户端角色状态上报, 本地化扩展协议) ----------
                 if opcode == 999898:
                     ids = parse_ids_pb(body)
-                    if len(ids) >= 5:
-                        prev = save.get("role_state") or {}
-                        # 关键: 重连时 Comb 全量包会先把客户端等级冲回录制值(1)，
-                        # 随后客户端上报的就是被污染的值。因此这里一律取历史最大值，
-                        # 保证升级进度只增不减。
-                        def _mx(key, val):
-                            old = prev.get(key)
-                            return max(old, val) if isinstance(old, int) else val
-                        save["role_state"] = {
-                            "level": _mx("level", ids[0]),
-                            "exp":   _mx("exp", ids[1]),
-                            "coin":  _mx("coin", ids[2]),
-                            "gold":  _mx("gold", ids[3]),
-                            "power": _mx("power", ids[4]),
-                        }
-                        save["level"] = save["role_state"]["level"]
-                        save["silver"] = save["role_state"]["coin"]
-                        save["gold"] = save["role_state"]["gold"]
-                        save_role(save)
-                        st = save["role_state"]
-                        changed = "" if prev.get("level") == st["level"] else f" (等级 {prev.get('level', '?')} -> {st['level']})"
-                        print_flush(f"  └── [S->C] 已持久化角色状态: Lv.{st['level']} 银币={st['coin']} 元宝={st['gold']} 战力={st['power']}{changed}")
+                    if len(ids) != 5 or str(ids[0]) not in ROLE_EXP_CONFIG or any(not 0 <= value < (1 << 31) for value in ids):
+                        raise ValueError("无效的旧客户端角色上报")
+                    state = get_role_state(save)
+                    # 兼容旧客户端；只拒绝经验倒退，货币和战力必须允许消费/下降。
+                    if (ids[0], ids[1]) >= (state["level"], state["exp"]):
+                        state.update(zip(("level", "exp", "coin", "gold", "power"), ids[:5]))
+                        state["power_all"] = ids[4]
+                        save.update(level=state["level"], silver=state["coin"], gold=state["gold"])
+                        if save.get("role_snapshot"):
+                            save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save).hex()
+                        if not save_role(save):
+                            raise OSError("角色状态保存失败")
                     conn.sendall(pack_frame(999898, seq, b"\x08\x01"))
                     continue
 
-                # ---------- C3. seq 精确回放（优先，逐字节还原官方应答） ----------
-                # 录制帧自带 seq。当客户端 seq 与录制对齐时，直接按 (seq, opcode) 精确回放，
-                # 得到与官方完全一致的应答（包括 2000 那 1113B 的真实数据）。
-                hit = resp_by_seq.get(seq)
-                if hit and hit[0]["opcode"] == opcode:
-                    if opcode == 999900:
-                        sig = get_comb_ids(body)
-                        print_flush(f"  [*] Comb 签名 IDs: {sig[:8]}{'...' if len(sig) > 8 else ''} (共 {len(sig)} 项)")
-                        if 202 in sig:
-                            print_flush(f"[★] 玩家已确认选择初始武将！")
-                            save["has_role"] = True
-                            save_role(save)
-                    for rf in hit:
-                        resp_op = rf["opcode"]
-                        resp_body = bytes.fromhex(rf["hex"])
-                        if resp_op == 1001:
-                            resp_body = apply_role_state(resp_body, save)
-                            save["role_snapshot"] = resp_body.hex()
-                            lv = pb_get_varint(resp_body, 5)
-                            if lv:
-                                save["level"] = lv
-                            coin = pb_get_varint(resp_body, 8)
-                            gold = pb_get_varint(resp_body, 9)
-                            if coin is not None: save["silver"] = coin
-                            if gold is not None: save["gold"] = gold
-                            save_role(save)
-                        conn.sendall(pack_frame(resp_op, seq, resp_body))
-                        print_flush(f"  └── [S->C] [seq精确] Opcode: {resp_op:6d}, Seq: {seq:3d}, Len: {len(resp_body):4d} B")
-                    # 主城全量包之后补发角色快照（重连时客户端不会主动请求 1001）
-                    if opcode == 999900:
-                        sig = get_comb_ids(body)
-                        if (1001 in sig and len(sig) >= 20) or (1002 in sig and len(sig) >= 20):
-                            snap = save.get("role_snapshot")
-                            if snap:
-                                sbody = bytes.fromhex(snap)
-                                conn.sendall(pack_frame(1001, 0, sbody))
-                                print_flush(f"  └── [S->C] [重连补发角色] Opcode:  1001, Seq:   0, Len: {len(sbody):4d} B "
-                                            f"(Lv.{pb_get_varint(sbody, 5)})")
+                # ---------- C3. 普通请求校验后回放；Comb 始终按完整请求参数路由 ----------
+                recorded_op, recorded_body, hit = resp_by_seq.get(seq, (None, None, None))
+                if opcode != 999900 and hit and recorded_op == opcode and recorded_body == body:
+                    op_counters[opcode] = op_counters.get(opcode, 0) + 1
+                    send_recorded_responses(conn, seq, hit, save, body)
                     continue
 
                 # ----------------- D. Opcode 999900 (Comb 智能复合路由) -----------------
                 if opcode == 999900:
-                    sig = get_comb_ids(body)
+                    messages = get_comb_messages(body)
+                    sig = tuple(sorted(mid for mid, _ in messages))
                     print_flush(f"  [*] Comb 签名 IDs: {sig[:8]}{'...' if len(sig)>8 else ''} (共 {len(sig)} 项)")
                     
-                    # 1. 选将请求 (包含 202)
-                    if 202 in sig:
-                        print_flush(f"[★] 玩家已确认选择初始武将！")
-                        save["has_role"] = True
-                        save_role(save)
-                    
-                    # 2. 全量数据初始化请求 (包含 1001 且模块数 >= 20)
+                    # 全量数据初始化请求 (包含 1001 且模块数 >= 20)
                     if (1001 in sig and len(sig) >= 20) or (1002 in sig and len(sig) >= 20):
-                        for rf in master_comb_packets:
-                            resp_op = rf["opcode"]
-                            resp_body = bytes.fromhex(rf["hex"])
-                            send_seq = seq if resp_op == 999900 else 0
-                            pkt = pack_frame(resp_op, send_seq, resp_body)
-                            conn.sendall(pkt)
-                            print_flush(f"  └── [S->C] [初始化全量包] Opcode: {resp_op:6d}, Seq: {send_seq:3d}, Len: {len(resp_body):4d} B")
-
-                        # 主城全量包携带的是"录制当时"的角色数据(永远是 Lv.1)，
-                        # 而重连后客户端不再主动请求 1001，等级/银币就会回退。
-                        # 官方服务器下发的是账号当前真实数据，这里按官方协议
-                        # 主动补推一次上次下发过的角色快照(seq=0 表示服务端推送)。
-                        snap = save.get("role_snapshot")
-                        if snap:
-                            sbody = bytes.fromhex(snap)
-                            conn.sendall(pack_frame(1001, 0, sbody))
-                            print_flush(f"  └── [S->C] [重连补发角色] Opcode:  1001, Seq:   0, Len: {len(sbody):4d} B "
-                                        f"(Lv.{pb_get_varint(sbody, 5)} 银币={pb_get_varint(sbody, 8)} 元宝={pb_get_varint(sbody, 9)})")
+                        send_recorded_responses(conn, seq, master_comb_packets, save, body)
                         continue
                     
-                    # 3. 按签名精确匹配其他业务 (主城模块、副本战斗等)
-                    resps_list = comb_routes.get(sig)
+                    # 3. 相同子消息 IDs 仍可能是不同关卡或操作，必须同时匹配请求参数。
+                    key = (sig, body)
+                    resps_list = comb_routes.get(key)
                     if resps_list:
-                        c_idx = comb_counters.get(sig, 0)
-                        comb_counters[sig] = c_idx + 1
+                        c_idx = comb_counters.get(key, 0)
+                        comb_counters[key] = c_idx + 1
                         chosen_resps = resps_list[c_idx % len(resps_list)]
-                        
-                        for rf in chosen_resps:
-                            resp_op = rf["opcode"]
-                            resp_body = bytes.fromhex(rf["hex"])
-                            send_seq = seq if resp_op == 999900 else 0
-                            pkt = pack_frame(resp_op, send_seq, resp_body)
-                            conn.sendall(pkt)
-                            print_flush(f"  └── [S->C] [Comb 路由] Opcode: {resp_op:6d}, Seq: {send_seq:3d}, Len: {len(resp_body):4d} B")
+                        send_recorded_responses(conn, seq, chosen_resps, save, body)
                         continue
                     else:
-                        print_flush(f"  [!] 未匹配到 Comb 签名 {sig}，返回安全空组合包")
+                        # shortcut: 未录制的组合参数仍返回空包，补齐对应业务处理后替换此兜底。
+                        print_flush(f"  [!] 未录制的 Comb 请求参数 (IDs={sig})，返回空组合包")
                         conn.sendall(pack_frame(999900, seq, b""))
                         continue
                 
@@ -716,33 +796,11 @@ def handle_client(conn, addr, opcode_routes, comb_routes, master_comb_packets, r
                     # 按请求顺序依次取应答组。注意不能用 (cnt-1)：cnt=0 时 Python
                     # 负数取模会绕到最后一组（导致第一次 1001 就返回录制末尾的 Lv.6）。
                     chosen_resps = candidates[cnt % len(candidates)]
-                    has_own_resp = False
-                    for rf in chosen_resps:
-                        resp_op = rf["opcode"]
-                        resp_body = bytes.fromhex(rf["hex"])
-                        # 角色信息应答: 用客户端上报过的真实状态覆盖录制时的旧值
-                        if resp_op == 1001:
-                            resp_body = apply_role_state(resp_body, save)
-                            # 记录本次下发的角色快照，供会话重连后补发
-                            save["role_snapshot"] = resp_body.hex()
-                            lv = pb_get_varint(resp_body, 5)
-                            if lv:
-                                save["level"] = lv
-                            coin = pb_get_varint(resp_body, 8)
-                            gold = pb_get_varint(resp_body, 9)
-                            if coin is not None: save["silver"] = coin
-                            if gold is not None: save["gold"] = gold
-                            save_role(save)
-                        send_seq = seq if resp_op == opcode else 0
-                        pkt = pack_frame(resp_op, send_seq, resp_body)
-                        conn.sendall(pkt)
-                        if resp_op == opcode:
-                            has_own_resp = True
-                        print_flush(f"  └── [S->C] 应答 Opcode: {resp_op:6d} (0x{resp_op:04x}), Seq: {send_seq:3d}, Len: {len(resp_body):3d} B")
+                    send_recorded_responses(conn, seq, chosen_resps, save, body)
                     # 关键兜底: 录制时服务端主动推送帧(如 999 globalparam / 5207 等)常被误当成
                     # 上一个请求的应答, 导致该 opcode 自身的应答缺失。客户端会一直等待这个应答,
                     # Loading_Ultimate 的全屏触摸遮罩因此永不销毁 -> 所有点击被吞 -> 引导卡死。
-                    if not has_own_resp:
+                    if not any(r["opcode"] == opcode and r["seq"] != 0 for r in chosen_resps):
                         conn.sendall(pack_frame(opcode, seq, b""))
                         print_flush(f"  └── [S->C] 补发自应答 Opcode: {opcode:6d} (0x{opcode:04x}), Seq: {seq:3d}, Len:   0 B (录制缺失, 防遮罩残留)")
                 else:
@@ -776,8 +834,8 @@ def main():
         if os.path.exists(SAVE_PATH):
             cur = load_save()
             cur["guide"] = {"sections": {}}
-            with open(SAVE_PATH, "w", encoding="utf-8") as f:
-                json.dump(cur, f, ensure_ascii=False, indent=2)
+            if not save_role(cur):
+                raise OSError("重置引导存档失败")
             print_flush("[✓] 已清空引导进度（保留角色信息），下次登录将从开场剧情重播新手引导。")
         else:
             print_flush("[!] 未找到存档，无需重置引导。")
@@ -785,7 +843,7 @@ def main():
     setup_adb_reverse()
     frames = load_recordings()
     opcode_routes, comb_routes, master_comb_packets, resp_by_seq = build_routing_tables(frames)
-    print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个独立 Opcode, {len(comb_routes)} 个 Comb 业务复合签名, {len(master_comb_packets)} 个主城初始化子帧")
+    print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个独立 Opcode, {len(comb_routes)} 个 Comb 请求参数组合, {len(master_comb_packets)} 个主城初始化子帧")
     
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
