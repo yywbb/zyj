@@ -2311,7 +2311,11 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.assert_unavailable_response(self.replay([self.activity_request(3611, values)]),
                                                  3611, 20000, "活动奖励未解锁或不支持")
                 self.assertEqual(self.save_path.read_bytes(), before)
-        self.assert_rejected(self.activity_request(2411, [116]), "活动奖励未解锁或不支持")
+        for values in ((), (116,)):
+            before = self.save_path.read_bytes()
+            self.assert_unavailable_response(self.replay([self.activity_request(2411, values)]),
+                                             2411, 20000, "活动奖励未解锁或不支持")
+            self.assertEqual(self.save_path.read_bytes(), before)
         self.replay([self.activity_request(3611, (80001,))])
         before = self.save_path.read_bytes()
         self.assert_unavailable_response(self.replay([self.activity_request(3611, [80001])]), 3611, 20000, "已领取")
@@ -2321,7 +2325,66 @@ class ReplayRoutingTests(unittest.TestCase):
         before = self.save_path.read_bytes()
         self.assert_unavailable_response(self.replay([self.activity_request(3611, [80030])]), 3611, 20000, "已领取")
         self.assertEqual(self.save_path.read_bytes(), before)
-        self.assert_rejected(self.activity_request(2411, [116]), "活动奖励已领取")
+        for values in ((), (116,)):
+            self.assert_unavailable_response(self.replay([self.activity_request(2411, values)]),
+                                             2411, 20000, "活动奖励已领取")
+            self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_liveness_empty_claim_saves_once_and_restores_queries(self):
+        self.replay(self.requests)
+        before = self.query_role()[8]
+        expected = next(f["response"] for f in self.activity_frames["rewards"] if f["opcode"] == 2411)
+        coin = protocol.pb_get_varint(bytes.fromhex(expected), 1)
+        request = self.activity_request(2411)
+        conn = ReplayConnection([request, request, self.activity_request(2410), self.activity_request(6517)], 7)
+        send = conn.sendall
+
+        def check_committed(packet):
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual(saved["activity_state"]["liveness_claimed"], [16])
+            self.assertEqual(saved["role_state"]["coin"], before + coin)
+            send(packet)
+
+        conn.sendall = check_committed
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertTrue(conn.closed)
+        self.assertEqual([f["opcode"] for f in conn.responses], [2411, 1034, 999999, 1999, 2410, 6517])
+        self.assertEqual(conn.responses[0]["hex"], expected)
+        self.assertEqual(self.hint_changes(conn.responses[1]), {40: 0})
+        self.assert_unavailable_response(conn.responses[2:4], 2411, 20000, "已领取")
+        liveness = [v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(conn.responses[4]["hex"])) if n == 1]
+        self.assertEqual(liveness[15], 2)
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(conn.responses[5]["hex"])), [5, 0, 0, 0, 0])
+        for response in conn.responses[4:]:
+            self.assertEqual(self.query_world(response["opcode"]).hex(), response["hex"])
+        self.assertEqual(self.query_role()[8], before + coin)
+        disk = self.save_path.read_bytes()
+        for values in ((), (116,)):
+            self.assert_unavailable_response(self.replay([self.activity_request(2411, values)]),
+                                             2411, 20000, "已领取")
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_liveness_empty_claim_overflow_and_save_failure_are_atomic(self):
+        self.replay(self.requests)
+        baseline = json.loads(self.save_path.read_text())
+        for overflow in (False, True):
+            with self.subTest(overflow=overflow), redirect_stdout(io.StringIO()):
+                saved = copy.deepcopy(baseline)
+                if overflow:
+                    saved["role_state"]["coin"] = (1 << 31) - 1
+                self.save_path.write_text(json.dumps(saved))
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                if overflow:
+                    packets = session.handle(2411, 20000, b"")
+                    self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999999, 1999])
+                else:
+                    with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                        with self.assertRaises(OSError):
+                            session.handle(2411, 20000, b"")
+                self.assertEqual(session.save, memory)
+                self.assertEqual(self.save_path.read_bytes(), disk)
 
     def test_activity_queries_restore_claim_flags_and_liveness_score(self):
         self.replay(self.requests)
@@ -3219,21 +3282,21 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_activity_claim_before_role_creation_is_rejected(self):
         self.save_path.write_text(json.dumps(player.get_default_save()))
         before = self.save_path.read_bytes()
-        self.assert_unavailable_response(self.replay([self.activity_request(3611, [80001])]), 3611, 20000, "未解锁")
-        self.assertEqual(self.save_path.read_bytes(), before)
+        for opcode, values in ((3611, [80001]), (2411, []), (2411, [116])):
+            self.assert_unavailable_response(self.replay([self.activity_request(opcode, values)]), opcode, 20000, "未解锁")
+            self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_malformed_activity_claim_does_not_mutate_save(self):
         self.replay(self.requests)
         for opcode in (3611, 2411):
             for body in ("", "0800", "08", "08010801", "0a0101"):
                 with self.subTest(opcode=opcode, body=body):
+                    if opcode == 2411 and not body:
+                        continue
                     request = {"opcode": opcode, "seq": 20000, "hex": body}
-                    if opcode == 3611:
-                        before = self.save_path.read_bytes()
-                        self.assert_unavailable_response(self.replay([request]), opcode, 20000, "活动请求格式错误")
-                        self.assertEqual(self.save_path.read_bytes(), before)
-                    else:
-                        self.assert_rejected(request, "活动请求格式错误")
+                    before = self.save_path.read_bytes()
+                    self.assert_unavailable_response(self.replay([request]), opcode, 20000, "活动请求格式错误")
+                    self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_all_19_combination_guide_steps_are_persisted(self):
         requests = [f for f in self.requests if f["opcode"] == 999900 and 201 in protocol.get_comb_ids(bytes.fromhex(f["hex"]))]

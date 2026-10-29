@@ -236,7 +236,7 @@ def prepare_response(opcode, save, request_body, config, now):
     if opcode == 3611:
         if not 1 <= len(ids) <= len(BEGIN_REWARDS) or len(ids) != len(set(ids)):
             raise ValueError("活动请求格式错误")
-    elif len(ids) != expected:
+    elif len(ids) != expected and not (opcode == 2411 and not ids):
         raise ValueError("活动请求格式错误")
     if opcode in PAGE_OPCODES:
         return prepare_page(opcode, save, config, now)
@@ -300,7 +300,8 @@ def prepare_response(opcode, save, request_body, config, now):
         reward = recruit.build_reward(save, gets, config)
         state["begin7day_claimed"].extend(ids)
         return reward
-    if ids[0] != 116 or task_status == 0:
+    # shortcut: 一键领取目前仅结算任务16；接入其他活跃任务时扩展可领奖励集合。
+    if (ids and ids[0] != 116) or task_status == 0:
         raise ValueError("活动奖励未解锁或不支持")
     if task_status == 2:
         raise ValueError("活动奖励已领取")
