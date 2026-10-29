@@ -12,7 +12,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from zyj_server import accounts, configuration, guide, player, protocol, replay, storage
+from zyj_server import accounts, configuration, formation, guide, player, protocol, replay, storage
 from zyj_server.admin import gm, views
 from zyj_server.admin.http import start_admin
 from zyj_server.session import Session
@@ -489,6 +489,190 @@ class GmTests(AdminFixture):
         self.assertEqual(sessions[0].save["gm_receipt"], request["operation_id"])
 
 
+class GmManagementTests(AdminFixture):
+    def setUp(self):
+        super().setUp()
+        self.save()
+        save = self.store.snapshot(1)["save"]
+        save["guide"]["sections"]["1"].update(status=2, step=COUNTS[1])
+        player.save_role(save, self.store.path(1), COUNTS)
+        self.gm = gm.Workbench(self.store)
+
+    def request(self, action, **values):
+        return {"operation_id": uuid.uuid4().hex, "revision": self.store.snapshot(1)["revision"],
+                "reason": "管理测试", "action": action, **values}
+
+    def detail(self):
+        return views.detail(self.store.snapshot(1), COUNTS, CONFIG)
+
+    def test_inventory_set_and_clear_preserve_fragment_identity_and_reconnect(self):
+        before = self.detail()
+        fragment = next(r for r in before["inventory"] if r["kind"] == "武将碎片")
+        self.assertNotEqual(fragment["item_id"], fragment["cid"])
+        for cid, count in ((20014, 12), (20014, 2), (fragment["item_id"], 7)):
+            result = self.gm.apply(1, self.request("inventory", cid=cid, count=count))
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(next(r["count"] for r in self.detail()["inventory"] if r["item_id"] == cid), count)
+        self.assertEqual(self.detail()["generals"], before["generals"])
+        request = self.request("inventory", cid=fragment["item_id"], count=0)
+        result = self.gm.apply(1, request)
+        self.assertIn({"name": fragment["name"], "cid": fragment["cid"], "iid": None, "before": 7, "after": 0}, result["changes"])
+        saved = self.store.path(1).read_bytes()
+        self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
+        self.assertEqual(self.store.path(1).read_bytes(), saved)
+        session = Session(TABLES, self.store.path(1), COUNTS, CONFIG)
+        self.assertEqual(session.save["world_state"]["1012"], "")
+        self.assertEqual(self.gm.history(action="inventory")["total"], 4)
+
+    def test_upgrade_syncs_protagonist_power_and_snapshots_without_spending(self):
+        before = self.detail()
+        hero = next(r for r in before["generals"] if r["protagonist"])
+        request = self.request("general-level", iid=hero["iid"], level=hero["level"] + 2)
+        result = self.gm.apply(1, request)
+        after = self.detail()
+        grown = next(r for r in after["generals"] if r["iid"] == hero["iid"])
+        self.assertEqual(grown["level"], hero["level"] + 2)
+        self.assertEqual(grown["exp"], 0)
+        self.assertGreater(grown["atk"], hero["atk"])
+        self.assertEqual(grown["potential"], hero["potential"])
+        self.assertEqual(after["power"] - before["power"], grown["power"] - hero["power"])
+        self.assertEqual(after["inventory"], before["inventory"])
+        for key in ("gold", "coin", "vip"):
+            self.assertEqual(after[key], before[key])
+        session = Session(TABLES, self.store.path(1), COUNTS, CONFIG)
+        protagonist = bytes.fromhex(session.save["protagonist_snapshot"])
+        world = bytes.fromhex(session.save["world_state"]["1002"])
+        self.assertEqual(protocol.pb_get_varint(protagonist, 2), grown["level"])
+        self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(protagonist) if n == 10), formation.records(world, 1, 2)[hero["iid"]])
+        self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(world) if n == 6), protagonist)
+        self.assertTrue(any(r["name"].endswith("等级") and r["after"] == grown["level"] for r in result["changes"]))
+        saved = self.store.path(1).read_bytes()
+        self.gm.apply(1, request)
+        self.assertEqual(self.store.path(1).read_bytes(), saved)
+
+    def test_idle_growth_and_formation_round_trip_keep_training_equipment_and_relations(self):
+        before = self.detail()
+        idle = next(r for r in before["generals"] if not r["position"])
+        active = next(r for r in before["generals"] if r["position"] == 2)
+        self.gm.apply(1, self.request("general-level", iid=idle["iid"], level=6))
+        self.assertEqual(self.detail()["power"], before["power"])
+        self.assertGreater(next(r for r in self.detail()["generals"] if r["iid"] == idle["iid"])["potential"], idle["potential"])
+        self.gm.apply(1, self.request("general-level", iid=active["iid"], level=8))
+        grown = self.detail()
+        world = bytes.fromhex(self.store.snapshot(1)["save"]["world_state"]["1002"])
+        previous_slot = formation.records(world, 4, 1)[2]
+        result = self.gm.apply(1, self.request("formation", iid=idle["iid"], position=2))
+        after = self.detail()
+        self.assertIsNone(next(r for r in after["generals"] if r["iid"] == active["iid"])["position"])
+        self.assertEqual(next(r for r in after["generals"] if r["iid"] == idle["iid"])["position"], 2)
+        current_slot = formation.records(bytes.fromhex(self.store.snapshot(1)["save"]["world_state"]["1002"]), 4, 1)[2]
+        self.assertEqual([protocol.pb_get_varint(previous_slot, n) for n in range(4, 10)],
+                         [protocol.pb_get_varint(current_slot, n) for n in range(4, 10)])
+        self.assertTrue(any(r["name"].endswith("阵位") for r in result["changes"]))
+        self.gm.apply(1, self.request("formation", iid=active["iid"], position=2))
+        restored = self.detail()
+        self.assertEqual(restored["generals"], grown["generals"])
+        self.assertEqual(restored["equipment"], before["equipment"])
+        self.assertEqual(restored["power"], sum(r["power"] for r in restored["generals"] if r["position"]))
+        self.gm.apply(1, self.request("formation", iid=active["iid"], position=0))
+        self.assertIsNone(next(r for r in self.detail()["generals"] if r["iid"] == active["iid"])["position"])
+
+    def test_remove_idle_general_and_restore_do_not_reapply_old_request(self):
+        before = self.detail()
+        idle = next(r for r in before["generals"] if not r["position"])
+        request = self.request("remove-general", iid=idle["iid"])
+        result = self.gm.apply(1, request)
+        after = self.detail()
+        self.assertEqual(after["generals"], [r for r in before["generals"] if r["iid"] != idle["iid"]])
+        self.assertEqual(after["inventory"], before["inventory"])
+        self.assertEqual(after["equipment"], before["equipment"])
+        self.assertEqual(after["power"], before["power"])
+        self.assertTrue(any(r.get("iid") == idle["iid"] and r["after"] == 0 for r in result["changes"]))
+        session = Session(TABLES, self.store.path(1), COUNTS, CONFIG)
+        self.assertNotIn(idle["iid"], formation.records(bytes.fromhex(session.save["world_state"]["1002"]), 1, 2))
+        self.store.maintain(1, "restore", self.store.snapshot(1)["revision"], result["backup_id"])
+        restored = self.store.path(1).read_bytes()
+        self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
+        self.assertEqual(self.store.path(1).read_bytes(), restored)
+        self.assertEqual(self.detail()["generals"], before["generals"])
+
+    def test_invalid_management_actions_never_change_save(self):
+        before = self.store.path(1).read_bytes()
+        invalid = [("inventory", {"cid": 20014, "count": -1}), ("inventory", {"cid": 20014, "count": True}),
+                   ("inventory", {"cid": 20014, "count": 1 << 31}), ("inventory", {"cid": 20014, "count": 0}),
+                   ("inventory", {"cid": 10213, "count": 1}), ("inventory", {"cid": 22204, "count": 1}),
+                   ("inventory", {"cid": 20014, "count": 1, "extra": 0}), ("inventory", {"cid": 20014}),
+                   ("general-level", {"iid": 7060, "level": 13}), ("general-level", {"iid": 7060, "level": 4}),
+                   ("general-level", {"iid": 7060, "level": 5.5}), ("general-level", {"iid": 999, "level": 6}),
+                   ("formation", {"iid": 7059, "position": 0}), ("formation", {"iid": 7060, "position": 4}),
+                   ("formation", {"iid": 7060, "position": 8}), ("formation", {"iid": 7061, "position": 0}),
+                   ("remove-general", {"iid": 7059}), ("remove-general", {"iid": 7060}), ("remove-general", {"iid": True}),
+                   ("unknown", {}), ([], {})]
+        for action, values in invalid:
+            with self.subTest(action=action, values=values), self.assertRaises(ValueError):
+                self.gm.apply(1, self.request(action, **values))
+            self.assertEqual(self.store.path(1).read_bytes(), before)
+        self.assertEqual(self.store.backups(1), [])
+
+    def test_new_actions_share_offline_revision_backup_and_save_guards(self):
+        before = self.store.path(1).read_bytes()
+        actions = [("inventory", {"cid": 20100, "count": 2}), ("general-level", {"iid": 7060, "level": 6}),
+                   ("formation", {"iid": 7061, "position": 2}), ("remove-general", {"iid": 7061})]
+        for action, values in actions:
+            with self.subTest(action=action):
+                self.store.active[1] = {"address": "phone", "connected_at": 1}
+                with self.assertRaisesRegex(ValueError, "在线"):
+                    self.gm.apply(1, self.request(action, **values))
+                self.store.close_session(1)
+                with self.assertRaisesRegex(ValueError, "变化"):
+                    self.gm.apply(1, {**self.request(action, **values), "revision": "0" * 64})
+                with patch.object(storage, "backup", side_effect=OSError("full")), self.assertRaises(OSError):
+                    self.gm.apply(1, self.request(action, **values))
+                with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                    self.gm.apply(1, self.request(action, **values))
+                self.assertEqual(self.store.path(1).read_bytes(), before)
+
+    def test_new_action_receipts_recover_missing_final_journal_before_next_write(self):
+        write = self.gm._write
+        def fail_success(row):
+            if row["status"] == "success" and row["id"] == request["operation_id"]:
+                raise OSError("log full")
+            write(row)
+        requests = []
+        for action, values in [("inventory", {"cid": 20100, "count": 2}), ("general-level", {"iid": 7060, "level": 6}),
+                               ("formation", {"iid": 7061, "position": 2}), ("remove-general", {"iid": 7060})]:
+            request = self.request(action, **values)
+            with patch.object(self.gm, "_write", side_effect=fail_success):
+                self.assertIn("audit_warning", self.gm.apply(1, request))
+            saved = self.store.path(1).read_bytes()
+            self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
+            self.assertEqual(self.store.path(1).read_bytes(), saved)
+            requests.append(request)
+        self.assertTrue(all(r["status"] == "success" for r in self.gm.history()["rows"]))
+        for request in requests:
+            self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
+
+    def test_tutorial_advanced_and_cheer_generals_are_rejected(self):
+        original = copy.deepcopy(self.store.snapshot(1)["save"])
+        for variant in ("guide", "advanced", "cheer"):
+            save = copy.deepcopy(original)
+            if variant == "guide":
+                save["guide"]["sections"]["1"].update(status=1, step=30, steps=list(range(1, 31)))
+            elif variant == "advanced":
+                world = bytes.fromhex(save["world_state"]["1002"])
+                raw = protocol.pb_set_varint(formation.records(world, 1, 2)[7061], 21, 1)
+                player.record_slot_update(save, protocol.encode_pb_field(1, 2, raw))
+            else:
+                slot = protocol.encode_pb_field(1, 0, 1) + protocol.encode_pb_field(2, 0, 7061)
+                player.record_slot_update(save, protocol.encode_pb_field(5, 2, slot))
+            player.save_role(save, self.store.path(1), COUNTS)
+            before = self.store.path(1).read_bytes()
+            for action, values in (("general-level", {"level": 8}), ("formation", {"position": 2}), ("remove-general", {})):
+                with self.subTest(variant=variant, action=action), self.assertRaises(ValueError):
+                    self.gm.apply(1, self.request(action, iid=7061, **values))
+                self.assertEqual(self.store.path(1).read_bytes(), before)
+
+
 class ConfigurationTests(AdminFixture):
     def update(self, table, row, changes):
         return self.configs.update(table, row, changes, self.configs.status()["revision"])
@@ -640,6 +824,9 @@ class AdminHttpTests(AdminFixture):
         code, _, catalog = self.request("/api/catalog?q=20014")
         self.assertEqual(code, 200)
         self.assertEqual(catalog["rows"][0]["cid"], 20014)
+        common = self.request("/api/status")[2]["common_items"]
+        self.assertIn(20100, [row["cid"] for row in common])
+        self.assertTrue(all(row["name"] == CONFIG["props"][str(row["cid"])]["name"] for row in common))
         first = self.request("/api/catalog")[2]
         second = self.request("/api/catalog?offset=50")[2]
         self.assertEqual(len(first["rows"]), 50)
@@ -652,6 +839,10 @@ class AdminHttpTests(AdminFixture):
         self.assertEqual(len(data["business"]["recruit"]), 4)
         self.assertEqual(data["business"]["recharge"]["rmb"], SAVE["recharge_state"]["rmb"])
         self.assertTrue(data["copies"][0]["points"])
+        self.assertEqual(data["general_level_cap"], 12)
+        self.assertEqual(data["slot_limit"], 3)
+        self.assertTrue(next(row for row in data["generals"] if row["iid"] == 7059)["protagonist"])
+        self.assertEqual(next(row for row in data["inventory"] if row["cid"] == 10204)["item_id"], 11204)
         for path in ("/api/catalog?offset=-1", "/api/catalog?kind=invalid", "/api/operations?account=1001", "/api/operations?action=no", "/api/operations?since=-1"):
             self.assertEqual(self.request(path)[0], 400)
         self.assertEqual(self.store.path(1).read_bytes(), before)

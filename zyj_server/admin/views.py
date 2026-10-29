@@ -27,7 +27,7 @@ def summary(snapshot, step_counts, role_config):
 
 def detail(snapshot, step_counts, role_config):
     result = summary(snapshot, step_counts, role_config)
-    result.update(generals=[], equipment=[], inventory=[], copies=[], states={}, business={})
+    result.update(generals=[], equipment=[], inventory=[], copies=[], states={}, business={}, general_level_cap=0, slot_limit=0)
     if result["error"]:
         return result
     save = copy.deepcopy(snapshot["save"])
@@ -40,19 +40,27 @@ def detail(snapshot, step_counts, role_config):
         def name(table, cid):
             return role_config.get(table, {}).get(str(cid), {}).get("name") or str(cid)
         positions = {number(row, 2): number(row, 1) for row in rows(1002, 4)}
+        cheers = {number(row, 2): number(row, 1) for row in rows(1002, 5)}
+        protagonist = number(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
         for row in rows(1002):
             cid, iid = number(row, 1), number(row, 2)
             result["generals"].append({"cid": cid, "iid": iid, "name": name("general", cid),
-                                       "level": number(row, 3), "position": positions.get(iid)})
+                                       "level": number(row, 3), "position": positions.get(iid), "cheer_position": cheers.get(iid),
+                                       "protagonist": iid == protagonist, "quality": role_config["general"][str(cid)]["quality"],
+                                       **{key: number(row, field) for key, field in (("exp", 5), ("atk", 6), ("defense", 7),
+                                           ("hp", 8), ("speed", 9), ("potential", 17), ("power", 20))}})
         for row in rows(1002, 2):
             values = protocol.parse_ids_pb(row)
             if len(values) < 3:
                 raise ValueError("装备记录缺少字段")
             result["equipment"].append({"iid": values[0], "cid": values[1], "name": name("equip", values[1]), "level": values[2]})
+        fragments = {row["general"]: row["id"] for row in role_config["general_fragment"].values()}
         for opcode, table, kind in ((1200, "props", "道具"), (1012, "general", "武将碎片")):
             for row in rows(opcode):
                 cid = number(row, 1)
-                result["inventory"].append({"cid": cid, "name": name(table, cid), "count": number(row, 2), "kind": kind})
+                result["inventory"].append({"cid": cid, "item_id": fragments.get(cid) if opcode == 1012 else cid,
+                                            "name": name(table, cid) + ("碎片" if opcode == 1012 else ""),
+                                            "count": number(row, 2), "kind": kind})
         for row in rows(1300):
             points = [v for n, w, v in protocol.iter_pb_fields(row) if n == 7 and w == 2]
             cid = number(row, 1)
@@ -61,6 +69,9 @@ def detail(snapshot, step_counts, role_config):
                                      "points": [{"id": number(p, 1), "stars": number(p, 3), "wins": number(p, 4)} for p in points]})
         result["states"] = {key: save.get(key, {}) for key in ("guide", "activity_state", "recruit_state", "recruit_pending", "recharge_state", "last_battle")}
         if save.get("has_role"):
+            result["general_level_cap"] = min(result["level"] * int(role_config["global_kv"]["general_level"]["value"]),
+                                               max(map(int, role_config["general_exp"])))
+            result["slot_limit"] = min(7, role_config["role_exp"][str(result["level"])]["slotnum"])
             result["business"] = business(save, role_config)
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         result["error"] = f"存档明细无法解析: {error}"

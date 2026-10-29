@@ -110,6 +110,8 @@ td button { padding: 3px 9px; font-size: 12px; }
 td input { min-width: 85px; max-width: 130px; }
 time { white-space: nowrap; }
 .operation-table > table { min-width: 680px; }
+.possession-table table { min-width: 620px; }
+.possession-table summary { white-space: nowrap; }
 #account-list table { min-width: 750px; }
 .pager { display: flex; justify-content: end; align-items: center; gap: 8px; margin-top: 16px; }
 .pager span { margin-right: auto; color: var(--muted); font-size: 12px; }

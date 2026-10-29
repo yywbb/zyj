@@ -26,6 +26,7 @@
       <header class="topbar"><span class="environment">本机环境</span><p id="connection">正在连接服务端…</p><button id="refresh" type="button">刷新数据</button></header>
       <main id="main" tabindex="-1">
         <p id="notice" class="notice" role="status" hidden></p>
+        <p id="operation-pending" class="pending" role="status" hidden></p>
         <p id="pending" class="pending" hidden>配置已保存，等待服务端重启。请用当前配置重建并安装 APK，使客户端显示与服务端一致。</p>
 
         <section id="overview-page" aria-labelledby="overview-title">
@@ -62,7 +63,7 @@
               <legend class="sr-only">资源与物品</legend>
               <section class="panel"><div class="panel-heading"><h2>资源调整</h2><span class="muted">正数增加，负数扣除，留空不变</span></div><div id="gm-resources" class="resource-inputs"></div><p class="help">元宝调整不计入充值或消费活动；体力会同时结算离线恢复。</p></section>
               <div class="gm-grid">
-                <section class="panel"><h2>选择物品</h2><div class="filters"><div class="grow"><label for="catalog-query">名称 / 配置 ID</label><input id="catalog-query" type="search" maxlength="100" placeholder="体力丹、招募令、武将…"></div><div><label for="catalog-kind">类型</label><select id="catalog-kind"><option value="">全部</option><option>道具</option><option>武将碎片</option><option>普通装备</option><option>武将</option></select></div><button id="catalog-search" type="button">搜索</button></div><div id="catalog-rows"></div><div class="pager"><span id="catalog-count"></span><button id="catalog-previous" type="button">上一页</button><button id="catalog-next" type="button">下一页</button></div><p class="help">目录按运行中的配置读取。道具入库不代表其使用功能已实现；武将限已接入招募池，重复武将转碎片。</p></section>
+                <section class="panel"><h2>选择物品</h2><p class="help">常用道具 · 点击加入本次发放</p><div id="common-items" class="actions"></div><div class="filters"><div class="grow"><label for="catalog-query">名称 / 配置 ID</label><input id="catalog-query" type="search" maxlength="100" placeholder="体力丹、招募令、武将…"></div><div><label for="catalog-kind">类型</label><select id="catalog-kind"><option value="">全部</option><option>道具</option><option>武将碎片</option><option>普通装备</option><option>武将</option></select></div><button id="catalog-search" type="button">搜索</button></div><div id="catalog-rows"></div><div class="pager"><span id="catalog-count"></span><button id="catalog-previous" type="button">上一页</button><button id="catalog-next" type="button">下一页</button></div><p class="help">目录按运行中的配置读取。道具入库不代表其使用功能已实现；武将限已接入招募池，重复武将转碎片。</p></section>
                 <section class="panel"><div class="panel-heading"><h2>本次发放</h2><span id="cart-count" class="muted">0 种</span></div><div id="gm-cart"></div><p class="help">最多 32 种物品，装备和武将合计最多 100 个。武将发放需先完成新手引导。</p></section>
               </div>
               <section class="panel"><h2>操作说明</h2><label for="gm-reason">原因</label><textarea id="gm-reason" required maxlength="200" placeholder="例如：测试招募阵容、补偿道具"></textarea><div id="gm-preview"></div></section>
@@ -87,5 +88,11 @@
     </div>
   </div>
   <dialog id="editor" aria-labelledby="editor-title"><form id="edit-form"><div class="dialog-heading"><h2 id="editor-title">编辑配置</h2><button id="close-editor" type="button" aria-label="关闭配置编辑">关闭</button></div><p>只保存下方字段。数量变化时，请同步修改说明文字。</p><div id="edit-fields"></div><p id="edit-error" role="alert" class="error" hidden></p><div class="actions"><button id="save-config" class="primary">保存配置</button><button id="revert-config" type="button">恢复原配置</button></div></form></dialog>
+  <dialog id="manager" aria-labelledby="manager-title"><form id="manage-form">
+    <div class="dialog-heading"><h2 id="manager-title">玩家管理</h2><button id="close-manager" type="button">关闭</button></div>
+    <p id="manager-target"></p><div id="manager-fields"></div><p id="manager-help" class="help"></p>
+    <label for="manager-reason">操作原因</label><textarea id="manager-reason" required maxlength="200" placeholder="填写本次修正或测试的原因"></textarea>
+    <div class="actions block"><button id="manager-submit" class="primary">保存变更</button><span class="muted">自动备份 · 重登生效</span></div>
+  </form></dialog>
 </body>
 </html>
