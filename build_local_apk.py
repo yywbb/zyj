@@ -706,6 +706,10 @@ end
     UIRequest({type = 7091, update = true})
     UIRequest({type = 7094})
     UIRequest({type = 3643, update = true})
+    for page, opcode in pairs({[78]=5000, [87]=5034, [101]=3680, [22]=3682, [169]=8075, [170]=8077, [153]=8026}) do
+        local item = GameScene.layers["activity"].module.pageTable[page]
+        if item and item.module.show then UIRequest({type = opcode, update = true}) end
+    end
 end
 ''' + code[end:]
     start = code.index("function UIMonthCard(t)\n")
@@ -724,6 +728,7 @@ end
         "GameActivityReward": (("UIContinue7QueryCallBack1", 214),),
         "GameSignIn": (("UISignIn2StatusCallBack", 3641), ("UILuxurySignInStatusCallBack", 3643)),
         "GameRecharge": (("UIVipStatusCallBack", 300), ("UIGrowPlan2CallBack", 7091)),
+        "GameActivityMultipleRebate": (("UIMonthGrowQueryCallBack", 3680), ("UIMonthGrowWelfareQueryCallBack", 3682)),
     }
     for name, replacements in callbacks.items():
         code = read_script(name).decode("utf-8").replace("\r\n", "\n")
@@ -743,6 +748,43 @@ end
             pos = code.index(marker, start) + len(marker)
             code = code[:pos] + "    gamedata.ext.isrechare = false\n" + code[pos:]
         patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("GameActivityQuery").decode("utf-8").replace("\r\n", "\n")
+    marker = "    gamedata.ext.activityPageId = uireq.pageId\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '    if tostring(uireq.page) == "5" and uireq.ischeck ~= 1 then return 1,2000,nil end\n')
+    patched["assets/scripts/GameActivityQuery.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_activity_multipleRebate").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("        self.pageconfig = {}\n", code.index("function multipleRebate.reloaddata("))
+    end = code.index("        self:onStatusNode2(data)", start)
+    assert "activationBtnStatus2 ~= 0" in code[start:end]
+    # 购买期结束也保留两档预览；未激活不能冒充已购买，更不能清空档位后拼接nil。
+    code = code[:start] + code[end:]
+    marker = "ui.setLabelString(self.coveritems.getLab, nil, 18)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''local status = self.signInTab.data["activationBtnStatus"..self.page]
+    self.coveritems.getButton:setTouchEnabled(status == 2)
+    if status == 0 then
+        ui.addGray("CCControlButton", self.coveritems.getButton)
+        ui.addGray("CCLabelTTF", self.coveritems.getLab)
+    end
+    ui.setLabelString(self.coveritems.getLab, status == 0 and "未激活" or "领取", 18)''')
+    patched["assets/scripts/Layer_activity_multipleRebate.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_activity_welfareMonth").decode("utf-8").replace("\r\n", "\n")
+    marker = '    self.deadline = year .. "年"'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '    self.endAt = os.time({year=year,month=month,day=day,hour=hour,min=min,sec=sec,isdst=false})\n' + marker)
+    marker = '\n\t\tif self.receiveStatus.data["btnStatus" .. i] == 0 then'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''
+        local expired = gamedata:time() >= self.endAt
+        self.coveritems["doButton"..i]:setTouchEnabled(not expired)
+        if expired then
+            ui.setLabelString(self.coveritems["doLab"..i], "已结束", 18)
+        elseif self.receiveStatus.data["btnStatus" .. i] == 0 then''')
+    patched["assets/scripts/Layer_activity_welfareMonth.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("Layer_activity_newcontinuous").decode("utf-8").replace("\r\n", "\n")
     marker = "self.coveritems.desc_muyou:setVisible(true)"

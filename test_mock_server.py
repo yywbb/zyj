@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, development, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training, welfare
+from zyj_server import accounts, activities, battle, daily_events, development, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training, welfare
 from zyj_server.session import Session
 
 
@@ -170,7 +170,9 @@ class ReplayRoutingTests(unittest.TestCase):
             # 教程回归冻结时间，不能继承录制中已到期的在线奖励倒计时。
             self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [1, 60])
         elif opcode == 2000:
-            self.assertEqual(bytes.fromhex(actual), welfare.rewrite_activities(bytes.fromhex(expected)))
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual(bytes.fromhex(actual), daily_events.rewrite_periods(welfare.rewrite_activities(bytes.fromhex(expected)), saved,
+                                                                               self.role_config, int(self.clock.return_value)))
         elif opcode == 3210:
             rows = self.entity_records(bytes.fromhex(actual), 1, 1)
             self.assertEqual(set(rows), set(map(int, self.role_config["gift_bag"])))
@@ -2460,12 +2462,171 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assert_unavailable_response(response, 999900, 21000, "充值" if opcode in (115, 116, 20000) else "招募")
             self.assertEqual(self.save_path.read_bytes(), before)
 
-    def recharge_order(self, cid):
+    def recharge_order(self, cid, bagid=None):
         body = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, cid))
+        if bagid is not None:
+            body += protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, bagid))
         response = self.replay([{"opcode": 115, "seq": 20000, "hex": body.hex()}])[0]
         self.assertEqual(response["opcode"], 115)
         param = next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(response["hex"])) if n == 1)
         return protocol.pb_get_varint(param, 1)
+
+    def seed_daily_event_account(self):
+        saved = self.seed_welfare_account()
+        saved["role_snapshot"] = protocol.pb_set_varint(bytes.fromhex(saved["role_snapshot"]), 22, self.now).hex()
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def confirm_event_order(self, cid, bagid=None):
+        return self.replay([self.activity_request(116, [self.recharge_order(cid, bagid)])])[0]
+
+    def test_daily_event_tabs_query_real_periods_and_unpaid_state(self):
+        saved = self.seed_daily_event_account()
+        zero = dict(saved, role_snapshot=protocol.pb_set_varint(bytes.fromhex(saved["role_snapshot"]), 22, 0).hex())
+        self.assertEqual(daily_events.month_end(zero, self.role_config), 5 * 86400 - 28800)
+        for opcode, expected in ((3680, [0, 0, 0, 0]), (3682, [0, 0]), (5000, [1, 1, 0] + [0] * 11),
+                                 (8075, [0] * 8), (8077, [0] * 8)):
+            with self.subTest(opcode=opcode):
+                self.assertEqual(protocol.parse_ids_pb(self.query_world(opcode)), expected)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(8026)), [v for i in range(190501, 190507) for v in (i, 0, 0)])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(5034))[:2], [1, 0])
+        body = self.query_world(2000)
+        data = dict(protocol.get_comb_messages(body))[2]
+        values = protocol.parse_ids_pb(data)
+        periods = {values[i]: values[i+1:i+3] for i in range(0, len(values), 3)}
+        self.assertEqual(periods[87], [1, 0])
+        self.assertEqual(periods[170], [1, 1])
+
+    def test_daily_event_cumulative_rewards_only_confirmed_orders_and_reconnect(self):
+        self.seed_daily_event_account()
+        order = self.recharge_order(5)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(5000))[2], 0)
+        self.assertEqual(self.replay([self.activity_request(5001, [1])])[0]["opcode"], 999999)
+        self.replay([self.activity_request(116, [order])])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(5000))[2:4], [68, 1])
+        reward = self.query_world_for_values(5001, [1])
+        self.assertTrue(any(n == 8 for n, w, v in protocol.iter_pb_fields(reward)))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(5000))[3], 2)
+        before = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(5001, [1])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), before)
+        self.clock.return_value += 7 * 86400
+        self.confirm_event_order(8)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(5000))[2], 68)
+
+    def test_daily_event_closed_periods_clear_only_their_activity_flags(self):
+        saved = self.seed_daily_event_account()
+        rows = {rid: protocol.encode_pb_field(1, 0, rid) + protocol.encode_pb_field(2, 0, 1)
+                     + protocol.encode_pb_field(9, 2, b"unknown") for rid in (78, 87, 153, 169, 170, 101, 999)}
+        data = b"".join(protocol.encode_pb_field(1, 2, row) for row in rows.values())
+        message = protocol.encode_pb_field(1, 0, 1) + protocol.encode_pb_field(2, 2, data)
+        message += protocol.encode_pb_field(8, 0, 42)
+        body = protocol.encode_pb_field(1, 2, message) + protocol.encode_pb_field(7, 2, b"outer")
+        for days, active in ((0, {78, 153, 169, 170}), (3, {78, 87, 153, 169, 170}),
+                             (4, {78, 153, 169, 170}), (7, {153}), (35, set())):
+            with self.subTest(days=days):
+                reply = daily_events.rewrite_periods(body, saved, self.role_config, self.now + days * 86400)
+                envelope = next(v for n, w, v in protocol.iter_pb_fields(reply) if (n, w) == (1, 2))
+                self.assertEqual(protocol.pb_get_varint(envelope, 8), 42)
+                actual = self.entity_records(dict(protocol.get_comb_messages(reply))[1], 1, 1)
+                for rid, row in rows.items():
+                    self.assertEqual(actual[rid], protocol.pb_set_varint(row, 2, int(rid in active or rid in (101, 999))))
+                self.assertIn((7, 2, b"outer"), list(protocol.iter_pb_fields(reply)))
+
+    def test_daily_event_week_funds_buy_independently_and_unlock_by_event_day(self):
+        self.seed_daily_event_account()
+        gold = self.query_role()[9]
+        for cid, bagid, query, claim in ((4, 7, 8075, 8076), (6, 8, 8077, 8078)):
+            self.assertEqual(self.confirm_event_order(cid, bagid)["opcode"], 116)
+            self.assertEqual(self.query_role()[9], gold)
+            self.assertEqual(protocol.parse_ids_pb(self.query_world(query)), [1, 1] + [0] * 6)
+            self.assertEqual(self.replay([self.activity_request(claim, [2])])[0]["opcode"], 999999)
+            self.assertEqual(self.replay([self.activity_request(claim, [1])])[0]["opcode"], claim)
+            self.assertEqual(self.replay([self.activity_request(claim, [1])])[0]["opcode"], 999999)
+        self.clock.return_value += 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(8075)), [1, 2, 1] + [0] * 5)
+        self.assertEqual(self.replay([self.activity_request(8076, [2])])[0]["opcode"], 8076)
+        self.clock.return_value += 6 * 86400
+        self.assertEqual(self.replay([self.activity_request(8078, [2])])[0]["opcode"], 999999)
+
+    def test_daily_event_speed_gift_payment_claim_daily_limit_and_midnight(self):
+        self.seed_daily_event_account()
+        gold = self.query_role()[9]
+        self.confirm_event_order(4, 190501)
+        self.assertEqual(self.query_role()[9], gold)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(8026))[:3], [190501, 1, 0])
+        self.assertEqual(self.replay([self.activity_request(8027, [190501])])[0]["opcode"], 8027)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(8026))[:3], [190501, 2, 1])
+        before = self.save_path.read_bytes()
+        for opcode, values in ((8027, [190501]), (8027, [190507])):
+            self.assertEqual(self.replay([self.activity_request(opcode, values)])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), before)
+        self.clock.return_value += 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(8026))[:3], [190501, 0, 0])
+        self.confirm_event_order(4, 190501)
+        self.assertEqual(self.replay([self.activity_request(8027, [190501])])[0]["opcode"], 8027)
+        before = self.save_path.read_bytes()
+        self.clock.return_value = self.now
+        self.assertEqual(self.replay([self.activity_request(8027, [190501])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_daily_event_month_funds_card_requirements_welfare_and_twenty_daily_rewards(self):
+        self.seed_daily_event_account()
+        self.confirm_event_order(5)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3680)), [0, 0, 0, 0])
+        self.confirm_event_order(1)
+        self.confirm_event_order(2)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3680)), [1, 0, 0, 0])
+        self.confirm_event_order(6)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3682)), [1, 1])
+        for i in (1, 2):
+            self.assertEqual(self.replay([self.activity_request(3683, [i])])[0]["opcode"], 3683)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3682)), [2, 2])
+        self.assertEqual(self.replay([self.activity_request(3681, [1])])[0]["opcode"], 999999)
+        for day in range(20):
+            self.clock.return_value = self.now + (5 + day) * 86400
+            for i in (1, 2):
+                self.assertEqual(self.replay([self.activity_request(3681, [i])])[0]["opcode"], 3681)
+                self.assertEqual(self.replay([self.activity_request(3681, [i])])[0]["opcode"], 999999)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3680)), [3, 20, 3, 20])
+
+    def test_daily_event_double_recharge_is_capped_not_stacked_and_no_extra_for_gifts(self):
+        self.seed_daily_event_account()
+        self.clock.return_value += 3 * 86400
+        gold = self.query_role()[9]
+        for multiple in (2, 2, 1):
+            self.confirm_event_order(3)
+            gold += 66 * multiple
+            self.assertEqual(self.query_role()[9], gold)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(5034))[4], 2)
+        self.confirm_event_order(5, 2)
+        self.assertEqual(self.query_role()[9], gold)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(5034))[6], 0)
+        self.clock.return_value += 86400
+        self.confirm_event_order(3)
+        self.assertEqual(self.query_role()[9], gold + 66)
+
+    def test_daily_event_invalid_orders_parameters_and_failed_saves_are_atomic(self):
+        self.seed_daily_event_account()
+        self.confirm_event_order(5)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, original = copy.deepcopy(session.save), self.save_path.read_bytes()
+            for opcode in daily_events.QUERIES + daily_events.CLAIMS:
+                for body in (b"\x08", b"\x10\x01", b"\x08\x01" * 3):
+                    result = session.handle(opcode, 10, body)
+                    self.assertEqual(struct.unpack(">IIII", result[0][:16])[2], 999999)
+                    self.assertEqual((session.save, self.save_path.read_bytes()), (memory, original))
+            for cid, bagid in ((5, 7), (4, 8), (4, 190504), (6, 999), (5, 190999)):
+                body = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, cid))
+                body += protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, bagid))
+                result = session.handle(115, 11, body)
+                self.assertEqual(struct.unpack(">IIII", result[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, original))
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    session.handle(5001, 12, b"\x08\x01")
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, original))
 
     def test_simulated_recharge_persists_order_and_confirms_only_once(self):
         self.complete_tutorial()
@@ -2505,7 +2666,9 @@ class ReplayRoutingTests(unittest.TestCase):
         self.complete_tutorial()
         self.replay([self.activity_request(116, [self.recharge_order(3)])])
         before = self.save_path.read_bytes()
-        requests = [self.activity_request(opcode) for opcode in (3680, 3684, 5531, 2039)]
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3680)), [0, 0, 0, 0])
+        self.assertEqual(self.save_path.read_bytes(), before)
+        requests = [self.activity_request(opcode) for opcode in (3684, 5531, 2039)]
         requests.append({"opcode": 999900, "seq": 20000, "hex": "0a0308f50f0a0308f70f0a0308e5320a03089a35"})
         for request in requests:
             with self.subTest(opcode=request["opcode"]):
@@ -4350,7 +4513,7 @@ class LanAccountTests(unittest.TestCase):
             self.assertEqual((entry["account"], entry["peer"]), (1, ["same-lan-ip", 1]))
             for key in ("opcode", "seq", "hex"):
                 self.assertEqual(entry["request"][key], request[key])
-            self.assertIn("尚未实现", entry["reason"])
+            self.assertIn("尚未实现" if request["opcode"] == 4601 else "角色尚未创建", entry["reason"])
             self.assertEqual(entry["responses"][0]["ids"], [request["opcode"], 0])
         self.assertEqual(entries[-1]["request"]["ids"], [15, 1])
         self.assertEqual(self.save_path.read_bytes(), before)

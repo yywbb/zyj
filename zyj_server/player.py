@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, configuration, development, fashion, formation, online_rewards, recharge, recruit, shop, training, welfare
+from . import activities, battle, configuration, daily_events, development, fashion, formation, online_rewards, recharge, recruit, shop, training, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -55,7 +55,10 @@ def load_role_config(config_path):
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
-                             "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake", *sign_tables))
+                             "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake",
+                             "month_welfare", "month_growup", "week_growup_1", "week_growup_2_1",
+                             "week_growup_money_1", "week_growup_money_2_1", "recharge_gift_1",
+                             "speedup_gift_time_x1", "speedup_gift", *sign_tables))
 
 
 def get_default_save():
@@ -463,12 +466,17 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if update:
             record_slot_update(save, update)
+    elif opcode in (*daily_events.QUERIES, *daily_events.CLAIMS):
+        body = daily_events.prepare(opcode, save, request_body, role_config, now)
+        if opcode in daily_events.CLAIMS:
+            apply_reward(save, body, role_config, now)
     elif opcode == 300:
         if request_body:
             raise ValueError("贵族状态查询不接受参数")
         body = welfare.rewrite_vip(body, save)
     elif opcode == 2000:
         body = welfare.rewrite_activities(body)
+        body = daily_events.rewrite_periods(body, save, role_config, now)
     elif opcode in activities.OPCODES:
         body = activities.prepare_response(opcode, save, request_body, role_config, now)
         if opcode == 5031:

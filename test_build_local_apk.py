@@ -122,6 +122,8 @@ class LanBuildTests(unittest.TestCase):
             package.preload.somethings_pb = function() return {SomeThings=message} end
             package.preload.params_pb = function() return {ParamS=message} end
             package.preload.result_pb = function() return {Result=message} end
+            package.preload.combmessages_pb = function() return {CombMessages=message} end
+            package.preload.activityquery_pb = function() return {} end
             gamedata = {cache={role={gold=1000}, mammon={1,100}, chicken={2,2,2},
                               continueX1={1,1}, signin2={daynum=1,status=1}, luxurySignInStatus={status=2},
                               vipstatus={vipexchange_free=0}, timegift={}, growplanx1={status={}}}, ext={},
@@ -134,7 +136,8 @@ class LanBuildTests(unittest.TestCase):
             function gamedata:updateRoleGold(delta) self.cache.role.gold=self.cache.role.gold+delta end
             function gamedata:Vipstatus(ids) self.cache.vipstatus.vipexchange_free=ids[25] end
         ''')
-        for name in ("GameActivityMammon", "GameEatChicken", "GameActivityReward", "GameSignIn", "GameRecharge"):
+        for name in ("GameActivityMammon", "GameEatChicken", "GameActivityReward", "GameSignIn", "GameRecharge",
+                     "GameActivityMultipleRebate", "GameActivityQuery"):
             lua.execute(scripts[f"assets/scripts/{name}.so"])
         lua.execute('''
             for _,row in ipairs({{UIActivityMammonQueryCallBack,2015}, {UIActivityEatChickenQueryCallBack,2010},
@@ -157,6 +160,17 @@ class LanBuildTests(unittest.TestCase):
             assert(gamedata.ext.isrechare==false)
             local remote, opcode, response=UIVipWelfareExtCallBack({})
             assert(remote==0 and opcode==46111 and response.vipstatus==gamedata.cache.vipstatus)
+            for _,row in ipairs({{UIMonthGrowQueryCallBack,3680}, {UIMonthGrowWelfareQueryCallBack,3682}}) do
+                local remote, opcode = row[1]({})
+                assert(remote==1 and opcode==row[2])
+            end
+            local remote, opcode=UIActivityQueryCallBack({page='5'})
+            assert(remote==1 and opcode==2000)
+            gamedata.config.build={}
+            gamedata.cache.activitystatus={['78']={id=78,status=1}}
+            table.copy=function(value) return value end
+            local remote, opcode, response=UIActivityQueryCallBack({page='5',ischeck=1})
+            assert(remote==0 and opcode==2000 and response.page=='5' and response.ischeck==1)
         ''')
         lua.execute(scripts["assets/scripts/UIRecharge.so"])
         lua.execute('''
@@ -171,11 +185,76 @@ class LanBuildTests(unittest.TestCase):
             local found={}
             for _,opcode in ipairs(requests) do found[opcode]=true end
             assert(found[7091] and found[7094] and found[3643])
+            GameScene.layers.activity.module.pageTable={[78]={module={show=true}},[169]={module={show=false}}}
+            requests={}
+            UIRechargefresh()
+            local found={}
+            for _,opcode in ipairs(requests) do found[opcode]=true end
+            assert(found[5000] and not found[8075] and not found[8077] and not found[8026])
         ''')
         self.assertIn("[57] = { request = 300,", scripts["assets/scripts/Layer_activity.so"])
         self.assertIn("desc_muyou:setVisible(false)", scripts["assets/scripts/Layer_activity_newcontinuous.so"])
         self.assertIn('desc1,"连续登录，可获得 元宝和银币', scripts["assets/scripts/Layer_activity_newcontinuous.so"])
         self.assertNotIn("isdouble", scripts["assets/scripts/Layer_activity_peace.so"])
+
+    def test_month_fund_unactivated_and_expired_views_do_not_offer_invalid_claims(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("月基金页面行为验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.execute('''
+            print = function() end
+            local noop = function() end
+            function widgets()
+                return setmetatable({}, {__index=function(items,key)
+                    local node = setmetatable({setString=function(self,v) self.text=v end,
+                        setTouchEnabled=function(self,v) self.enabled=v end}, {__index=function() return noop end})
+                    items[key]=node
+                    return node
+                end})
+            end
+            ui = {setLabelString=function(node,text) if text~=nil then node:setString(text) end end,
+                  addGray=noop, removeGray=noop, setNewIconName=noop, IDconfig=function() return {name='奖励'} end,
+                  getIDandNUM=function() return 20223,1 end}
+            tolua = {cast=function(node) return node end}
+            ccp, setSpriteFrameByName = noop, noop
+            gameConfig = {images={}, checkBuildOpen=function() return false end}
+            GameScene = {layers={activity={module={isContentScroll=false}}}}
+            gamedata = {config={month_growup={}}, time=function() return now end}
+            for i=1,20 do gamedata.config.month_growup[tostring(i)]={reward1='20223,1',reward2='20223,2'} end
+        ''')
+        lua.globals().fund = lua.execute(scripts["assets/scripts/Layer_activity_multipleRebate.so"])
+        lua.globals().welfare = lua.execute(scripts["assets/scripts/Layer_activity_welfareMonth.so"])
+        lua.execute('''
+            fund.coveritems=widgets()
+            fund.show, fund.status = true, 2
+            fund.configWelfare={['1']={limit=68,coefficient=10},['2']={limit=198,coefficient=20}}
+            fund.rebateTab, fund.endTimeLab = {68,10}, '2026年11月23日0时0分'
+            for _,statuses in ipairs({{0,0},{2,0},{0,2},{3,2}}) do
+                fund:reloaddata({data={activationBtnStatus1=statuses[1],activationBtnStatus2=statuses[2],
+                                      receiveDay1=0,receiveDay2=5}})
+                assert(#fund.pageconfig==2)
+                for i=1,2 do
+                    fund:shiftPage('rebate'..i)
+                    assert(fund.coveritems.getButton.enabled==(statuses[i]==2))
+                    assert(fund.coveritems.day.text==(i==1 and 0 or 5))
+                    assert(fund.coveritems.getLab.text==(statuses[i]==0 and '未激活' or '领取'))
+                end
+            end
+            welfare.coveritems, welfare.endAt = widgets(), 100
+            now=200
+            welfare:reloaddata({data={btnStatus1=0,btnStatus2=1}})
+            for i=1,2 do
+                assert(welfare.coveritems['doButton'..i].enabled==false)
+                assert(welfare.coveritems['doLab'..i].text=='已结束')
+            end
+            now=50
+            welfare:reloaddata({data={btnStatus1=0,btnStatus2=1}})
+            assert(welfare.coveritems.doButton1.enabled and welfare.coveritems.doButton2.enabled)
+            assert(welfare.coveritems.doLab1.text=='去充值' and welfare.coveritems.doLab2.text=='领 取')
+        ''')
 
     def test_shop_refreshes_limits_and_client_deducts_purchase_cost_once(self):
         try:

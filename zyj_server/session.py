@@ -4,7 +4,7 @@ import copy
 import functools
 import time
 
-from . import activities, development, fashion, guide, online_rewards, player, recharge, recruit, shop, training, welfare
+from . import activities, daily_events, development, fashion, guide, online_rewards, player, recharge, recruit, shop, training, welfare
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, pack_frame
 from .replay import Replay, normalize_comb_request
 
@@ -37,6 +37,7 @@ class Session:
         fashion.get_state(self.save, role_config)
         online_rewards.get_state(self.save, role_config)
         welfare.get_state(self.save)
+        daily_events.get_state(self.save)
         if self.save.get("has_role"):
             player.get_role_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
@@ -133,7 +134,7 @@ class Session:
             fixed_box = shop.fixed_box(self.role_config["props"].get(str(values[0]), {}))
 
         if sign_comb or break_comb or fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
-                                  *development.MUTATIONS,
+                                  *development.MUTATIONS, *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
@@ -164,7 +165,7 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (300, 1304, 1402, 2037, 2411, 3611, 7110, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (300, 1304, 1402, 2037, 2411, 3611, 7110, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES):
             working = copy.deepcopy(self.save)
             try:
