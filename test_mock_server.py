@@ -164,6 +164,15 @@ class ReplayRoutingTests(unittest.TestCase):
                              [f for f in expected_fields if not (f[:2] == (1, 0) and f[2] // 100 in live_ids)])
             self.assertTrue(all(value % 100 in (0, 1) for n, w, value in actual_fields
                                 if n == 1 and w == 0 and value // 100 in live_ids))
+        elif opcode == 3200:
+            self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [0] * len(self.role_config["shop"]))
+        elif opcode == 3210:
+            rows = self.entity_records(bytes.fromhex(actual), 1, 1)
+            self.assertEqual(set(rows), set(map(int, self.role_config["gift_bag"])))
+            for cid, raw in rows.items():
+                config = self.role_config["gift_bag"][str(cid)]
+                self.assertEqual([protocol.pb_get_varint(raw, n) for n in (2, 3, 4)],
+                                 [config["personallimit"], config["gold"], config["discount"]])
         elif opcode in (1001, 1054):
             values = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(actual))}
             recorded = {n: value for n, wire, value in protocol.iter_pb_fields(bytes.fromhex(expected))}
@@ -196,6 +205,262 @@ class ReplayRoutingTests(unittest.TestCase):
     def activity_request(self, opcode, values=()):
         body = b"".join(protocol.encode_pb_field(1, 0, value) for value in values)
         return {"opcode": opcode, "seq": 20000, "hex": body.hex()}
+
+    def shop_request(self, opcode, cid, count=1):
+        item = protocol.encode_pb_field(1, 0, cid) + protocol.encode_pb_field(2, 0, count)
+        return {"opcode": opcode, "seq": 20000, "hex": protocol.encode_pb_field(1, 2, item).hex()}
+
+    def test_shop_tabs_query_current_account_without_recorded_sequence(self):
+        self.complete_tutorial()
+        for opcode in (3200, 3210, 4890, 1070, 1075, 1076):
+            with self.subTest(opcode=opcode):
+                frames = self.replay([self.activity_request(opcode)])
+                self.assertEqual(frames[0]["opcode"], opcode)
+                self.assertTrue(frames[0]["hex"])
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(frames[0]["hex"])), [0, 80001, 1])
+
+    def seed_shop_account(self):
+        saved = self.seed_training_account(coin=1000000, vip=27)
+        saved["role_state"]["gold"] = 1000000
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_shop_queries_match_official_20261029_capture(self):
+        self.complete_tutorial()
+        capture = json.loads((Path(server.BASE_DIR) / "official_interaction_capture_20261029_2312.json").read_text())
+        checked = []
+        for frame in capture["connections"][0]["frames"]:
+            if frame["c2s"] or not frame["seq"]:
+                continue
+            body = bytes.fromhex(frame["hex"])
+            messages = protocol.get_comb_messages(body) if frame["opcode"] == 999900 else [(frame["opcode"], body)]
+            for opcode, expected in messages:
+                if opcode not in (1070, 1076, 3210, 4890):
+                    continue
+                with self.subTest(seq=frame["seq"], opcode=opcode):
+                    actual = bytes.fromhex(self.replay([self.activity_request(opcode)])[0]["hex"])
+                    if opcode == 3210:
+                        # 商品排列不影响原生按 CID 缓存；所有字段仍须与官方一致。
+                        rows = lambda data: sorted(sorted(protocol.iter_pb_fields(v))
+                                                   for n, w, v in protocol.iter_pb_fields(data))
+                        self.assertEqual(rows(actual), rows(expected))
+                    else:
+                        self.assertEqual(actual, expected)
+                    checked.append(opcode)
+        self.assertCountEqual(checked, [1070, 1076, 3210, 4890, 4890, 4890, 4890])
+
+    def test_shop_incremental_prices_daily_reset_and_clock_rollback(self):
+        self.seed_shop_account()
+        self.replay([self.shop_request(3201, 21, 4)])
+        frames = self.replay([self.shop_request(3201, 21, 2)])
+        reward = bytes.fromhex(frames[0]["hex"])
+        self.assertIsNone(protocol.pb_get_varint(reward, 2))
+        self.assertEqual(self.query_role()[9], 1000000 - 4800 - 2700)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20090], 2), 6)
+        query = self.activity_request(3200)
+        counts = lambda: protocol.parse_ids_pb(bytes.fromhex(self.replay([query])[0]["hex"]))
+        self.assertEqual(counts()[20], 6)
+        self.clock.return_value = ((self.now + 28800) // 86400 + 1) * 86400 - 28800
+        self.assertEqual(counts(), [0] * 29)
+        self.replay([self.shop_request(3201, 21)])
+        self.clock.return_value = self.now
+        self.assertEqual(counts()[20], 1)
+
+    def test_shop_gifts_open_and_weekly_limits_survive_reconnect(self):
+        self.seed_shop_account()
+        self.replay([self.shop_request(3211, 20101)])
+        rows = self.entity_records(bytes.fromhex(self.replay([self.activity_request(3210)])[0]["hex"]), 1, 1)
+        self.assertNotIn(20101, rows)
+        before = self.query_role()[8]
+        reply = self.replay([self.activity_request(1201, [20101, 1])])[0]
+        self.assertEqual(reply["opcode"], 1201)
+        self.assertEqual(self.query_role()[8], before + 50000)
+        self.assertNotIn(20101, self.entity_records(self.query_world(1200), 1, 1))
+        self.assertTrue(any(protocol.pb_get_varint(r, 1) == 10203 for r in self.entity_records(self.query_world(1002), 1, 2).values()))
+        self.replay([self.activity_request(4891, [1])])
+        self.assertIn(20431, self.entity_records(self.query_world(1200), 1, 1))
+        request = self.activity_request(4891, [1])
+        original = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([request]), 4891, request["seq"], "本周已购买")
+        self.assertEqual(self.save_path.read_bytes(), original)
+        day = (self.now + 28800) // 86400
+        self.clock.return_value = (((day + 3) // 7 + 1) * 7 - 3) * 86400 - 28800
+        query = self.activity_request(4890)
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(self.replay([query])[0]["hex"]))[0], 0)
+        self.replay([request])
+        self.clock.return_value = self.now
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(self.replay([query])[0]["hex"]))[0], 1)
+        self.assert_unavailable_response(self.replay([self.shop_request(3211, 20101)]), 3211, 20000, "已购买")
+
+    def test_every_catalog_gift_can_be_bought_opened_and_restored(self):
+        baseline = self.seed_shop_account()
+        types = set()
+        for table, opcode in (("gift_bag", 3211), ("vip_weekgift", 4891)):
+            for key, row in self.role_config[table].items():
+                with self.subTest(table=table, key=key):
+                    self.save_path.write_text(json.dumps(baseline))
+                    buy = self.shop_request(opcode, int(key)) if opcode == 3211 else self.activity_request(opcode, [int(key)])
+                    self.assertEqual(self.replay([buy])[0]["opcode"], opcode)
+                    reply = self.replay([self.activity_request(1201, [row["id"], 1])])[0]
+                    self.assertEqual(reply["opcode"], 1201)
+                    reward = bytes.fromhex(reply["hex"])
+                    self.assertNotIn(row["id"], self.entity_records(self.query_world(1200), 1, 1))
+                    roster = self.query_world(1002)
+                    for n, w, value in protocol.iter_pb_fields(reward):
+                        if w != 2 or n not in (6, 7, 8, 11) or not value:
+                            continue
+                        types.add(n)
+                        slot_field, identity = {6: (2, 1), 7: (3, 1), 8: (1, 2), 11: (7, 1)}[n]
+                        records = list(self.entity_records(value, 1, 1).values()) if n == 7 else [value]
+                        stored = self.entity_records(roster, slot_field, identity)
+                        for record in records:
+                            self.assertEqual(stored[protocol.pb_get_varint(record, identity)], record)
+        self.assertEqual(types, {6, 7, 8, 11})
+
+    def test_shop_sigil_iids_and_box_batch_costs_are_not_duplicated(self):
+        self.seed_shop_account()
+        self.replay([self.shop_request(3201, 10, 2)])
+        self.replay([self.shop_request(3201, 10, 2)])
+        gems = self.entity_records(self.query_world(1002), 7, 1)
+        owned = [protocol.parse_ids_pb(r) for r in gems.values() if protocol.parse_ids_pb(r)[1] == 33017]
+        self.assertEqual(len(owned), 4)
+        self.assertEqual(len({r[0] for r in owned}), 4)
+        self.give_props({20088: 3})
+        before = self.query_role()[8]
+        request = self.activity_request(1201, [20088, 3])
+        frames = self.replay([request, request])
+        self.assertEqual(frames[0], frames[1])
+        self.assertEqual(self.query_role()[8], before + 300000)
+        self.assertNotIn(20088, self.entity_records(self.query_world(1200), 1, 1))
+
+    def test_shop_invalid_transactions_are_atomic(self):
+        baseline = self.seed_shop_account()
+        self.give_props({20088: 1})
+        baseline = json.loads(self.save_path.read_text())
+        cases = [self.shop_request(3201, 999), self.shop_request(3201, 21, 9999),
+                 self.shop_request(3201, 27), self.shop_request(3211, 20101, 2),
+                 self.activity_request(4891, [28]), self.activity_request(1201, [20088, 2]),
+                 self.activity_request(1201, [20088, 101]), self.activity_request(1201, [20088, 1, 1])]
+        malformed = self.shop_request(3201, 21)
+        malformed["hex"] *= 2
+        cases.append(malformed)
+        for request in cases:
+            with self.subTest(request=request):
+                self.save_path.write_text(json.dumps(baseline))
+                original = self.save_path.read_bytes()
+                frames = self.replay([request])
+                self.assertEqual([f["opcode"] for f in frames], [999999, 1999])
+                self.assertEqual(self.save_path.read_bytes(), original)
+        for values, request in (({"gold": 0}, self.shop_request(3201, 21)),
+                                ({"vip": 0}, self.shop_request(3211, 20101)),
+                                ({"vip": 0}, self.activity_request(4891, [1])),
+                                ({"coin": (1 << 31) - 1}, self.activity_request(1201, [20088, 1]))):
+            saved = copy.deepcopy(baseline)
+            saved["role_state"].update(values)
+            self.save_path.write_text(json.dumps(saved))
+            original = self.save_path.read_bytes()
+            self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_fashion_purchase_dress_hide_strengthen_and_restore(self):
+        baseline = self.seed_shop_account()
+        protagonist = bytes.fromhex(baseline["protagonist_snapshot"])
+        iid = protocol.pb_get_varint(protagonist, 1)
+        original = self.entity_records(bytes.fromhex(baseline["world_state"]["1002"]), 1, 2)[iid]
+        buy = self.activity_request(1074, [80001])
+        frames = self.replay([buy, buy])
+        self.assertEqual([f["opcode"] for f in frames], [1074, 205, 1074, 205])
+        self.assertEqual(frames[:2], frames[2:])
+        self.assertEqual(self.query_role()[9], 1000000 - 3999)
+        self.assertNotIn(80001, self.entity_records(self.query_world(1200), 1, 1))
+        bought = self.entity_records(self.query_world(1002), 1, 2)[iid]
+        self.assertEqual(protocol.pb_get_varint(bought, 8), protocol.pb_get_varint(original, 8) + 5040)
+        self.assertEqual(protocol.pb_get_varint(bought, 6), protocol.pb_get_varint(original, 6))
+        self.replay([self.activity_request(1073, [80001])])
+        dressed = self.entity_records(self.query_world(1002), 1, 2)[iid]
+        base_cid = protocol.pb_get_varint(original, 1)
+        coat_cid = self.role_config["fashioncoat"]["80001"][str(base_cid)]["coat_id"]
+        self.assertEqual(protocol.pb_get_varint(dressed, 1), coat_cid)
+        for shown, cid, train in ((0, base_cid, 1), (1, coat_cid, 2)):
+            self.replay([self.activity_request(1071)])
+            state = json.loads(self.save_path.read_text())
+            self.assertEqual(state["fashion_state"]["show"], shown)
+            self.assertEqual(protocol.pb_get_varint(bytes.fromhex(state["protagonist_snapshot"]), 7), train)
+            general = self.entity_records(self.query_world(1002), 1, 2)[iid]
+            self.assertEqual(protocol.pb_get_varint(general, 1), cid)
+            self.assertEqual(protocol.pb_get_varint(general, 8), protocol.pb_get_varint(bought, 8))
+        self.give_props({20281: 3})
+        before = self.query_role()[8]
+        frames = self.replay([self.activity_request(1072, [80001, 5])])
+        groups = self.begin7day_groups(bytes.fromhex(frames[0]["hex"]))
+        self.assertEqual(groups[1], [1, 300, 3])
+        self.assertEqual(self.query_role()[8], before - 300)
+        self.assertNotIn(20281, self.entity_records(self.query_world(1200), 1, 1))
+        grown = self.entity_records(self.query_world(1002), 1, 2)[iid]
+        self.assertEqual(protocol.pb_get_varint(grown, 8), protocol.pb_get_varint(original, 8) + 5190)
+        response = self.replay([self.activity_request(1070)])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(response["hex"])), [80001, 1, 80001, 2])
+        state = json.loads(self.save_path.read_text())
+        self.assertEqual(state["role_state"]["power"], baseline["role_state"]["power"] + 519)
+
+    def test_fashion_invalid_or_failed_save_never_charges(self):
+        baseline = self.seed_shop_account()
+        for request in (self.activity_request(1073, [80001]), self.activity_request(1071),
+                        self.activity_request(1072, [80001]), self.activity_request(1074, [80002]),
+                        self.activity_request(1074, [80001, 1])):
+            original = self.save_path.read_bytes()
+            self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), original)
+        for request in (self.activity_request(1074, [80001]), self.shop_request(3201, 21),
+                        self.shop_request(3211, 20101), self.activity_request(4891, [1])):
+            with patch.object(player, "save_role", return_value=False):
+                self.assert_rejected(request, "角色状态保存失败")
+        baseline["role_state"]["gold"] = 3998
+        self.save_path.write_text(json.dumps(baseline))
+        original = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1074, [80001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_shop_purchase_is_saved_before_reply_and_retry_is_not_recharged(self):
+        self.seed_shop_account()
+        request = self.shop_request(3201, 21)
+        conn = ReplayConnection([request, request], 7)
+        send = conn.sendall
+
+        def check_saved(packet):
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual(saved["role_state"]["gold"], 998800)
+            self.assertEqual(saved["shop_state"]["props"]["21"], 1)
+            send(packet)
+
+        conn.sendall = check_saved
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertEqual(len(conn.responses), 2)
+        self.assertEqual(conn.responses[0], conn.responses[1])
+
+    def test_fashion_discount_ownership_and_level_gate(self):
+        self.seed_shop_account()
+        self.clock.return_value = 1478620800  # 2016-11-09 00:00 UTC+8，配置活动开始。
+        response = self.replay([self.activity_request(1076)])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(response["hex"])), [80001, 80001, 1])
+        self.replay([self.activity_request(1074, [80001])])
+        self.assertEqual(self.query_role()[9], 998001)
+        response = self.replay([self.activity_request(1076)])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(response["hex"])), [80001, 80001, 2])
+        original = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1074, [80001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), original)
+        self.give_props({20281: 100})
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["level"] = 1
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(1072, [80001, 5])])
+        self.assertEqual(json.loads(self.save_path.read_text())["fashion_state"]["levels"], {"80001": 2})
+        original = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1072, [80001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), original)
 
     def begin7day_groups(self, body):
         groups = {}

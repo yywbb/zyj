@@ -55,6 +55,10 @@ def _equipment(save):
 
 def build_reward(save, specification, config, quantity=1):
     coin, gold, props, equipment = 0, 0, [], []
+    souls, gems = [], []
+    roster = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))
+    soul_iid = max([3000000, *(pb_get_varint(v, 1) for n, w, v in roster if n == 3 and w == 2)])
+    gem_iid = max([4000000, *(pb_get_varint(v, 1) for n, w, v in roster if n == 7 and w == 2)])
     # 本地装备使用独立 iid 区间，避免与尚未回放的录制掉落撞号。
     iid = max([1000000, *_equipment(save)])
     for entry in specification.split(";"):
@@ -77,12 +81,25 @@ def build_reward(save, specification, config, quantity=1):
                 if iid >= (1 << 31):
                     raise ValueError("本地装备 iid 已耗尽")
                 equipment.append(encode_pb_field(6, 2, _ids([iid, cid, 1] + [0] * 10)))
+        elif str(cid) in config["soul"]:
+            for _ in range(count):
+                soul_iid += 1
+                if soul_iid >= (1 << 31):
+                    raise ValueError("本地武魂 iid 已耗尽")
+                souls.append(encode_pb_field(1, 2, b"".join(encode_pb_field(n, 0, v)
+                             for n, v in ((1, soul_iid), (2, cid), (3, 1)))))
+        elif str(cid) in config["sigil"]:
+            for _ in range(count):
+                gem_iid += 1
+                if gem_iid >= (1 << 31):
+                    raise ValueError("本地魔符 iid 已耗尽")
+                gems.append(encode_pb_field(11, 2, _ids([gem_iid, cid, config["sigil"][str(cid)]["level"], 0])))
         else:
             raise ValueError(f"不支持的活动奖励类型: {cid}")
     return ((encode_pb_field(1, 0, coin) if coin else b"")
             + (encode_pb_field(2, 0, gold) if gold else b"")
             + encode_pb_field(5, 2, b"".join(props)) + b"".join(equipment)
-            + encode_pb_field(7, 2, b"") + encode_pb_field(10, 2, b""))
+            + encode_pb_field(7, 2, b"".join(souls)) + b"".join(gems) + encode_pb_field(10, 2, b""))
 
 
 def first_period(save, config, activity_id, now):

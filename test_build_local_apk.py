@@ -104,6 +104,56 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn("if t.location == 0 then LoginScene:rememberLocalLogin() end", decrypted("assets/scripts/UILogin.so"))
         self.assertIn("LoginScene:failLocalLogin(t.msg, true)", decrypted("assets/scripts/UIErrorMessage.so"))
 
+    def test_shop_refreshes_limits_and_client_deducts_purchase_cost_once(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("商城回调行为验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.execute('''
+            cclog = function() end
+            local function message()
+                return {ParseFromString = function(self, data)
+                    for k,v in pairs(data) do self[k] = v end
+                end}
+            end
+            package.preload.ids_pb = function() return {Ids = message} end
+            package.preload.idnums_pb = function() return {} end
+            package.preload.shopquery_pb = function() return {ShopQuery = message} end
+            package.preload.somethings_pb = function() return {SomeThings = message} end
+            package.preload.result_pb = function() return {Result = message} end
+            gamedata = {cache = {shop = {props = {[1]=9}, giftbags = {[20101]={cid=20101}}}, role = {gold=5000}},
+                        config = {gift_bag = {['20101']={id=20101,discount=8}}}, ext = {}, awarded = 0}
+            function gamedata:ShopProps(data) for k,v in ipairs(data) do self.cache.shop.props[k]=v end end
+            function gamedata:GiftBags(data) for _,v in ipairs(data) do self.cache.shop.giftbags[v.cid]=v end end
+            function gamedata:SomethingProcess(data) self.awarded=self.awarded+1 return data end
+            function gamedata:updateRoleGold(delta) self.cache.role.gold=self.cache.role.gold+delta end
+            function gamedata:updateprops(data) self.prop=data end
+        ''')
+        lua.execute(scripts["assets/scripts/GameShop.so"])
+        lua.execute('''
+            local network, opcode = UIshopQueryCallback({type=3200})
+            assert(network==1 and opcode==3200)
+            network, opcode = UIGiftBagQueryCallback({type=3210})
+            assert(network==1 and opcode==3210)
+            NetshopQueryCallback({rbuf={ids={0,0}}})
+            assert(gamedata.cache.shop.props[1]==0)
+            NetGiftBagQueryCallback({rbuf={items={}}})
+            assert(next(gamedata.cache.shop.giftbags)==nil)
+            gamedata.ext.shopbuy={id=1,num=2,gold=2400}
+            NetShopBuyCallback({rbuf={}})
+            assert(gamedata.cache.role.gold==2600 and gamedata.cache.shop.props[1]==2)
+            gamedata.cache.shop.giftbags[20101]={cid=20101}
+            gamedata.ext.shopbuy={id=20101,num=1}
+            NetGiftBagBuyCallback({rbuf={result=true}})
+            assert(gamedata.cache.role.gold==2592 and gamedata.prop.num==1)
+            assert(gamedata.cache.shop.giftbags[20101]==nil)
+            gamedata.ext.weekgiftgold=100
+            NetVipWeekGiftRewardCallback({rbuf={}})
+            assert(gamedata.cache.role.gold==2492 and gamedata.awarded==2)
+        ''')
+
     def test_local_login_success_failure_timeout_and_switch_with_lua51(self):
         try:
             from lupa.lua51 import LuaRuntime

@@ -4,7 +4,7 @@ import copy
 import functools
 import time
 
-from . import activities, guide, player, recharge, recruit, training
+from . import activities, fashion, guide, player, recharge, recruit, shop, training
 from .protocol import encode_pb_field, get_comb_ids, pack_frame
 from .replay import Replay
 
@@ -31,6 +31,8 @@ class Session:
         recruit.get_state(self.save)
         recruit.get_pending(self.save)
         recharge.get_state(self.save)
+        shop.get_state(self.save)
+        fashion.get_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
 
         sections = guide.get_guide_sections(self.save, step_counts)
@@ -84,7 +86,13 @@ class Session:
         if opcode == 1401:
             return unavailable_response(opcode, seq, body, "本地服暂未开放此招募方式，请使用普通招募。")
 
-        if opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, *training.OPCODES):
+        fixed_box = False
+        if opcode == 1201:
+            values = player.parse_prop_use(body)
+            fixed_box = shop.fixed_box(self.role_config["props"].get(str(values[0]), {}))
+
+        if fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009,
+                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:
@@ -109,7 +117,8 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (1304, 1402, 2411, 3611, 7110, *recharge.OPCODES, *activities.TRANSACTION_OPCODES):
+        if opcode in (1304, 1402, 2411, 3611, 7110, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+                      *shop.QUERIES, *fashion.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 packets = player.prepare_recorded_responses(

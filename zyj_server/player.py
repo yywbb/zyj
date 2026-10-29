@@ -8,7 +8,7 @@ import random
 import tempfile
 import time
 
-from . import activities, battle, configuration, formation, recharge, recruit, training
+from . import activities, battle, configuration, fashion, formation, recharge, recruit, shop, training
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -18,7 +18,7 @@ from .protocol import (
 print_flush = functools.partial(print, flush=True)
 
 WORLD_QUERY_IDS = (1002, 1012, 1200, 1300)
-SLOT_RECORD_KEYS = {1: 2, 2: 1, 4: 1, 5: 1}
+SLOT_RECORD_KEYS = {1: 2, 2: 1, 3: 1, 4: 1, 5: 1, 7: 1}
 STAMINA_INTERVAL = 360  # 多份 Role 抓包的全部/下次恢复倒计时之差可交叉验证。
 
 # role_pb.Role 的字段号。
@@ -48,7 +48,9 @@ def load_role_config(config_path):
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "worlddrop", "recruit_deck", "recruit_tenlottery",
-                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "build"))
+                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "build",
+                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
+                             "fashion_gift_bag", "fashioncoat", "fashionintentify"))
 
 
 def get_default_save():
@@ -397,6 +399,12 @@ def apply_reward(save, body, role_config, now=None):
                     change_item_count(save, cid, count if field == 5 else -count, role_config, now)
         elif field == 6 and wire == 2:
             record_slot_update(save, encode_pb_field(2, 2, value))
+        elif field == 7 and wire == 2:
+            for n, w, soul in iter_pb_fields(value):
+                if n == 1 and w == 2:
+                    record_slot_update(save, encode_pb_field(3, 2, soul))
+        elif field == 11 and wire == 2:
+            record_slot_update(save, encode_pb_field(7, 2, value))
         elif field == 8 and wire == 2:
             record_protagonist_general(save, value)
             record_slot_update(save, encode_pb_field(1, 2, value))
@@ -458,6 +466,20 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = recharge.prepare(opcode, save, request_body, role_config, now)
         if opcode in recharge.CLAIMS:
             apply_reward(save, body, role_config, now)
+    elif opcode in shop.OPCODES:
+        body, costs, reward = shop.prepare(opcode, save, request_body, role_config, now)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
+    elif opcode in fashion.OPCODES:
+        body, costs, general = fashion.prepare(opcode, save, request_body, role_config, now)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if general:
+            record_protagonist_general(save, general)
+            record_slot_update(save, encode_pb_field(1, 2, general)
+                               + encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode in WORLD_QUERY_IDS:
         body = bytes.fromhex(save["world_state"][str(opcode)])
         if opcode == 1002 and save.get("protagonist_snapshot"):
@@ -589,6 +611,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                     raise ValueError("恢复资源超出范围")
                 # 客户端自行扣除使用数量，usedcidnums 必须为空，避免重复扣道具。
                 body = encode_pb_field(field, 0, delta) + b"".join(encode_pb_field(n, 2, b"") for n in (5, 7, 10))
+            elif shop.fixed_box(config) and not body:
+                body = shop.open_box(save, ids, role_config)
             change_item_count(save, ids[0], -ids[1], role_config, now)
             if config["type"] == "keybox":
                 change_item_count(save, int(config["param1"]), -ids[1], role_config, now)
@@ -634,7 +658,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
-    if responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES) and not responses[0]["hex"]:
+    if responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS) and not responses[0]["hex"]:
         state, previous = save["role_state"], get_role_state(before, role_config)
         power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
                          (state["power"] - previous["power"], state["power"], 0, state["g_power"],

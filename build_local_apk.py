@@ -739,6 +739,19 @@ end
     patched["assets/scripts/window_recruit.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched window_recruit.so (Fengshen token-first or configured gold cost)")
 
+    code = read_script("GameShop").decode("utf-8").replace("\r\n", "\n")
+    # 每次打开重新查询日/周限购；全量礼包响应必须移除已售完的旧缓存。
+    for callback, cache, opcode in (("UIshopQueryCallback", "props", 3200), ("UIGiftBagQueryCallback", "giftbags", 3210)):
+        start = code.index(f"function {callback}(uireq)\n")
+        end = code.index("\nend", start) + len("\nend")
+        assert f"next(gamedata.cache.shop.{cache})" in code[start:end]
+        code = code[:start] + f"function {callback}(uireq)\n    return 1, {opcode}, nil\nend" + code[end:]
+    for marker, cache in (("    gamedata:ShopProps(shopData.ids)", "props"), ("    gamedata:GiftBags(shopData.items)", "giftbags")):
+        assert code.count(marker) == 1
+        code = code.replace(marker, f"    gamedata.cache.shop.{cache} = {{}}\n" + marker)
+    patched["assets/scripts/GameShop.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched GameShop.so (refresh account purchase limits and replace full lists)")
+
     return patched
 
 
