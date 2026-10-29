@@ -130,16 +130,23 @@ sequenceDiagram
 ### 1. 环境准备
 - 操作系统: Linux / macOS / Windows (WSL)
 - Python 3.8+
-- 安卓手机或安卓模拟器，能访问服务端电脑所在的局域网；无需开启 USB 调试
+- 安卓手机或安卓模拟器，能访问服务端电脑所在的可信局域网或虚拟组网；无需开启 USB 调试
 - 仅重打包时需要：原版 `z7_7_4.apk`、Java Runtime 和 Android SDK build-tools (`zipalign`、`apksigner`)
 - 建议在路由器为服务端电脑保留固定 IP；电脑防火墙只对可信局域网放行 TCP `14600`，不要设置公网端口转发
 
 ### 2. 构建一次局域网客户端
 
-把原版 `z7_7_4.apk` 放在脚本旁，指定**服务端电脑**的局域网 IP。以下 `192.168.1.20` 仅为示例，不是手机或模拟器自己的 IP：
+默认使用 `10.66.0.x` 虚拟组网，电脑和手机均需保持组网连接：
+
+- 游戏服务端：电脑 **`10.66.0.12:14600`**。
+- 无线调试：手机 **`10.66.0.50:5555`**（`NOH-AN00`）。
+
+2026-10-29 已从手机连续三次直连该游戏端口并收到预期协议回包（61–87 ms），同时验证无线 ADB 可执行命令；期间一次组网短暂掉线，恢复后复测通过。地址重新分配后需重新确认。
+
+把原版 `z7_7_4.apk` 放在脚本旁，指定**服务端电脑**的 IP：
 
 ```bash
-python3 build_local_apk.py --server-ip 192.168.1.20 --accounts 3
+python3 build_local_apk.py --server-ip 10.66.0.12 --accounts 3
 ```
 
 `--server-ip` 必填，只接受局域网 IPv4，拒绝回环地址和公网地址；`--accounts` 默认为 2，范围 1~1000，只控制登录页的预设账号列表。登录表单可输入任意 1~1000 的已启用账号，后台新增账号无需重打包。所有账号共用同一个 IP 和端口；电脑 IP 改变后需要重新打包、更新客户端。
@@ -167,8 +174,9 @@ python3 mock_server.py
 ADB 可以仅用于可选的安装和日志调试，游戏连接不经过它：
 
 ```bash
-adb install -r zyj_local.apk
-adb shell monkey -p com.ldfs.zyjyg.local -c android.intent.category.LAUNCHER 1
+adb connect 10.66.0.50:5555
+adb -s 10.66.0.50:5555 install -r zyj_local.apk
+adb -s 10.66.0.50:5555 shell monkey -p com.ldfs.zyjyg.local -c android.intent.category.LAUNCHER 1
 ```
 
 若无法连接，检查 IP 是否正确、防火墙是否允许该端口、Wi-Fi 是否启用了访客隔离或客户端隔离。异常断网后旧会话需等待 TCP 断开才能释放；首版不自动踢旧会话接管。
@@ -215,7 +223,7 @@ python3 mock_server.py --account 2 --reset-guide
 将原版 APK 放到脚本旁并命名为 `z7_7_4.apk`，安装 Android SDK build-tools 并设置 `ANDROID_HOME`（或把 `zipalign`、`apksigner` 加入 PATH），即可构建 `zyj_local.apk`：
 
 ```bash
-python3 build_local_apk.py --server-ip 192.168.1.20 --accounts 3
+python3 build_local_apk.py --server-ip 10.66.0.12 --accounts 3
 ```
 
 构建器从原 APK 解密脚本，在 `get_patched_lua_scripts()` 中执行带版本断言的替换；`scripts_clean/` 仅供分析，直接修改它不会打入 APK。工具查找兼容 Windows 的 `.exe/.bat` 和 macOS/Linux 的无后缀工具名。
