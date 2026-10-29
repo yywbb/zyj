@@ -176,6 +176,48 @@ def patch_game_server_json(raw_bytes):
     print("  [GameServer] Redirected all server targets to 127.0.0.1:14600")
     return json.dumps(servers, ensure_ascii=False, indent=2).encode("utf-8")
 
+def patch_recharge_script(code):
+    start = code.index("function recharge.createlist(self)\n")
+    end = code.index("function recharge.setPage_vip(self)\n", start)
+    original = code[start:end]
+    assert "LuaEventHandler:create(function(fn, myTable, a1, a2)" in original
+    assert "r = a2" in original and "self.listview = ui.createLuaTableView({" in original
+    render_start = original.index("            local data = self.recharge[a1+1]")
+    render_end = original.index("            cellCCB:setPosition(810/2+10, 0)")
+    render = original[render_start:render_end]
+    payment_start = render.index('                    print("idCardStatus",gamedata.sdk.idCardStatus)')
+    payment_end = render.index('                end, CCControlEventTouchUpInside)', payment_start)
+    assert 'sdk:isValid()' in render[payment_start:payment_end]
+    assert 'UIRequest({type = 115, cid = data.id})' in render[payment_start:payment_end]
+    render = render[:payment_start] + '''                    UIRequest({type = 115, cid = data.id})
+                    gamedata.music:PlayOptSound("czcg")
+''' + render[payment_end:]
+    # 充值仅八个可见档位，直接生成节点，避开已发生 SIGSEGV 的原生 tableCellAtIndex 回调。
+    replacement = '''function recharge.createlist(self)
+    self.infoItems.scroll:removeAllChildrenWithCleanup(true)
+    local size = self.infoItems.scroll:getContentSize()
+    local height = math.max(size.height, #self.recharge * 190)
+    local container = ui.createNode({w = 810, h = height})
+    for a1 = 0, #self.recharge - 1 do
+        local cellCCB, ccbDocumentControler = CCBReaderLoad("recharge/cell_recharge_info_new", nil, true, "cell_recharge_info_new")
+''' + render + '''
+        cellCCB:setPosition(810/2+10, height - (a1+1) * 190)
+        container:addChild(cellCCB)
+    end
+    self.listview = CCScrollView:create(size, container)
+    self.listview:setDirection(1)
+    self.listview:setContentOffset(ccp(0, size.height - height))
+    self.infoItems.scroll:addChild(self.listview)
+    self.listview:setTouchPriority(self.touchPriority)
+end
+
+'''
+    code = code[:start] + replacement + code[end:]
+    old = 'if self.listview and self.pagetype == "info" then\n        self.listview:reloadData()'
+    assert code.count(old) == 1
+    return code.replace(old, 'if self.listview and self.pagetype == "info" then\n        self:createlist()')
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -369,6 +411,59 @@ end"""
     patched["assets/scripts/guideControl.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched guideControl.so (defensive fallback on missing steps)")
 
+    code = patch_recharge_script(read_script("window_recharge").decode("utf-8").replace("\r\n", "\n"))
+    patched["assets/scripts/window_recharge.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched window_recharge.so (plain scroll container for recharge rows)")
+
+    code = read_script("UIRecharge").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function UIRechargePre(t)\n")
+    end = code.index("function UIRechargeSucPre(t)\n", start)
+    assert "sdk:Recharge(rechargeTb)" in code[start:end]
+    code = code[:start] + '''function UIRechargePre(t)
+    print("[LocalMock] 本地模拟支付成功")
+    UIRequest({type = 116, order = t.rechargeData["1"].i})
+end
+
+''' + code[end:]
+    start = code.index("function UIRechargefresh(t)\n")
+    end = code.index("\nfunction ", start + 1)
+    assert "UIRequest({type = 117, update = true})" in code[start:end]
+    code = code[:start] + '''function UIRechargefresh(t)
+    UIRequest({type = 1001})
+    UIRequest({type = 117, update = true})
+    UIRequest({type = 2090, update = true})
+    UIRequest({type = 2092, update = true})
+    UIRequest({type = 2099})
+end
+''' + code[end:]
+    patched["assets/scripts/UIRecharge.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched UIRecharge.so (local simulated payment and persisted entitlement refresh)")
+
+    code = read_script("window_recruit").decode("utf-8").replace("\r\n", "\n")
+    # 恢复原客户端已有的封神令不足时元宝支付分支，与本地扣费选择一致。
+    for kind, field in (("One", "count"), ("Ten", "tentaverncount")):
+        marker = f'        -- if self.fengshenzhaomuling >= config.{field} then\n'
+        start = code.index(marker)
+        end = code.index('        -- end\n', start) + len('        -- end\n')
+        commented = code[start:end]
+        assert f'self.type{kind} = "gold"' in commented
+        branch = code.rindex('    elseif self.recruitdata.index == 4 then\n', 0, start)
+        active = code[branch:start]
+        assert f'self.type{kind} = "gaojizhaomuling"' in active
+        code = code[:branch] + '    elseif self.recruitdata.index == 4 then\n' + commented.replace('        -- ', '        ') + code[end:]
+    start = code.index('    if self.recruitdata.index == 4 then\n        ui.setLabelString(self.recruitItems.ongoldnum')
+    end = code.index('    end\n', start) + len('    end\n')
+    code = code[:start] + code[end:]
+    marker = '        local config = gamedata.config:getConfigByName("recruit_basic")[tostring(self.onedata.pos)]\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''        if self.onedata.pos == 4 then
+            local remaining = self.onedata.generalrecruit[tostring(self.onedata.pos)].propnum
+            self.typeOne = remaining >= config.count and "gaojizhaomuling" or "gold"
+        end
+''')
+    patched["assets/scripts/window_recruit.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched window_recruit.so (Fengshen token-first or configured gold cost)")
+
     return patched
 
 
@@ -471,7 +566,7 @@ end
 
 def find_tool(name):
     """定位 Android 构建工具: 优先 PATH, 其次 ANDROID_HOME/build-tools/<ver>/"""
-    exe = name + (".bat" if name == "apksigner" else ".exe")
+    exe = name + ((".bat" if name == "apksigner" else ".exe") if os.name == "nt" else "")
     for base in os.environ.get("PATH", "").split(os.pathsep):
         cand = os.path.join(base.strip(), exe)
         if os.path.exists(cand):
