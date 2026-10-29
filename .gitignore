@@ -13,6 +13,7 @@ role_save.json
 credentials.json
 config_overrides.json
 /backups/
+/gm_operations/
 
 # Recorded frame data backup
 recorded_frames.json.bak
