@@ -131,6 +131,32 @@ def build_routing_tables(frames):
                 out.extend(encode_pb_field(field, wire, value))
             resps[index] = dict(response, hex=out.hex())
 
+    # shortcut: 仅补 GameShop 刷新后的九项主页预加载；新增页面组合时按完整请求另行接入。
+    page_ids = (2313, 4800, 6911, 7002, 2037, 2039, 6501, 6810)
+    page_request = b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid)) for mid in page_ids)
+    gift_query = encode_pb_field(1, 2, encode_pb_field(1, 0, 3210))
+    refresh_request = b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid))
+                               for mid in (*page_ids[:3], 3210, *page_ids[3:]))
+    refresh_groups = []
+    for group in comb_routes.get((get_comb_ids(page_request), page_request), []):
+        if any(tuple(mid for mid, _ in get_comb_messages(bytes.fromhex(r["hex"]))) != page_ids
+               for r in group if r["opcode"] == 999900):
+            continue
+        responses = []
+        for response in group:
+            if response["opcode"] == 999900:
+                out = bytearray()
+                for n, w, v in iter_pb_fields(bytes.fromhex(response["hex"])):
+                    out.extend(encode_pb_field(n, w, v))
+                    if (n, w) == (1, 2) and pb_get_varint(v, 1) == 6911:
+                        # 占位由 player 调用 shop.prepare 生成当前账号的礼包列表。
+                        out.extend(gift_query)
+                response = dict(response, hex=out.hex())
+            responses.append(response)
+        refresh_groups.append(responses)
+    if refresh_groups:
+        comb_routes.setdefault((get_comb_ids(refresh_request), refresh_request), refresh_groups)
+
     print_flush(f"[*] 带请求校验的录制路由就绪: {sum(len(groups) for groups in verified.values())} 个请求")
     print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个普通请求参数组合, {len(comb_routes)} 个 Comb 请求参数组合, {len(master_comb_packets)} 个主城初始化子帧")
     return opcode_routes, comb_routes, master_comb_packets, verified

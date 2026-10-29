@@ -249,6 +249,72 @@ class ReplayRoutingTests(unittest.TestCase):
                     checked.append(opcode)
         self.assertCountEqual(checked, [1070, 1076, 3210, 4890, 4890, 4890, 4890])
 
+    def test_main_page_refresh_comb_restores_current_gifts_after_purchase(self):
+        self.seed_shop_account()
+        refresh = {"opcode": 999900, "seq": 28,
+                   "hex": "0a030889120a0308c0250a0308ff350a03088a190a0308da360a0308f50f0a0308f70f0a0308e5320a03089a35"}
+        requests = [self.by_seq[27], dict(refresh, seq=122), dict(self.by_seq[122], seq=28), refresh]
+        tables = copy.deepcopy(self.tables)
+        for bought in (False, True):
+            with self.subTest(bought=bought):
+                if bought:
+                    self.replay([self.shop_request(3211, 20101)])
+                gifts = self.query_world(3210)
+                self.assertEqual(20101 in self.entity_records(gifts, 1, 1), not bought)
+                before = self.save_path.read_bytes()
+                responses = self.replay(requests, chunk_size=7)
+                self.assertEqual([(f["opcode"], f["seq"]) for f in responses],
+                                 [(999900, f["seq"]) for f in requests])
+                for request, response, source in zip(requests, responses, (27, 122, 122, 163)):
+                    recorded = dict(protocol.get_comb_messages(bytes.fromhex(self.recorded[(source, 999900)]["hex"])))
+                    ids = [mid for mid, _ in protocol.get_comb_messages(bytes.fromhex(request["hex"]))]
+                    messages = protocol.get_comb_messages(bytes.fromhex(response["hex"]))
+                    self.assertEqual(messages, [(mid, gifts if mid == 3210 else recorded[mid]) for mid in ids])
+                self.assertEqual(self.save_path.read_bytes(), before)
+                self.assertEqual(self.replay([refresh]), [dict(responses[1], seq=refresh["seq"])])
+        self.assertEqual(self.tables, tables)
+
+    def test_main_page_comb_compatibility_keeps_full_parameter_validation(self):
+        self.seed_shop_account()
+        before = self.save_path.read_bytes()
+        self.clock.return_value = self.now + 360
+        refresh = bytes.fromhex("0a030889120a0308c0250a0308ff350a03088a190a0308da360a0308f50f0a0308f70f0a0308e5320a03089a35")
+        for raw in (bytes.fromhex(self.by_seq[27]["hex"]), bytes.fromhex(self.by_seq[122]["hex"]), refresh):
+            fields = list(protocol.iter_pb_fields(raw))
+            bodies = [raw + b"\x10\x01", raw + protocol.encode_pb_field(*fields[0]),
+                      b"".join(protocol.encode_pb_field(*f) for f in reversed(fields))]
+            for index, field in enumerate(fields):
+                for extra in (b"\x12\x02\x08\x01", b"\x18\x01", field[2], b"\x12\x00\x12\x00"):
+                    changed = fields[:index] + [(1, 2, field[2] + extra)] + fields[index + 1:]
+                    bodies.append(b"".join(protocol.encode_pb_field(*f) for f in changed))
+            purchase = protocol.encode_pb_field(1, 0, 3211) + protocol.encode_pb_field(2, 2, bytes.fromhex(self.shop_request(3211, 20101)["hex"]))
+            bodies.append(raw + protocol.encode_pb_field(1, 2, purchase))
+            for body in bodies:
+                with self.subTest(body=body.hex()):
+                    request = {"opcode": 999900, "seq": 27, "hex": body.hex()}
+                    self.assert_unavailable_response(self.replay([request]), 999900, 27, "尚未实现")
+                    self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_main_page_refresh_alias_requires_reply_and_preserves_source(self):
+        request = self.by_seq[122]
+        unknown = protocol.encode_pb_field(9, 2, b"keep")
+        response = dict(self.recorded[(122, 999900)], hex=self.recorded[(122, 999900)]["hex"] + unknown.hex())
+        refresh = bytes.fromhex("0a030889120a0308c0250a0308ff350a03088a190a0308da360a0308f50f0a0308f70f0a0308e5320a03089a35")
+        frames = [request, response]
+        original = copy.deepcopy(frames)
+        with redirect_stdout(io.StringIO()):
+            tables = replay.build_routing_tables(frames)
+            result = replay.Replay(tables).match(999900, 10000, refresh)
+            self.assertIsNotNone(result)
+            self.assertEqual(len(result), 1)
+            self.assertTrue(bytes.fromhex(result[0]["hex"]).endswith(unknown))
+            self.assertEqual(replay.Replay(tables).match(999900, 27, bytes.fromhex(request["hex"])), [response])
+            partial = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 6911))
+            for incomplete in ([request], [request, dict(response, seq=0)],
+                               [request, dict(response, hex="")], [request, dict(response, hex=partial.hex())]):
+                self.assertIsNone(replay.Replay(replay.build_routing_tables(incomplete)).match(999900, 27, refresh))
+        self.assertEqual(frames, original)
+
     def test_shop_incremental_prices_daily_reset_and_clock_rollback(self):
         self.seed_shop_account()
         self.replay([self.shop_request(3201, 21, 4)])
