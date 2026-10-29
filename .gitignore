@@ -10,6 +10,7 @@ phone_screen.png
 
 # Runtime-generated files
 role_save.json
+credentials.json
 config_overrides.json
 /backups/
 

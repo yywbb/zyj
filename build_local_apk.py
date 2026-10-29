@@ -72,10 +72,10 @@ def xxtea_decrypt(data, key):
 
 SRC_APK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "z7_7_4.apk")
 
-def read_script(rel):
+def read_script(rel, folder="scripts"):
     """从原版 APK 解密脚本, 并按末尾长度字截取真实原文(磁盘上的 scripts_decrypted/*.lua 末尾带有填充垃圾, 不能直接使用)。"""
     with zipfile.ZipFile(SRC_APK) as z:
-        raw = z.read("assets/scripts/" + rel + ".so")
+        raw = z.read("assets/" + folder + "/" + rel + ".so")
     d = xxtea_decrypt(raw, XXTEA_KEY)
     return d[:struct.unpack("<I", d[-4:])[0]]
 
@@ -228,6 +228,76 @@ end
     return code.replace(old, 'if self.listview and self.pagetype == "info" then\n        self:createlist()')
 
 
+def patch_login_scene(code):
+    enter = "        self:loginGame()\n"
+    assert code.count(enter) == 1
+    code = code.replace(enter, "        self:showUserInput(11)\n")
+    init = "function loginScene.init(self,loginscene,isrelog)\n"
+    assert code.count(init) == 1
+    code = code.replace(init, init + "    self.localLoginHandlers = false\n")
+    start = code.index("function loginScene.showUserInput(self,requestType)\n")
+    end = code.index("function loginScene.egameabout(self)\n", start)
+    assert 'acctest:userlogin()' in code[start:end]
+    # 复用原生登录表单与设备缩放，只记住账号；密码留在当前进程供断线重连。
+    return code[:start] + '''function loginScene.showUserInput(self,requestType)
+    self:hideUserInput()
+    gamedata.local_password = nil
+    self.requestType = 11
+    self.enterLayerItem.inputTitleSpr1:setVisible(false)
+    self.enterLayerItem.inputTitleSpr2:setVisible(true)
+    self.enterLayerItem.userinputName:setString("")
+    self.enterLayerItem.userpassword:setString("")
+    ui.setLabelString(self.enterLayerItem.quitLab, nil, 19)
+    ui.setLabelString(self.enterLayerItem.determineLab, nil, 19)
+    self:showNode(self.enterLayerItem.accountNode,true)
+    local noop = function() end
+    self.accountInputBox = ui.creatInputEditBoxBylable(self.enterLayerItem.userinputName,
+        kEditBoxInputModePhoneNumber, noop, noop, {fontSize=40, fontColor=ccc3(255,255,255),
+        nochecksensitive=true, length=4, PlaceHolder="账号编号 1–1000"})
+    self.accountInputBox:setText(tostring(self.SelectedServer.id or 1))
+    self.accountInputBox:setTouchPriority(-10)
+    self.passwordInputBox = ui.creatInputEditBoxBylable(self.enterLayerItem.userpassword,
+        kEditBoxInputModeSingleLine, noop, noop, {fontSize=40, fontColor=ccc3(255,255,255),
+        nochecksensitive=true, length=64, PlaceHolder="后台设置的密码"})
+    self.passwordInputBox:setInputFlag(kEditBoxInputFlagPassword)
+    self.passwordInputBox:setTouchPriority(-10)
+    if self.localLoginHandlers then return end
+    self.localLoginHandlers = true
+    self.enterLayerItem.userconfirm:addHandleOfControlEvent(function()
+        if not self.accountInputBox or not self.passwordInputBox then return end
+        local text = self.accountInputBox:getText()
+        local account = tonumber(text)
+        local password = self.passwordInputBox:getText()
+        if not text:match("^[1-9]%d*$") or not account or account > 1000 then
+            runGamePrompt({msg="请输入 1–1000 的账号编号"})
+            return
+        end
+        if #password < 8 or #password > 64 or password:find("[^!-~]") then
+            runGamePrompt({msg="密码须为 8–64 位英文字母、数字或符号，不含空格"})
+            return
+        end
+        local selected = {}
+        for key,value in pairs(gamedata.serverlist["1"] or gamedata.serverlist[1]) do
+            selected[key] = value
+        end
+        selected.id = account
+        selected.name = "账号 " .. tostring(account)
+        self.SelectedServer = selected
+        gamedata.local_password = password
+        self.passwordInputBox:setText("")
+        self:hideUserInput()
+        self:loginGame()
+    end, CCControlEventTouchUpInside)
+    self.enterLayerItem.userconcel:addHandleOfControlEvent(function()
+        gamedata.local_password = nil
+        self:hideUserInput()
+        self:showEnter()
+    end, CCControlEventTouchUpInside)
+end
+
+''' + code[end:]
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -245,12 +315,17 @@ def get_patched_lua_scripts():
     # 1b. Reuse server selection for local accounts, remembering this device's last choice.
     t1b = b"function uisdklogin( t )\n    gamedata.sdk:Login()\n    LoginScene:showNode(LoginScene.enterLayerItem.channel_loginnode,true)\nend"
     r1b = b"""function uisdklogin( t )
+    gamedata.local_password = nil
     print("[LocalMock] \xe7\x9b\xb4\xe6\x8e\xa5\xe5\x88\x86\xe5\x8f\x91\xe6\x9c\xac\xe5\x9c\xb0\xe7\x99\xbb\xe5\xbd\x95\xe6\x80\x81")
     local path = CCFileUtils:sharedFileUtils():fullPathForFilename("GameServer.json")
     local servers = LoadJsonFileToTable(path)
     assert(servers and servers["1"], "Missing local account list")
     local last = CCUserDefault:sharedUserDefault():getIntegerForKey("local_account", 1)
-    local selected = servers[tostring(last)] or servers["1"]
+    if last < 1 or last > 1000 then last = 1 end
+    local selected = {}
+    for key,value in pairs(servers[tostring(last)] or servers["1"]) do selected[key] = value end
+    selected.id = last
+    selected.name = "\xe8\xb4\xa6\xe5\x8f\xb7 " .. tostring(last)
     local mock_data = {
         type = 3,
         user = "local_dev",
@@ -268,8 +343,38 @@ def get_patched_lua_scripts():
 end"""
     assert t1b in d
     d = d.replace(t1b, r1b)
+    marker = b"            uuid = gamedata.uuid,\n"
+    assert d.count(marker) == 1
+    d = d.replace(marker, marker + b"            local_password = gamedata.local_password,\n")
     patched["assets/scripts/accbyhttp/service_ui.so"] = xxtea_encrypt(d, XXTEA_KEY)
     print("  [Lua] Patched accbyhttp/service_ui.so (bypassed update & mock direct login)")
+
+    code = read_script("accbyhttp/LoginScene").decode("utf-8").replace("\r\n", "\n")
+    patched["assets/scripts/accbyhttp/LoginScene.so"] = xxtea_encrypt(patch_login_scene(code).encode("utf-8"), XXTEA_KEY)
+    code = read_script("accbyhttp/service_net").decode("utf-8").replace("\r\n", "\n")
+    marker = "                gamedata.role.uuid = uireq.uuid\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "                gamedata.local_password = uireq.local_password\n")
+    patched["assets/scripts/accbyhttp/service_net.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    code = read_script("GameUserValid").decode("utf-8").replace("\r\n", "\n")
+    marker = "    table.insert(params.params, param1)\n    if gamedata.reconnect_type then\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    table.insert(params.params, param1)
+    local credential = params_pb.ParamS.Param()
+    credential.s = gamedata.local_password or ""
+    table.insert(params.params, credential)
+    if gamedata.reconnect_type then
+''')
+    patched["assets/scripts/GameUserValid.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    code = read_script("GameErrorMessage", "common_lua").decode("utf-8").replace("\r\n", "\n")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if error.ids[1] == 1000 then
+        return {type = 9997, msg = "登录失败：请检查账号密码、后台启用状态及旧设备是否已退出；连续失败请一分钟后重试。"}
+    end
+''')
+    patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched native login form, credential handoff and login rejection handling")
 
     # 2. http_post.lua (Immediate success response without network call)
     with io.BytesIO(read_script("accbyhttp/http_post")) as f:
@@ -326,6 +431,10 @@ end"""
         d = f.read().replace(b"\r\n", b"\n")
     t7 = b"function http_entergame.entergame(self,params)\n\n    self.geturl = gamedata.sdk.address.entergameAddress"
     r7 = b"""function http_entergame.entergame(self,params)
+    if not gamedata.local_password then
+        LoginScene:showUserInput(11)
+        return false
+    end
     local account = assert(tonumber(params.sid), "Missing local account")
     local defaults = CCUserDefault:sharedUserDefault()
     defaults:setIntegerForKey("local_account", account)

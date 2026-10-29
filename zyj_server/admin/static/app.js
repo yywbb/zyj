@@ -62,7 +62,7 @@ function renderAccounts() {
   $("account-list").replaceChildren(...rows.map((row) => {
     const item = button("", () => loadAccount(row.id), "account-item");
     item.setAttribute("aria-pressed", String(state.account === row.id));
-    item.append(node("strong", `账号 ${row.id} · ${row.name}`), node("span", row.error ? "存档异常" : `${row.online ? "在线" : "离线"}　${row.has_role ? `等级 ${number(row.level)}` : "尚未建号"}`));
+    item.append(node("strong", `账号 ${row.id} · ${row.name}`), node("span", row.error ? "存档异常" : `${row.online ? "在线" : "离线"}　${row.registered ? "已启用登录" : "待绑定密码"}　${row.has_role ? `等级 ${number(row.level)}` : "尚未建号"}`));
     return item;
   }));
   if (!rows.length) $("account-list").append(node("p", "没有匹配账号，可在下方输入编号打开。", "empty"));
@@ -106,7 +106,39 @@ async function loadAccount(id) {
   heading.append(identity, node("span", row.online ? "在线" : "离线", `badge${row.online ? " online" : ""}`));
   detail.append(heading);
   if (row.error) detail.append(node("p", row.error, "error"));
-  if (!row.has_save) detail.append(node("p", "尚无存档。可在游戏登录页选择此账号开始，也可从备份恢复。", "empty"));
+  if (!row.has_save) detail.append(node("p", "尚无存档。设置密码后，可在游戏登录页输入此账号开始，也可从备份恢复。", "empty"));
+  const credentials = node("section", undefined, "credentials");
+  credentials.append(node("h3", "登录凭据"), node("p", row.registered ? "已启用账号密码登录。密码不会显示或包含在游戏存档中。" : "为此编号设置密码，即可创建登录账号或绑定原有进度。账号编号就是登录名。"));
+  if (!row.registered) {
+    const form = node("form");
+    for (const [id, text] of [["account-password", "密码"], ["account-password-confirm", "确认密码"]]) {
+      const label = node("label", text); label.htmlFor = id;
+      const input = node("input"); input.id = id; input.type = "password"; input.autocomplete = "new-password";
+      input.minLength = 8; input.maxLength = 64; input.pattern = "[\\x21-\\x7e]{8,64}"; input.required = true;
+      input.title = "8–64 位英文字母、数字或符号，不含空格"; input.disabled = row.online;
+      form.append(label, input);
+    }
+    const submit = node("button", row.has_save ? "绑定密码，保留进度" : "创建登录账号", "primary");
+    submit.disabled = row.online;
+    form.append(node("p", "密码须为 8–64 位英文字母、数字或符号，不含空格。请妥善保管；当前版本不提供密码找回。"), submit);
+    if (row.online) form.append(node("p", "请先退出此账号的游戏连接，再刷新页面绑定密码。"));
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      run(async () => {
+        const password = $("account-password").value;
+        if (password !== $("account-password-confirm").value) throw new Error("两次密码不一致。");
+        submit.disabled = true;
+        try {
+          await api(`/api/accounts/${row.id}/credentials`, { password, revision: row.revision });
+          for (const input of form.querySelectorAll("input")) input.value = "";
+          message(`账号 ${row.id} 已启用密码登录，原有进度保留。`);
+          await loadAccounts(); await loadAccount(state.account);
+        } finally { submit.disabled = row.online; }
+      });
+    };
+    credentials.append(form);
+  }
+  detail.append(credentials);
   const resources = node("dl", undefined, "resources");
   for (const [label, value] of [["等级", number(row.level)], ["银币", number(row.coin)], ["元宝", number(row.gold)],
     ["体力", `${number(row.stamina)} / ${number(row.maxstamina)}`], ["精力", `${number(row.energy)} / ${number(row.maxenergy)}`], ["武将", number(row.generals.length)]]) {

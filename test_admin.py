@@ -3,6 +3,7 @@ import copy
 import http.client
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -16,6 +17,7 @@ from zyj_server.admin.http import start_admin
 from zyj_server.session import Session
 
 ROOT = Path(__file__).parent
+PASSWORD = "test-password-123"
 
 
 def setUpModule():
@@ -59,13 +61,14 @@ class AccountMaintenanceTests(AdminFixture):
     def test_live_sessions_block_all_maintenance_without_blocking_other_accounts(self):
         before = self.save()
         self.save(2)
-        self.store.open_session(1, ("phone", 1234))
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        self.store.open_session(1, PASSWORD, ("phone", 1234))
         self.addCleanup(self.store.close_session, 1)
         for action in ("backup", "reset", "reset-guide", "restore"):
             with self.subTest(action=action), self.assertRaisesRegex(ValueError, "在线"):
                 self.maintain(action)
         with self.assertRaisesRegex(ValueError, "在线"):
-            self.store.open_session(1, ("emulator", 1235))
+            self.store.open_session(1, PASSWORD, ("emulator", 1235))
         snapshot = self.store.snapshot(1)
         self.assertTrue(snapshot["online"])
         self.assertEqual(snapshot["connection"]["address"], "phone")
@@ -74,6 +77,7 @@ class AccountMaintenanceTests(AdminFixture):
 
     def test_login_waits_until_reset_and_its_backup_are_complete(self):
         self.save()
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
         entered, release, connected = threading.Event(), threading.Event(), threading.Event()
         errors, sessions = [], []
         real_backup = storage.backup
@@ -92,7 +96,7 @@ class AccountMaintenanceTests(AdminFixture):
 
         def login():
             try:
-                sessions.append(self.store.open_session(1, ("phone", 0)))
+                sessions.append(self.store.open_session(1, PASSWORD, ("phone", 0)))
                 connected.set()
             except Exception as error:
                 errors.append(error)
@@ -190,9 +194,112 @@ class AccountMaintenanceTests(AdminFixture):
         self.assertIsNotNone(views.detail(snapshot, COUNTS, CONFIG)["error"])
         backup_id = self.maintain("backup")["backup_id"]
         self.assertEqual((self.root / "backups/accounts/1" / (backup_id + ".json")).read_bytes(), b"{")
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
         with self.assertRaises(ValueError):
-            self.store.open_session(1, ("phone", 0))
+            self.store.open_session(1, PASSWORD, ("phone", 0))
         self.assertEqual(self.store.active, {})
+
+
+class AccountAuthenticationTests(AdminFixture):
+    def register(self, account=1, password=PASSWORD):
+        return self.store.register(account, password, self.store.snapshot(account)["revision"])
+
+    def test_binding_preserves_old_progress_and_survives_store_restart(self):
+        before = self.save()
+        with patch.object(accounts, "Session") as load, self.assertRaisesRegex(ValueError, "未启用"):
+            self.store.open_session(1, PASSWORD, ("phone", 0))
+        load.assert_not_called()
+        self.register()
+        self.register(7)
+        self.assertIn(7, self.store.account_ids())
+        self.assertFalse(self.store.path(7).exists())
+        record = json.loads(self.store.credential_path(1).read_bytes())
+        other = json.loads(self.store.credential_path(7).read_bytes())
+        self.assertEqual(record["iterations"], 600000)
+        self.assertNotEqual(record["salt"], other["salt"])
+        self.assertNotEqual(record["hash"], other["hash"])
+        self.assertNotIn(PASSWORD, self.store.credential_path(1).read_text())
+        if os.name != "nt":
+            self.assertEqual(self.store.credential_path(1).stat().st_mode & 0o777, 0o600)
+        restarted = accounts.AccountStore(self.store.save_path, TABLES, COUNTS, CONFIG)
+        session = restarted.open_session(1, PASSWORD, ("phone", 0))
+        self.assertEqual(session.save["role_name"], "测试账号1")
+        self.assertEqual(self.store.path(1).read_bytes(), before)
+        snapshot = restarted.snapshot(1)
+        self.assertTrue(snapshot["registered"])
+        for secret in (PASSWORD, record["salt"], record["hash"]):
+            self.assertNotIn(secret, json.dumps(views.detail(snapshot, COUNTS, CONFIG)))
+        restarted.close_session(1)
+
+    def test_invalid_duplicate_stale_and_failed_creation_preserve_data(self):
+        before = self.save()
+        for password in (None, 12345678, "short", "a" * 65, "space password", "中文密码测试1234"):
+            with self.subTest(password=password), self.assertRaises(ValueError):
+                self.register(password=password)
+        with self.assertRaisesRegex(ValueError, "变化"):
+            self.store.register(1, PASSWORD, "stale")
+        with patch.object(storage.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.register()
+        self.assertFalse(self.store.credential_path(1).exists())
+        self.assertEqual(list(self.store.credential_path(1).parent.iterdir()), [])
+        self.assertEqual(self.store.active, {})
+        self.register()
+        credential = self.store.credential_path(1).read_bytes()
+        with self.assertRaisesRegex(ValueError, "已设置"):
+            self.register(password="another-password")
+        self.assertEqual(self.store.credential_path(1).read_bytes(), credential)
+        self.assertEqual(self.store.path(1).read_bytes(), before)
+
+    def test_failed_attempt_limit_covers_reconnects_but_not_other_accounts(self):
+        self.register()
+        self.register(2)
+        with patch.object(accounts.time, "monotonic", return_value=100) as clock:
+            for _ in range(5):
+                with self.assertRaisesRegex(ValueError, "密码错误"):
+                    self.store.open_session(1, "wrong-password", ("phone", 0))
+            with patch.object(accounts.hashlib, "pbkdf2_hmac") as derive, self.assertRaisesRegex(ValueError, "频繁"):
+                self.store.open_session(1, PASSWORD, ("other-device", 0))
+            derive.assert_not_called()
+            self.store.open_session(2, PASSWORD, ("phone", 0))
+            self.store.close_session(2)
+            clock.return_value = 160
+            self.store.open_session(1, PASSWORD, ("phone", 0))
+            self.store.close_session(1)
+            for at in (200, 215, 230, 245, 260):
+                clock.return_value = at
+                with self.assertRaisesRegex(ValueError, "密码错误"):
+                    self.store.authenticate(1, "wrong-password")
+            clock.return_value = 261
+            self.store.authenticate(1, PASSWORD)
+        self.assertEqual(self.store.failed_logins, {})
+
+    def test_corrupt_credentials_fail_closed_and_cannot_be_overwritten(self):
+        self.register()
+        path = self.store.credential_path(1)
+        record = json.loads(path.read_bytes())
+        for raw in (b"{", b"[]", json.dumps({**record, "iterations": 1}).encode(),
+                    json.dumps({**record, "hash": "bad"}).encode()):
+            path.write_bytes(raw)
+            with patch.object(accounts, "Session") as load, self.assertRaisesRegex(ValueError, "配置损坏"):
+                self.store.open_session(1, PASSWORD, ("phone", 0))
+            load.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "已设置"):
+                self.register()
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertEqual(self.store.active, {})
+
+    def test_credentials_survive_game_progress_reset_and_restore(self):
+        self.save()
+        self.register()
+        credential = self.store.credential_path(1).read_bytes()
+        backup = self.maintain("reset")["backup_id"]
+        self.store.open_session(1, PASSWORD, ("phone", 0))
+        self.store.close_session(1)
+        self.maintain("restore", backup_id=backup)
+        self.store.open_session(1, PASSWORD, ("phone", 0))
+        self.store.close_session(1)
+        self.assertEqual(self.store.credential_path(1).read_bytes(), credential)
+        self.assertNotIn("credentials", self.store.snapshot(1)["save"])
 
 
 class ConfigurationTests(AdminFixture):
@@ -307,7 +414,8 @@ class AdminHttpTests(AdminFixture):
         self.assertEqual(self.store.path(1).read_bytes(), before)
 
     def test_http_maintenance_and_config_edits_use_shared_live_objects(self):
-        self.store.open_session(1, ("phone", 0))
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        self.store.open_session(1, PASSWORD, ("phone", 0))
         payload = {"action": "reset", "revision": self.store.snapshot(1)["revision"]}
         self.assertEqual(self.request("/api/accounts/1", payload)[0], 400)
         self.assertTrue(self.request("/api/accounts/1")[2]["online"])
@@ -320,6 +428,25 @@ class AdminHttpTests(AdminFixture):
         self.assertEqual(code, 200)
         self.assertTrue(result["restart_required"])
         self.assertEqual(self.request("/api/configs/props?q=20014")[2]["rows"][0]["value"]["param1"], "37")
+
+    def test_http_creates_and_binds_accounts_without_exposing_credentials(self):
+        before = self.store.path(1).read_bytes()
+        for account in (1, 17):
+            route = f"/api/accounts/{account}/credentials"
+            payload = {"password": PASSWORD, "revision": self.store.snapshot(account)["revision"]}
+            for headers in ({"Host": "evil.example"}, {"Origin": "https://evil.example"}, {"X-Admin-Token": "bad"}):
+                self.assertEqual(self.request(route, payload, headers)[0], 403)
+            self.assertFalse(self.store.credential_path(account).exists())
+            self.assertEqual(self.request(route, {**payload, "unexpected": True})[0], 400)
+            self.assertEqual(self.request(route, payload)[0], 200)
+            self.assertEqual(self.request(route, payload)[0], 400)
+            self.assertEqual(self.request(route)[0], 404)
+            detail = self.request(f"/api/accounts/{account}")[2]
+            self.assertTrue(detail["registered"])
+            self.assertNotIn(PASSWORD, json.dumps(detail))
+        self.assertEqual([row["id"] for row in self.request("/api/accounts")[2]["accounts"]], [1, 17])
+        self.assertEqual(self.request("/api/accounts/1/download")[2], before)
+        self.assertFalse(self.store.path(17).exists())
 
 
 if __name__ == "__main__":

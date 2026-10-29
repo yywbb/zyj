@@ -93,6 +93,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                     result = views.detail(accounts.snapshot(account), accounts.step_counts, accounts.role_config)
                     result["backups"] = accounts.backups(account)
                     return self._send(200, result)
+                if writing and parts[3:] == ["credentials"]:
+                    if set(data) != {"password", "revision"}:
+                        raise ValueError("创建账号需要密码和存档版本")
+                    return self._send(200, accounts.register(account, data["password"], data["revision"]))
                 if not writing and parts[3:] == ["download"]:
                     raw = accounts.path(account).read_bytes()
                     return self._send(200, raw, "application/octet-stream", f"account-{account}.json")

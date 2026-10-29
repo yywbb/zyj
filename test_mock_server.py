@@ -19,9 +19,15 @@ from zyj_server import accounts, activities, battle, formation, guide, player, p
 from zyj_server.session import Session
 
 
-def login_request(account, seq=0):
+LOGIN_PASSWORD = "test-password-123"
+
+
+def login_request(account, seq=0, password=LOGIN_PASSWORD):
     identity = protocol.encode_pb_field(2, 2, f"local_account_{account}".encode("ascii"))
-    return {"opcode": 1000, "seq": seq, "hex": protocol.encode_pb_field(1, 2, identity).hex()}
+    body = protocol.encode_pb_field(1, 2, identity)
+    if password is not None:
+        body += protocol.encode_pb_field(1, 2, protocol.encode_pb_field(2, 2, password.encode("ascii")))
+    return {"opcode": 1000, "seq": seq, "hex": body.hex()}
 
 
 class ReplayConnection:
@@ -78,6 +84,11 @@ class ReplayRoutingTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.save_path = Path(temp.name) / "role_save.json"
+        password_work = patch.object(accounts, "PASSWORD_ITERATIONS", 1)
+        password_work.start()
+        self.addCleanup(password_work.stop)
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        store.register(1, LOGIN_PASSWORD, store.snapshot(1)["revision"])
         self.now = 1800000000
         clock_patch = patch.object(player.time, "time", return_value=self.now)
         self.clock = clock_patch.start()
@@ -108,7 +119,10 @@ class ReplayRoutingTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as log:
             self.run_client(conn)
         self.assertTrue(conn.closed)
-        self.assertEqual(len(conn.responses), 0)
+        if "载入玩家状态失败" in log.getvalue():
+            self.assertEqual([(f["opcode"], f["seq"]) for f in conn.responses], [(999999, 0)])
+        else:
+            self.assertEqual(len(conn.responses), 0)
         self.assertEqual(self.save_path.read_bytes(), original)
         self.assertIn(reason, log.getvalue())
 
@@ -970,7 +984,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertTrue(conn.closed)
         self.assertEqual(conn.responses, [])
         self.assertEqual(self.save_path.read_text(), original)
-        self.assertEqual([p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')], ["role_save.json"])
+        self.assertEqual(sorted(p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')), ["accounts", "role_save.json"])
 
     def test_entire_recorded_group_is_saved_before_first_push(self):
         conn = ReplayConnection([self.by_seq[36]], 7)
@@ -1400,7 +1414,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.replay_through(138)
         with patch.object(player.os, "replace", side_effect=OSError("disk failure")):
             self.assert_rejected(self.by_seq[148], "保存失败")
-        self.assertEqual([p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')], ["role_save.json"])
+        self.assertEqual(sorted(p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')), ["accounts", "role_save.json"])
 
     def test_recruit_requires_a_token_and_cannot_reset_owned_generals(self):
         self.replay_through(12)
@@ -3068,12 +3082,15 @@ class LanAccountTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.save_path = Path(temp.name) / "role_save.json"
         self.store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
-        for context in (patch.object(server, "SAVE_PATH", str(self.save_path)),
+        for context in (patch.object(accounts, "PASSWORD_ITERATIONS", 1),
+                        patch.object(server, "SAVE_PATH", str(self.save_path)),
                         patch.object(server, "start_admin"),
                         patch.object(player.time, "time", return_value=1800000000),
                         redirect_stdout(io.StringIO())):
             context.__enter__()
             self.addCleanup(context.__exit__, None, None, None)
+        for account in (1, 2):
+            self.store.register(account, LOGIN_PASSWORD, self.store.snapshot(account)["revision"])
 
     def run_client(self, conn, addr=("same-lan-ip", 1)):
         self.store.tables = self.tables
@@ -3118,13 +3135,49 @@ class LanAccountTests(unittest.TestCase):
 
     def test_login_parser_accepts_reconnect_flag_but_rejects_invalid_identity(self):
         body = bytes.fromhex(login_request(2)["hex"]) + protocol.encode_pb_field(1, 2, b"\x08\x03")
-        self.assertEqual(accounts.parse_login_account(body), 2)
+        self.assertEqual(accounts.parse_login_credentials(body), (2, LOGIN_PASSWORD))
         for account in ("0", "-1", "01", "1001", "../1", "1/../../2", "1\x00"):
             with self.subTest(account=account), self.assertRaises(ValueError):
-                accounts.parse_login_account(bytes.fromhex(login_request(account)["hex"]))
+                accounts.parse_login_credentials(bytes.fromhex(login_request(account)["hex"]))
         for body in (b"", b"\x08\x01", b"\x0a\x04\x12\x05x", b"\x0a\x02\x08\x01"):
             with self.subTest(body=body), self.assertRaises(ValueError):
-                accounts.parse_login_account(body)
+                accounts.parse_login_credentials(body)
+
+    def test_login_rejects_missing_duplicate_and_malformed_credentials(self):
+        valid = bytes.fromhex(login_request(1)["hex"])
+        identity, password = [raw for _, _, raw in protocol.iter_pb_fields(valid)]
+        wrap = lambda raw: protocol.encode_pb_field(1, 2, raw)
+        invalid = [wrap(identity), wrap(password) + wrap(identity), valid + wrap(password),
+                   wrap(identity + identity) + wrap(password), wrap(identity) + wrap(password + password),
+                   valid + b"\x10\x01", valid + wrap(b"\x08\x01\x08\x02"),
+                   wrap(identity) + wrap(b"\x12\x01\xff"), b"x" * 1025]
+        for body in invalid:
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "登录参数无效"):
+                accounts.parse_login_credentials(body)
+
+    def test_login_authentication_precedes_save_loading_and_never_logs_password(self):
+        self.save_path.write_text('{"role_name":"keep"}')
+        before = self.save_path.read_bytes()
+        for request in (login_request(1, 1, None), login_request(1, 1, "wrong-password"), login_request(3, 1)):
+            conn = ReplayConnection([request, {"opcode": 101, "seq": 2, "hex": "0a03626164"}], 7, login=False)
+            with patch.object(accounts, "Session") as load, redirect_stdout(io.StringIO()) as log:
+                self.run_client(conn)
+            load.assert_not_called()
+            self.assertTrue(conn.closed)
+            self.assertEqual([(f["opcode"], f["seq"]) for f in conn.responses], [(999999, 1)])
+            self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(conn.responses[0]["hex"])), [1000, 0])
+            self.assertNotIn("wrong-password", log.getvalue())
+            self.assertNotIn(LOGIN_PASSWORD, log.getvalue())
+            self.assertNotIn(request["hex"], log.getvalue())
+            self.assertEqual(self.store.active, {})
+            self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_repeated_login_still_requires_the_password(self):
+        conn = ReplayConnection([login_request(1, 1), login_request(1, 2, "wrong-password")], 7, login=False)
+        self.run_client(conn)
+        self.assertEqual([(f["opcode"], f["seq"]) for f in conn.responses], [(1000, 1), (999999, 2)])
+        self.assertEqual(self.store.active, {})
+        self.assertFalse(self.save_path.exists())
 
     def test_unauthenticated_requests_cannot_read_or_modify_saves(self):
         self.save_path.write_text('{"role_name":"keep"}')
@@ -3142,7 +3195,7 @@ class LanAccountTests(unittest.TestCase):
         conn = ReplayConnection([login_request(1, 1), login_request(2, 2)], 7, login=False)
         with patch.object(server, "print_flush"):
             self.run_client(conn)
-        self.assertEqual([f["seq"] for f in conn.responses], [1])
+        self.assertEqual([(f["opcode"], f["seq"]) for f in conn.responses], [(1000, 1), (999999, 2)])
         self.assertFalse(self.store.path(2).exists())
         self.assertEqual(self.store.active, {})
 
@@ -3175,7 +3228,7 @@ class LanAccountTests(unittest.TestCase):
                 self.assertTrue(waiting.wait(5))
                 duplicate = ReplayConnection([login_request(1, 2)], 7, login=False)
                 self.run_client(duplicate, ("same-ip", 2))
-                self.assertEqual(duplicate.responses, [])
+                self.assertEqual([(f["opcode"], f["seq"]) for f in duplicate.responses], [(999999, 2)])
                 self.assertTrue(duplicate.closed)
                 self.assertIn(1, self.store.active)
                 self.replay([{"opcode": 201, "seq": 10, "hex": "08011003"}], account=2)
@@ -3188,12 +3241,11 @@ class LanAccountTests(unittest.TestCase):
 
     def test_failed_login_releases_account_for_retry(self):
         path = self.store.path(2)
-        path.parent.mkdir(parents=True)
         path.write_text('{"unfinished":')
         conn = ReplayConnection([login_request(2, 1)], 4096, login=False)
         with patch.object(server, "print_flush"):
             self.run_client(conn)
-        self.assertEqual(conn.responses, [])
+        self.assertEqual([(f["opcode"], f["seq"]) for f in conn.responses], [(999999, 1)])
         self.assertEqual(self.store.active, {})
         path.write_text(json.dumps(player.get_default_save()))
         self.replay([{"opcode": 201, "seq": 11, "hex": "08011004"}], account=2)
@@ -3329,6 +3381,8 @@ class EntryPointTests(unittest.TestCase):
                 self.assertIs(options["target"], server.handle_client)
                 self.assertTrue(options["daemon"])
                 self.assertIs(options["args"][2], admin_factory.call_args.args[1])
+                store = options["args"][2]
+                store.register(1, LOGIN_PASSWORD, store.snapshot(1)["revision"])
                 admin_factory.return_value.shutdown.assert_called_once_with()
                 admin_factory.return_value.server_close.assert_called_once_with()
                 options["target"](*options["args"])

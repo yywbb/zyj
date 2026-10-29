@@ -62,14 +62,21 @@ def handle_client(conn, addr, account_store):
                 body = bytes(recv_buf[16:total_len])
                 del recv_buf[:total_len]
                 if opcode == 1000:
-                    requested_account = accounts.parse_login_account(body)
-                    if account is not None and requested_account != account:
-                        raise ValueError("连接已绑定账号，切换账号必须重新连接")
-                    if account is None:
-                        session = account_store.open_session(requested_account, addr)
-                        account = requested_account
-                        conn.settimeout(None)
-                        print_flush(f"[★] 连接已绑定账号 {account}")
+                    try:
+                        requested_account, password = accounts.parse_login_credentials(body)
+                        if account is not None and requested_account != account:
+                            raise ValueError("连接已绑定账号，切换账号必须重新连接")
+                        if account is None:
+                            session = account_store.open_session(requested_account, password, addr)
+                            account = requested_account
+                            conn.settimeout(None)
+                            print_flush(f"[★] 连接已验证账号 {account}")
+                        else:
+                            account_store.authenticate(account, password)
+                    except ValueError:
+                        error = protocol.encode_pb_field(1, 0, 1000) + protocol.encode_pb_field(1, 0, 0)
+                        conn.sendall(protocol.pack_frame(999999, seq, error))
+                        raise
                     conn.sendall(protocol.pack_frame(1000, seq, b"\x08\x00\x10\x00\x18\x00"))
                     continue
 
@@ -127,7 +134,7 @@ def main(argv=None):
         print_flush(f"  监听地址: 0.0.0.0:{PORT}")
         print_flush(f"  本机管理后台: http://127.0.0.1:{admin.server_port}")
         print_flush(f"  手机/模拟器直连电脑的局域网 IP:{PORT}；账号 1 沿用 {SAVE_PATH}")
-        print_flush(f"  无密码，仅用于可信局域网，禁止直接暴露公网")
+        print_flush(f"  请先在后台为账号绑定密码；仅用于可信局域网，禁止直接暴露公网")
         print_flush(f"=======================================================\n")
 
         while True:

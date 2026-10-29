@@ -46,7 +46,7 @@ class LanBuildTests(unittest.TestCase):
     def test_client_patches_select_and_remember_account_without_loopback(self):
         sources = Path(__file__).parent / "scripts_clean"
 
-        def read_reference_script(relative):
+        def read_reference_script(relative, folder="scripts"):
             return (sources / (relative + ".lua")).read_text(encoding="utf-8").encode("utf-8")
 
         with tempfile.TemporaryDirectory() as directory:
@@ -67,6 +67,10 @@ class LanBuildTests(unittest.TestCase):
         login = decrypted("assets/scripts/accbyhttp/service_ui.so")
         enter = decrypted("assets/scripts/accbyhttp/http_entergame.so")
         network = decrypted("assets/scripts/gameserver.so")
+        scene = decrypted("assets/scripts/accbyhttp/LoginScene.so")
+        handoff = decrypted("assets/scripts/accbyhttp/service_net.so")
+        validate = decrypted("assets/scripts/GameUserValid.so")
+        errors = decrypted("assets/common_lua/GameErrorMessage.so")
         self.assertIn('fullPathForFilename("GameServer.json")', login)
         self.assertIn('getIntegerForKey("local_account", 1)', login)
         self.assertIn('recentlist = { ["1"] = selected }', login)
@@ -78,6 +82,19 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn("host = gamedata.serverlist[tonumber(gamedata.selectserver)].ip", network)
         self.assertIn("port = gamedata.serverlist[tonumber(gamedata.selectserver)].port", network)
         self.assertNotIn("999898", network)
+        self.assertIn("self:showUserInput(11)", scene)
+        self.assertIn("setInputFlag(kEditBoxInputFlagPassword)", scene)
+        self.assertIn("account > 1000", scene)
+        self.assertNotIn("acctest:userlogin()", scene)
+        self.assertNotIn("acctest:userrigist()", scene)
+        self.assertIn("local_password = gamedata.local_password", login)
+        self.assertIn("gamedata.local_password = uireq.local_password", handoff)
+        self.assertIn('credential.s = gamedata.local_password or ""', validate)
+        self.assertLess(validate.index("table.insert(params.params, credential)"), validate.index("if gamedata.reconnect_type then"))
+        self.assertIn("error.ids[1] == 1000", errors)
+        self.assertIn("type = 9997", errors)
+        form = scene[scene.index("function loginScene.showUserInput("):scene.index("function loginScene.egameabout(")]
+        self.assertNotIn("setStringForKey", form + enter)
 
     def test_find_tool_supports_native_and_windows_sdk_names(self):
         for name, filename in (("zipalign", "zipalign"), ("zipalign", "zipalign.exe"),
