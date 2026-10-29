@@ -147,7 +147,7 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(set(groups), set(recorded))
             self.assertEqual(groups[0], recorded[0])
             self.assertEqual((groups[1][0], groups[1][29]), (recorded[1][0], recorded[1][29]))
-            # Only the two supported rewards are live; unsupported paid gifts stay disabled.
+            # This fresh day-one replay has no confirmed recharge or later-day gifts.
             self.assertTrue(all(value == 0 for i, value in enumerate(groups[1]) if i not in (0, 29)))
         elif opcode == 100:
             fields = list(protocol.iter_pb_fields(bytes.fromhex(actual)))
@@ -2212,15 +2212,23 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_activity_claims_are_rejected_when_locked_or_repeated(self):
         self.replay_through(12)
-        for opcode, values in ((3611, (80030,)), (2411, (116,)), (3611, (80015,)), (3611, (80002,))):
-            with self.subTest(opcode=opcode, values=values):
-                self.assert_rejected(self.activity_request(opcode, values), "活动奖励未解锁或不支持")
+        for values in ((80030,), (80015,), (80002,)):
+            with self.subTest(values=values):
+                before = self.save_path.read_bytes()
+                self.assert_unavailable_response(self.replay([self.activity_request(3611, values)]),
+                                                 3611, 20000, "活动奖励未解锁或不支持")
+                self.assertEqual(self.save_path.read_bytes(), before)
+        self.assert_rejected(self.activity_request(2411, [116]), "活动奖励未解锁或不支持")
         self.replay([self.activity_request(3611, (80001,))])
-        self.assert_rejected(self.activity_request(3611, (80001,)), "活动奖励已领取")
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3611, [80001])]), 3611, 20000, "已领取")
+        self.assertEqual(self.save_path.read_bytes(), before)
         self.replay([f for f in self.requests if f["seq"] > 12])
-        for opcode, values in ((3611, (80030,)), (2411, (116,))):
-            self.replay([self.activity_request(opcode, values)])
-            self.assert_rejected(self.activity_request(opcode, values), "活动奖励已领取")
+        self.replay([self.activity_request(3611, [80030]), self.activity_request(2411, [116])])
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3611, [80030])]), 3611, 20000, "已领取")
+        self.assertEqual(self.save_path.read_bytes(), before)
+        self.assert_rejected(self.activity_request(2411, [116]), "活动奖励已领取")
 
     def test_activity_queries_restore_claim_flags_and_liveness_score(self):
         self.replay(self.requests)
@@ -2239,6 +2247,153 @@ class ReplayRoutingTests(unittest.TestCase):
         init = self.replay([dict(self.by_seq[12], seq=30000)])[0]
         restored = dict(protocol.get_comb_messages(bytes.fromhex(init["hex"])))[3610]
         self.assertEqual(restored, self.query_world(3610))
+
+    def test_begin7day_uses_local_calendar_day_and_confirmed_recharge(self):
+        self.complete_tutorial()
+        self.replay([self.activity_request(3611, [80001])])
+        order = self.recharge_order(1)
+        self.assertEqual(self.begin7day_groups(self.query_world(3610))[2][0], 0)
+        self.replay([self.activity_request(116, [order])])
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((groups[2][0], groups[1][7]), (25, 0))
+        order = self.recharge_order(1)
+        paid = self.replay([self.activity_request(116, [order])])
+        self.assertEqual([self.hint_changes(f) for f in paid if f["opcode"] == 1034], [{82: 1}])
+        self.replay([self.activity_request(116, [order])])
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((groups[0], groups[2][0], groups[1][7]), ([1], 50, 1))
+        midnight = (self.now + 8 * 3600) // 86400 * 86400 - 8 * 3600 + 86400
+        self.clock.return_value = midnight - 1
+        self.assertEqual(self.begin7day_groups(self.query_world(3610))[1][1], 0)
+        self.clock.return_value = midnight
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((groups[0], groups[1][:3], groups[2][0]), ([2], [2, 1, 0], 50))
+        self.assertEqual(self.hint_map(self.query_world(1032))[86], 1)
+
+    def test_begin7day_daily_generals_and_claims_survive_reconnect(self):
+        self.complete_tutorial()
+        before = self.query_role()
+        for day, reward_id, cid, gold in ((2, 80002, 10404, 100), (7, 80007, 10616, 400)):
+            with self.subTest(day=day):
+                self.clock.return_value = self.now + (day - 1) * 86400
+                reply = self.replay([self.activity_request(3611, [reward_id])])[0]
+                self.assertEqual(reply["opcode"], 3611)
+                reward = bytes.fromhex(reply["hex"])
+                general = next(v for n, w, v in protocol.iter_pb_fields(reward) if n == 8)
+                self.assertEqual(protocol.pb_get_varint(general, 1), cid)
+                iid = protocol.pb_get_varint(general, 2)
+                self.assertGreater(iid, 2000000)
+                self.assertEqual(self.entity_records(self.query_world(1002), 1, 2)[iid], general)
+                self.assertEqual(protocol.pb_get_varint(reward, 2), gold)
+                disk = self.save_path.read_bytes()
+                self.assert_unavailable_response(self.replay([self.activity_request(3611, [reward_id])]),
+                                                 3611, 20000, "已领取")
+                self.assertEqual(self.save_path.read_bytes(), disk)
+        self.assertEqual(self.query_role()[9], before[9] + 500)
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((groups[1][1], groups[1][6]), (2, 2))
+
+    def test_begin7day_native_batch_saves_rewards_once_and_deduplicates_general(self):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        player.apply_reward(saved, recruit.build_reward(saved, [(10404, 1)], self.role_config), self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        self.clock.return_value = self.now + 86400
+        self.replay([self.activity_request(116, [self.recharge_order(6)])])
+        before = self.query_role()
+        pills = protocol.pb_get_varint(self.entity_records(self.query_world(1200), 1, 1)[20197], 2)
+        request = self.activity_request(3611, [80002, 80009])
+        conn = ReplayConnection([request, request, self.activity_request(3610)], 7)
+        send = conn.sendall
+
+        def check_committed(packet):
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual(saved["activity_state"]["begin7day_claimed"], [80002, 80009])
+            self.assertEqual(saved["role_state"]["gold"], before[9] + 100)
+            props = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+            self.assertEqual(protocol.pb_get_varint(props[20197], 2), pills + 50)
+            send(packet)
+
+        conn.sendall = check_committed
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertEqual([r["opcode"] for r in conn.responses], [3611, 1034, 999999, 1999, 3610])
+        self.assertEqual(self.hint_changes(conn.responses[1]), {86: 0})
+        self.assert_unavailable_response(conn.responses[2:4], 3611, 20000, "已领取")
+        reward = bytes.fromhex(conn.responses[0]["hex"])
+        self.assertFalse(any(n == 8 for n, _, _ in protocol.iter_pb_fields(reward)))
+        fragments = self.entity_records(self.query_world(1012), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(fragments[10404], 2), self.role_config["general_fragment"]["11404"]["recruit"])
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((groups[1][1], groups[1][8], groups[2][0]), (2, 2, 198))
+
+    def test_begin7day_invalid_or_failed_batch_keeps_memory_disk_and_hints(self):
+        self.complete_tutorial()
+        self.clock.return_value = self.now + 86400
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            for ids in ([80001, 80001], [80001, 80007], [80001, 80008], [80001, 80015]):
+                with self.subTest(ids=ids):
+                    packets = session.handle(3611, 20000, bytes.fromhex(self.activity_request(3611, ids)["hex"]))
+                    self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999999, 1999])
+                    self.assertEqual(session.save, memory)
+                    self.assertEqual(self.save_path.read_bytes(), disk)
+            body = bytes.fromhex(self.activity_request(3611, [80001, 80002])["hex"])
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    session.handle(3611, 20000, body)
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.save["role_state"]["gold"] = (1 << 31) - 1
+            memory = copy.deepcopy(session.save)
+            self.assertEqual(struct.unpack(">IIII", session.handle(3611, 20000, body)[0][:16])[2], 999999)
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_begin7day_recharge_stops_after_day_seven_and_claims_after_day_ten(self):
+        self.complete_tutorial()
+        day_one = (self.now + 8 * 3600) // 86400 * 86400 - 8 * 3600
+        self.clock.return_value = day_one + 7 * 86400 - 1
+        self.replay([self.activity_request(116, [self.recharge_order(5)])])
+        self.clock.return_value += 1
+        self.replay([self.activity_request(116, [self.recharge_order(5)])])
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((groups[0], groups[2][0], groups[1][7:9]), ([8], 68, [1, 0]))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(117))[1], 136)
+        self.replay([self.activity_request(3611, [80008])])
+        self.clock.return_value = day_one + 10 * 86400 - 1
+        self.assertEqual(self.replay([self.activity_request(3611, [80002])])[0]["opcode"], 3611)
+        self.clock.return_value += 1
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual(groups[0], [11])
+        self.assertTrue(all(v in (0, 2) for v in groups[1]))
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3611, [80007])]), 3611, 20000, "未解锁")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.assertTrue(all(self.hint_map(self.query_world(1032))[mid] == 0 for mid in range(82, 110)))
+
+    def test_begin7day_legacy_recharge_migrates_once_and_all_tiers_can_claim(self):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        saved["activity_state"].pop("begin7day_rmb")
+        saved["activity_state"]["begin7day_claimed"] = [80001]
+        saved["recharge_state"]["rmb"] = 2975
+        self.save_path.write_text(json.dumps(saved))
+        self.clock.return_value = self.now + 6 * 86400
+        self.assertEqual(self.begin7day_groups(self.query_world(3610))[2][0], 2975)
+        self.assertEqual(self.begin7day_groups(self.query_world(3610))[1][13], 0)
+        self.replay([self.activity_request(116, [self.recharge_order(1)])])
+        self.assertEqual(self.begin7day_groups(self.query_world(3610))[2][0], 3000)
+        reply = self.replay([self.activity_request(3611, list(range(80008, 80015)))])[0]
+        self.assertEqual(reply["opcode"], 3611)
+        equips = [protocol.parse_ids_pb(v) for n, w, v in protocol.iter_pb_fields(bytes.fromhex(reply["hex"])) if n == 6]
+        self.assertEqual({v[1] for v in equips}, {21403, 22404, 23402, 24403})
+        self.assertEqual(len({v[0] for v in equips}), 4)
+        self.assertTrue(all(v[0] > 1000000 for v in equips))
+        groups = self.begin7day_groups(self.query_world(3610))
+        self.assertEqual((groups[1][0], groups[1][7:14], groups[2][0]), (2, [2] * 7, 3000))
 
     def test_activity_hints_follow_created_role_and_hide_unsupported_pages(self):
         fresh = self.hint_map(self.query_world(1032))
@@ -2952,12 +3107,15 @@ class ReplayRoutingTests(unittest.TestCase):
         saved = json.loads(self.save_path.read_text())
         player.change_item_count(saved, 20014, (1 << 31) - 1, self.role_config)
         self.save_path.write_text(json.dumps(saved))
-        self.assert_rejected(self.activity_request(3611, (80001,)), "超出范围")
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3611, [80001])]), 3611, 20000, "超出范围")
+        self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_invalid_activity_state_is_not_overwritten(self):
         self.replay_through(12)
         original = json.loads(self.save_path.read_text())
         for key, value in (("strengthen_count", -1), ("strengthen_count", True),
+                           ("begin7day_rmb", -1), ("begin7day_rmb", True), ("begin7day_rmb", 1 << 31),
                            ("begin7day_claimed", "bad"), ("liveness_claimed", [16, 16])):
             with self.subTest(key=key, value=value):
                 saved = json.loads(json.dumps(original))
@@ -2967,14 +3125,22 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_activity_claim_before_role_creation_is_rejected(self):
         self.save_path.write_text(json.dumps(player.get_default_save()))
-        self.assert_rejected(self.activity_request(3611, (80001,)), "活动奖励未解锁或不支持")
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3611, [80001])]), 3611, 20000, "未解锁")
+        self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_malformed_activity_claim_does_not_mutate_save(self):
         self.replay(self.requests)
         for opcode in (3611, 2411):
-            for body in ("", "0800", "08", "08010802", "0a0101"):
+            for body in ("", "0800", "08", "08010801", "0a0101"):
                 with self.subTest(opcode=opcode, body=body):
-                    self.assert_rejected({"opcode": opcode, "seq": 20000, "hex": body}, "活动请求格式错误")
+                    request = {"opcode": opcode, "seq": 20000, "hex": body}
+                    if opcode == 3611:
+                        before = self.save_path.read_bytes()
+                        self.assert_unavailable_response(self.replay([request]), opcode, 20000, "活动请求格式错误")
+                        self.assertEqual(self.save_path.read_bytes(), before)
+                    else:
+                        self.assert_rejected(request, "活动请求格式错误")
 
     def test_all_19_combination_guide_steps_are_persisted(self):
         requests = [f for f in self.requests if f["opcode"] == 999900 and 201 in protocol.get_comb_ids(bytes.fromhex(f["hex"]))]

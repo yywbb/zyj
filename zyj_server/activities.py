@@ -8,7 +8,7 @@ TRANSACTION_OPCODES = (5031, 5040)
 UNSUPPORTED_OPCODES = (2010, 2011, 4811, 4812, 5011, 5012, 5013, 5014, 5016, 5021, 5023)
 OPCODES = (3610, 3611, 2410, 2411, 6517, 4600, *PAGE_OPCODES, *TRANSACTION_OPCODES)
 CLAIM_OPCODES = (3611, 2411, 5040)
-BEGIN_REWARDS = (80001, 80030)
+BEGIN_REWARDS = (*range(80001, 80015), 80030)
 HINT_IDS = (40, *range(82, 110), 542)
 
 
@@ -25,6 +25,10 @@ def get_state(save):
     count = state.setdefault("strengthen_count", 0)
     if type(count) is not int or not 0 <= count < (1 << 31):
         raise ValueError("活动强化进度无效")
+    # 兼容旧档：只承接已记录的本地充值，不从 VIP、元宝或官方录制推算。
+    rmb = state.setdefault("begin7day_rmb", save.get("recharge_state", {}).get("rmb", 0))
+    if type(rmb) is not int or not 0 <= rmb < (1 << 31):
+        raise ValueError("开服累计充值进度无效")
     spent = state.setdefault("gold_spent", 0)
     purchases = state.setdefault("discount_bought", {})
     if type(spent) is not int or not 0 <= spent < (1 << 31):
@@ -153,14 +157,28 @@ def record_strengthening(save, reward, config):
     state["strengthen_count"] = min(limit, state["strengthen_count"] + increase)
 
 
-def get_reward_statuses(save, config):
+def begin7day_day(save, now):
+    # 本地规则：建号日为第 1 天（UTC+8），不使用录制中的旧开服时间。
+    return max(0, (now + 8 * 3600) // 86400 - (int(save["created_at"]) + 8 * 3600) // 86400 + 1)
+
+
+def get_reward_statuses(save, config, now):
     state = get_state(save)
-    eligible = {80001} if save.get("has_role") else set()
+    day = begin7day_day(save, now)
+    active = save.get("has_role") and 1 <= day <= 10
+    eligible = set()
+    for pages in config["begin7day"].values():
+        page = pages["1"]
+        if active and page["day"] <= day:
+            eligible.add(page["task1"])
+            task = config["begin7day_task"][str(page["task2"])]
+            if state["begin7day_rmb"] >= int(task["target"]):
+                eligible.add(task["id"])
     map_id, point_id = map(int, config["begin7day_task"]["80030"]["target"].split(","))
     copies = bytes.fromhex(save["world_state"]["1300"])
     for n, w, row in iter_pb_fields(copies):
         if n == 1 and w == 2 and pb_get_varint(row, 1) == map_id:
-            if save.get("has_role") and any(f == 7 and t == 2 and pb_get_varint(point, 1) == point_id
+            if active and any(f == 7 and t == 2 and pb_get_varint(point, 1) == point_id
                                           and (pb_get_varint(point, 3) or 0) > 0 for f, t, point in iter_pb_fields(row)):
                 eligible.add(80030)
     statuses = {rid: 2 if rid in state["begin7day_claimed"] else 1 if rid in eligible else 0 for rid in BEGIN_REWARDS}
@@ -169,11 +187,14 @@ def get_reward_statuses(save, config):
     return statuses, task_status
 
 
-def get_hints(save, config):
-    statuses, task_status = get_reward_statuses(save, config)
-    # shortcut: 仅提示已实现奖励，后续天数、付费页和周宝箱待相应业务开放。
+def get_hints(save, config, now):
+    statuses, task_status = get_reward_statuses(save, config, now)
+    # shortcut: 其他任务、超值付费页和周宝箱待相应业务开放。
     hints = dict.fromkeys(HINT_IDS, 0)
-    hints.update({40: int(task_status == 1), 82: int(statuses[80001] == 1), 84: int(statuses[80030] == 1)})
+    hints.update({40: int(task_status == 1), 84: int(statuses[80030] == 1)})
+    for pages in config["begin7day"].values():
+        page = pages["1"]
+        hints[82 + (page["day"] - 1) * 4] = int(any(statuses.get(page[f"task{i}"]) == 1 for i in (1, 2)))
     return hints
 
 
@@ -187,9 +208,9 @@ def parse_hint_ids(body):
     return [value for _, _, value in fields]
 
 
-def prepare_hints(body, save, request_body, config):
+def prepare_hints(body, save, request_body, config, now):
     requested = parse_hint_ids(request_body)
-    hints = get_hints(save, config)
+    hints = get_hints(save, config, now)
     if requested:
         return _ids(hints[mid] for mid in requested) if all(mid in hints for mid in requested) else body
     out, seen = bytearray(), set()
@@ -212,7 +233,10 @@ def prepare_response(opcode, save, request_body, config, now):
         raise ValueError("活动请求格式错误")
     ids = [value for _, _, value in fields]
     expected = 2 if opcode == 5031 else 1 if opcode in CLAIM_OPCODES else 0
-    if len(ids) != expected:
+    if opcode == 3611:
+        if not 1 <= len(ids) <= len(BEGIN_REWARDS) or len(ids) != len(set(ids)):
+            raise ValueError("活动请求格式错误")
+    elif len(ids) != expected:
         raise ValueError("活动请求格式错误")
     if opcode in PAGE_OPCODES:
         return prepare_page(opcode, save, config, now)
@@ -244,15 +268,13 @@ def prepare_response(opcode, save, request_body, config, now):
         reward = build_reward(save, row["reward"], config)
         state["consume_claimed"].append(reward_id)
         return reward
-    statuses, task_status = get_reward_statuses(save, config)
+    statuses, task_status = get_reward_statuses(save, config, now)
     limit = config["liveness"]["16"]["num"]
     score = sum(config["liveness"][str(task)]["point"] for task in state["liveness_claimed"])
 
     if opcode == 3610:
-        # shortcut: 仅覆盖抓包首日两项奖励；跨天与其他活动条件待对应业务和重置规则接入。
         flags = [statuses.get(80000 + i, 0) for i in range(1, max(map(int, config["begin7day_task"])) - 80000 + 1)]
-        level = save.get("role_state", {}).get("level", save.get("level", 1))
-        groups = ([1], flags, [level] + [0] * 10, [0] * 10)
+        groups = ([begin7day_day(save, now)], flags, [state["begin7day_rmb"]] + [0] * 10, [0] * 10)
         return b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid) + encode_pb_field(2, 2, _ids(values)))
                         for mid, values in enumerate(groups))
     if opcode == 2410:
@@ -267,13 +289,16 @@ def prepare_response(opcode, save, request_body, config, now):
     if not save.get("has_role"):
         raise ValueError("活动奖励未解锁或不支持")
     if opcode == 3611:
-        reward_id = ids[0]
-        if reward_id not in statuses or statuses[reward_id] == 0:
+        from . import recruit
+
+        if any(statuses.get(reward_id, 0) == 0 for reward_id in ids):
             raise ValueError("活动奖励未解锁或不支持")
-        if statuses[reward_id] == 2:
+        if any(statuses[reward_id] == 2 for reward_id in ids):
             raise ValueError("活动奖励已领取")
-        reward = build_reward(save, config["begin7day_task"][str(reward_id)]["rewards"], config)
-        state["begin7day_claimed"].append(reward_id)
+        gets = [tuple(map(int, entry.split(","))) for reward_id in ids
+                for entry in config["begin7day_task"][str(reward_id)]["rewards"].split(";") if entry]
+        reward = recruit.build_reward(save, gets, config)
+        state["begin7day_claimed"].extend(ids)
         return reward
     if ids[0] != 116 or task_status == 0:
         raise ValueError("活动奖励未解锁或不支持")

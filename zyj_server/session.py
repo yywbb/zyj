@@ -109,7 +109,7 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (1304, 1402, 7110, *recharge.OPCODES, *activities.TRANSACTION_OPCODES):
+        if opcode in (1304, 1402, 3611, 7110, *recharge.OPCODES, *activities.TRANSACTION_OPCODES):
             working = copy.deepcopy(self.save)
             try:
                 packets = player.prepare_recorded_responses(

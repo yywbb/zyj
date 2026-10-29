@@ -1,6 +1,6 @@
 """研究用本地模拟充值；订单确认即成功，永不调用支付渠道。"""
 
-from . import recruit
+from . import activities, recruit
 from .protocol import encode_pb_field, iter_pb_fields
 
 
@@ -85,6 +85,8 @@ def prepare(opcode, save, body, config, now):
         cid = row["id"]
         gold = row["gold"] * (max(1, row["isdouble"]) if cid not in state["bought"] else 1)
         state["paid"] = True
+        if 1 <= activities.begin7day_day(save, now) <= 7:
+            activities.get_state(save)["begin7day_rmb"] += int(row["rmb"])
         state["rmb"] += int(row["rmb"])
         if cid not in state["bought"]:
             state["bought"].append(cid)

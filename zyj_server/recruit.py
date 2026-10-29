@@ -101,7 +101,7 @@ def pick(config, group, rng):
 
 
 def build_reward(save, gets, config):
-    """普通/封神招募及首充共用武将去重，预览不调用此函数发放。"""
+    """招募和礼包共用武将去重，预览不调用此函数发放。"""
     roster = [v for n, w, v in iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])) if n == 1 and w == 2]
     owned = {config["general"][str(pb_get_varint(v, 1))]["init_cid"] for v in roster}
     iid = max([2000000, *(pb_get_varint(v, 2) for v in roster)])

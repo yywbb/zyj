@@ -43,7 +43,7 @@ ROLE_FIELD_MAP = {
 def load_role_config(config_path):
     return configuration.load_tables(config_path,
                             ("role_exp", "copy", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
-                             "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
+                             "begin7day", "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
@@ -445,7 +445,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             # 5031 客户端按配置自行扣款，回包只包含奖励，避免客户端再扣一次。
             apply_reward(save, body, role_config, now)
     elif opcode == 1032:
-        body = activities.prepare_hints(body, save, request_body, role_config)
+        body = activities.prepare_hints(body, save, request_body, role_config, now)
     elif opcode == 1402:
         body = recruit.query(save, request_body, now)
     elif opcode in (7110, 7111, 7112, 7113):
@@ -651,9 +651,9 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
         if save.get("role_snapshot"):
             save["role_snapshot"] = apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now).hex()
     if before.get("has_role"):
-        previous_hints = activities.get_hints(before, role_config)
+        previous_hints = activities.get_hints(before, role_config, now)
         changes = b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid) + encode_pb_field(2, 0, status))
-                           for mid, status in activities.get_hints(save, role_config).items()
+                           for mid, status in activities.get_hints(save, role_config, now).items()
                            if status != previous_hints[mid])
         if changes:
             packets.append(pack_frame(1034, 0, changes))
