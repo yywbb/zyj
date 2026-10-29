@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, formation, recharge, recruit
+from . import activities, battle, formation, recharge, recruit, training
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -50,7 +50,7 @@ def load_role_config(config_path):
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "worlddrop", "recruit_deck", "recruit_tenlottery",
-                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift")}
+                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "build")}
 
 
 def get_default_save():
@@ -553,9 +553,25 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 if field == 6 and wire == 2:
                     record_protagonist_general(save, value)
                     record_slot_update(save, encode_pb_field(1, 2, value))
-    elif opcode in (1109, 1201, 1304):
-        if opcode == 1109:
+    elif opcode in training.OPCODES:
+        if not body:
+            if opcode == 1038:
+                body, costs, power_delta = training.use_exp(save, request_body, role_config)
+                for cid, count in costs:
+                    change_item_count(save, cid, -count, role_config, now)
+            else:
+                body, power_delta = training.strengthen(save, opcode, request_body, role_config, random.getrandbits(64))
+            state = get_role_state(save, role_config)
+            for key in ("power", "power_all"):
+                state[key] += power_delta
+                if not 0 <= state[key] < (1 << 31):
+                    raise ValueError("角色战力超出范围")
+        if opcode in (1101, 1109):
             activities.record_strengthening(save, body, role_config)
+        apply_reward(save, body, role_config, now)
+        if save.get("protagonist_snapshot"):
+            record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
+    elif opcode in (1201, 1304):
         if opcode == 1201:
             ids = parse_prop_use(request_body)
             config = role_config["props"][str(ids[0])]
@@ -619,7 +635,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
-    if responses and responses[0]["opcode"] in (1003, 1009) and not responses[0]["hex"]:
+    if responses and responses[0]["opcode"] in (1003, 1009, *training.OPCODES) and not responses[0]["hex"]:
         state, previous = save["role_state"], get_role_state(before, role_config)
         power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
                          (state["power"] - previous["power"], state["power"], 0, state["g_power"],
@@ -675,26 +691,11 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
         slots = formation.records(world, 4, 2)
         equips = formation.records(world, 2, 1)
         members = {role_config["general"][str(unit["cid"])]["init_cid"] for unit in attack.values()}
+        maximum = min(state["level"] * int(role_config["global_kv"]["general_level"]["value"]),
+                      max(map(int, role_config["general_exp"])))
         for _, unit in sorted(attack.items()):
-            values, increase, up = battle.grown_general(unit, point["xp"], role_config)
-            raw = records[unit["iid"]]
-            if up:
-                previous, _ = formation.bonuses(raw, slots[unit["iid"]], members, equips, role_config)
-                current, _ = formation.bonuses(pb_set_varint(raw, 3, values[3]), slots[unit["iid"]], members, equips, role_config)
-                for field in range(6, 17):
-                    delta = current[field] - previous[field]
-                    if not delta:
-                        continue
-                    value = values.get(field, pb_get_varint(raw, field) or 0)
-                    values[field] = value + delta
-                    increase += (value + delta) // 10 - value // 10 if field == 8 else delta if field in (6, 7, 9) else 0
-                    if not 0 <= values[field] < (1 << 31):
-                        raise ValueError("武将缘分成长超出范围")
-            values[20] = (pb_get_varint(raw, 20) or 0) + increase
-            if not 0 <= values[20] < (1 << 31):
-                raise ValueError("武将战力超出范围")
-            for field, value in values.items():
-                raw = pb_set_varint(raw, field, value)
+            raw, increase, up = training.grow_general(records[unit["iid"]], point["xp"], slots[unit["iid"]],
+                                                     members, equips, role_config, maximum)
             record_slot_update(save, encode_pb_field(1, 2, raw))
             record_protagonist_general(save, raw)
             generals.append(encode_pb_field(6, 2, raw))

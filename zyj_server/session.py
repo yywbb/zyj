@@ -4,7 +4,7 @@ import copy
 import functools
 import time
 
-from . import activities, guide, player, recharge, recruit
+from . import activities, guide, player, recharge, recruit, training
 from .protocol import encode_pb_field, get_comb_ids, pack_frame
 from .replay import Replay
 
@@ -84,7 +84,7 @@ class Session:
         if opcode == 1401:
             return unavailable_response(opcode, seq, body, "本地服暂未开放此招募方式，请使用普通招募。")
 
-        if opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1009):
+        if opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1009, *training.OPCODES):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:
@@ -153,11 +153,12 @@ class Session:
                 return unavailable_response(opcode, seq, body, "本地模拟充值请从充值档位单独下单。")
             if any(mid in activities.UNSUPPORTED_OPCODES + activities.TRANSACTION_OPCODES for mid in ids):
                 return unavailable_response(opcode, seq, body, "此活动复合操作尚未实现，未扣除资源。")
-            return [pack_frame(opcode, seq, b"")]
+            return unavailable_response(opcode, seq, body, "此操作尚未实现或参数不受支持，未更改存档。")
+        if not any(r["opcode"] == opcode and r["seq"] != 0 for r in responses):
+            return unavailable_response(opcode, seq, body, "此操作缺少完整应答，未更改存档。")
+        if (opcode == 999900 and 1109 in get_comb_ids(body)
+                and self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2):
+            return unavailable_response(opcode, seq, body, "教程强化录制已过期，请使用当前阵容单独强化。")
         packets = player.prepare_recorded_responses(seq, responses, self.save, body,
                                                     self.save_path, self.step_counts, self.role_config)
-        # 缺少自身应答会使客户端的全屏 loading 遮罩一直吞掉点击。
-        if opcode != 999900 and not any(r["opcode"] == opcode and r["seq"] != 0 for r in responses):
-            packets.append(pack_frame(opcode, seq, b""))
-            print_flush(f"  └── [S->C] 补发自应答 Opcode: {opcode:6d} (0x{opcode:04x}), Seq: {seq:3d}, Len:   0 B (录制缺失, 防遮罩残留)")
         return packets

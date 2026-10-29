@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import activities, battle, formation, guide, player, protocol, recharge, recruit, replay
+from zyj_server import activities, battle, formation, guide, player, protocol, recharge, recruit, replay, training
 from zyj_server.session import Session
 
 
@@ -355,7 +355,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(body.count(b"\x12\x02\x08\x03"), 1)
         body = body.replace(b"\x12\x02\x08\x03", b"\x12\x02\x08\x01")
         responses = self.replay([dict(self.by_seq[11], hex=body.hex())])
-        self.assertEqual(responses, [{"opcode": 999900, "seq": 11, "hex": ""}])
+        self.assert_unavailable_response(responses, 999900, 11, "尚未实现")
         self.assertFalse(self.save_path.exists())
 
     def test_exact_ordinary_reply_advances_fallback_counter(self):
@@ -408,14 +408,15 @@ class ReplayRoutingTests(unittest.TestCase):
         for response, recorded_seq, live_seq in zip(responses, (28, 31, 124, 52), (28, 31, 10000, 10001)):
             self.assert_recorded_response(response, recorded_seq, live_seq)
 
-    def test_unknown_ordinary_payload_returns_empty_without_advancing_known_payload(self):
+    def test_unknown_ordinary_payload_returns_error_without_advancing_known_payload(self):
         requests = [dict(self.by_seq[31], seq=10000)]
         requests.extend({"opcode": 1032, "seq": seq, "hex": "08c404"} for seq in (28, 31, 10001))
         requests.append(dict(self.by_seq[52], seq=10002))
         responses = self.replay(requests, chunk_size=7)
-        self.assertEqual(len(responses), len(requests))
+        self.assertEqual(len(responses), 8)
         self.assert_recorded_response(responses[0], 31, 10000)
-        self.assertEqual(responses[1:-1], [{"opcode": 1032, "seq": seq, "hex": ""} for seq in (28, 31, 10001)])
+        for i, seq in enumerate((28, 31, 10001)):
+            self.assert_unavailable_response(responses[1 + i * 2:3 + i * 2], 1032, seq, "尚未实现")
         self.assert_recorded_response(responses[-1], 52, 10002)
         self.assertFalse(self.save_path.exists())
 
@@ -424,7 +425,7 @@ class ReplayRoutingTests(unittest.TestCase):
         original = self.save_path.read_bytes()
         self.clock.return_value = self.now + 360
         responses = self.replay([dict(self.by_seq[133], hex="0801")])
-        self.assertEqual(responses, [{"opcode": 1057, "seq": 133, "hex": ""}])
+        self.assert_unavailable_response(responses, 1057, 133, "尚未实现")
         self.assertEqual(self.save_path.read_bytes(), original)
 
     def test_ordinary_routes_match_each_recorded_payload_from_a_new_replay(self):
@@ -537,8 +538,8 @@ class ReplayRoutingTests(unittest.TestCase):
         self.clock.return_value = self.now + 360
         for body in (raw + extra_module, changed_data, raw + protocol.encode_pb_field(2, 0, 1)):
             with self.subTest(body=body):
-                self.assertEqual(self.replay([dict(request, seq=30000, hex=body.hex())]),
-                                 [{"opcode": 999900, "seq": 30000, "hex": ""}])
+                self.assert_unavailable_response(self.replay([dict(request, seq=30000, hex=body.hex())]),
+                                                 999900, 30000, "尚未实现")
                 self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_new_account_template_does_not_depend_on_capture_order(self):
@@ -690,6 +691,230 @@ class ReplayRoutingTests(unittest.TestCase):
         responses = self.replay([dict(self.by_seq[12], seq=20000)])
         self.assertEqual(self.role_data(responses[0])[8], 0)
 
+    def test_unimplemented_training_returns_error_instead_of_empty_success(self):
+        self.replay(self.requests)
+        before = self.save_path.read_bytes()
+        for opcode in (1026, 1028, 1029, 1102, 1105, 1106):
+            with self.subTest(opcode=opcode):
+                request = self.activity_request(opcode, [7060])
+                self.assert_unavailable_response(self.replay([request]), opcode, 20000, "尚未实现")
+                self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_exp_pills_update_general_and_inventory_after_reconnect(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["level"] = 8
+        self.save_path.write_text(json.dumps(saved))
+        self.give_props({20196: 2, 20197: 1})
+        world = self.query_world(1002)
+        previous = self.entity_records(world, 1, 2)[7060]
+        inventory = self.entity_records(self.query_world(1200), 1, 1)
+        body = protocol.encode_pb_field(1, 0, 7060) + b"".join(protocol.encode_pb_field(2, 0, v) for v in (2, 1, 0, 0))
+        replies = self.replay([{"opcode": 1038, "seq": 20000, "hex": body.hex()}])
+        self.assertEqual(replies[0]["opcode"], 1038)
+        updated = self.entity_records(bytes.fromhex(replies[0]["hex"]), 8, 2)[7060]
+        self.assertGreater(protocol.pb_get_varint(updated, 3), protocol.pb_get_varint(previous, 3))
+        self.assertGreater(protocol.pb_get_varint(updated, 6), protocol.pb_get_varint(previous, 6))
+        self.assertEqual(self.entity_records(self.query_world(1002), 1, 2)[7060], updated)
+        after_inventory = self.entity_records(self.query_world(1200), 1, 1)
+        for cid, count in ((20196, 2), (20197, 1)):
+            self.assertEqual(protocol.pb_get_varint(after_inventory.get(cid, b""), 2) or 0,
+                             protocol.pb_get_varint(inventory[cid], 2) - count)
+        self.assertFalse(any(n == 10 and v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(replies[0]["hex"]))))
+
+    def seed_training_account(self, coin=100000, vip=0):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"].update(level=8, coin=coin, vip=vip)
+        saved["activity_state"]["strengthen_count"] = 0
+        self.save_path.write_text(json.dumps(saved))
+        self.give_props({20196: 20, 20197: 10, 20198: 5, 20199: 2})
+        return json.loads(self.save_path.read_text())
+
+    def training_request(self, opcode, iid, values):
+        body = protocol.encode_pb_field(1, 0, iid) + b"".join(protocol.encode_pb_field(2, 0, v) for v in values)
+        return {"opcode": opcode, "seq": 20000, "hex": body.hex()}
+
+    def test_exp_growth_matches_official_1038_attributes_and_potential(self):
+        frames = json.loads((Path(server.BASE_DIR) / "official_battle_capture_20261028_2210.json").read_text())["connections"][0]["frames"]
+        saved = {"world_state": {"1002": ""}, "has_role": True, "role_state": {"level": 8}}
+        for frame in frames:
+            if frame["c2s"]:
+                if frame["opcode"] == 1038:
+                    request = frame
+                    break
+                continue
+            body = bytes.fromhex(frame["hex"])
+            messages = protocol.get_comb_messages(body) if frame["opcode"] == 999900 else [(frame["opcode"], body)]
+            for opcode, body in messages:
+                if opcode in (1002, 1024, 1027):
+                    player.record_slot_update(saved, body)
+                elif opcode in (1306, 1017):
+                    for raw in self.entity_records(body, 6 if opcode == 1306 else 1, 2).values():
+                        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+        expected = next(f for f in frames if not f["c2s"] and f["opcode"] == 1038 and f["seq"] == request["seq"])
+        before = copy.deepcopy(saved)
+        body, costs, _ = training.use_exp(saved, bytes.fromhex(request["hex"]), self.role_config)
+        self.assertEqual(saved, before)
+        self.assertEqual(costs, [(20196, 2), (20197, 1)])
+        actual = self.entity_records(body, 8, 2)[7060]
+        recorded = self.entity_records(bytes.fromhex(expected["hex"]), 8, 2)[7060]
+        for field in (3, 5, 6, 7, 8, 9, 17):
+            self.assertEqual(protocol.pb_get_varint(actual, field), protocol.pb_get_varint(recorded, field), field)
+
+    def test_exp_cap_preserves_last_pill_overflow_and_rejects_more(self):
+        saved = self.seed_training_account()
+        raw = recruit.new_general(10213, 2000001, self.role_config)
+        raw = protocol.pb_set_varint(protocol.pb_set_varint(raw, 3, 15), 5, 1199)
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+        self.save_path.write_text(json.dumps(saved))
+        before_power = saved["role_state"]["power"]
+        request = self.training_request(1038, 2000001, (0, 0, 0, 1))
+        reply = self.replay([request])[0]
+        raw = self.entity_records(bytes.fromhex(reply["hex"]), 8, 2)[2000001]
+        self.assertEqual(protocol.pb_get_varint(raw, 3), 16)
+        self.assertEqual(protocol.pb_get_varint(raw, 5), 1199 + 20000 - self.role_config["general_exp"]["15"]["4exp"])
+        self.assertEqual(json.loads(self.save_path.read_text())["role_state"]["power"], before_power)
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([request]), 1038, 20000, "上限")
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_growth_batching_keeps_attributes_potential_and_power_identical(self):
+        raw = recruit.new_general(10213, 2000001, self.role_config)
+        combined, _, _ = training.grow_general(raw, 5000, b"", set(), {}, self.role_config)
+        for _ in range(50):
+            raw, _, _ = training.grow_general(raw, 100, b"", set(), {}, self.role_config)
+        self.assertEqual(raw, combined)
+
+    def test_exp_upgraded_relation_survives_removal_and_level_cap_survives_battle(self):
+        saved = self.seed_training_account()
+        raw = recruit.new_general(10213, 2000001, self.role_config)
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.change_general_request(2, 2000001)])
+        replies = self.replay([self.training_request(1038, 2000001, (0, 1, 0, 0))])
+        self.assertEqual(replies[0]["opcode"], 1038)
+        self.replay([self.change_general_request(2, 7060)])
+        raw = self.entity_records(self.query_world(1002), 1, 2)[2000001]
+        level = protocol.pb_get_varint(raw, 3)
+        self.assertEqual(protocol.pb_get_varint(raw, 6), 420 + 42 * (level - 1))
+        self.assertEqual(protocol.pb_get_varint(raw, 17), 30 + 80 * (level - 1))
+        self.replay([self.change_general_request(2, 2000001)])
+        self.replay([self.training_request(1038, 2000001, (0, 0, 0, 1))])
+        raw = self.entity_records(self.query_world(1002), 1, 2)[2000001]
+        self.assertEqual(protocol.pb_get_varint(raw, 3), 16)
+        with patch.object(player.random, "getrandbits", return_value=42):
+            result = self.replay([self.activity_request(1306, [42102, 2])])[0]
+        self.assertEqual(result["opcode"], 1306)
+        self.assertEqual(protocol.pb_get_varint(bytes.fromhex(result["hex"]), 1), 1)
+        after = self.entity_records(self.query_world(1002), 1, 2)[2000001]
+        self.assertEqual(protocol.pb_get_varint(after, 3), 16)
+        self.assertGreater(protocol.pb_get_varint(after, 5), protocol.pb_get_varint(raw, 5))
+
+    def test_strengthening_charges_once_updates_protagonist_and_reconnects(self):
+        saved = self.seed_training_account(coin=560)
+        raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[7059]
+        request = self.training_request(1101, 10726, (0,))
+        responses = self.replay([request, request], chunk_size=7)
+        self.assertEqual(responses[:2], responses[2:])
+        self.assertEqual([r["opcode"] for r in responses[:2]], [1101, 205])
+        body = bytes.fromhex(responses[0]["hex"])
+        self.assertEqual(protocol.pb_get_varint(body, 1), (1 << 64) - 560)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], 0)
+        world = self.query_world(1002)
+        changed = self.entity_records(world, 1, 2)[7059]
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(world, 2, 1)[10726])[2], 9)
+        self.assertEqual(protocol.pb_get_varint(changed, 6), protocol.pb_get_varint(raw, 6) + 20)
+        self.assertEqual(after["role_state"]["power"], saved["role_state"]["power"] + 20)
+        protagonist = bytes.fromhex(after["protagonist_snapshot"])
+        self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(protagonist) if n == 10), changed)
+        self.assertEqual(after["activity_state"]["strengthen_count"], 1)
+        self.assertEqual(self.query_role()[8], 0)
+
+    def test_strengthen_five_levels_and_quick_all_follow_costs_and_limits(self):
+        saved = self.seed_training_account()
+        request = self.training_request(1101, 10726, (1,))
+        replies = self.replay([request])
+        self.assertEqual(replies[0]["opcode"], 1101)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(saved["role_state"]["coin"] - after["role_state"]["coin"], 560 + 640 + 680 + 720 + 760)
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(self.query_world(1002), 2, 1)[10726])[2], 13)
+        old_items = self.entity_records(self.query_world(1002), 2, 1)
+        cost = 0
+        for iid in (10720, 10721, 10723, 10726):
+            item = protocol.parse_ids_pb(old_items[iid])
+            cost += sum(self.role_config["equip_strengthen"][str(lv)]["quality2"] for lv in range(item[2], 16))
+        response = self.replay([self.activity_request(1109, [7059])])
+        self.assertEqual(response[0]["opcode"], 1109)
+        final = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"] - final["role_state"]["coin"], cost)
+        items = self.entity_records(self.query_world(1002), 2, 1)
+        for iid in (10720, 10721, 10723, 10726):
+            self.assertEqual(protocol.parse_ids_pb(items[iid])[2], 16)
+        self.assertEqual(final["activity_state"]["strengthen_count"], self.role_config["liveness"]["16"]["num"])
+        self.assertTrue(any(f["opcode"] == 1034 and self.hint_changes(f).get(40) == 1 for f in replies))
+
+    def test_strengthening_vip_critical_is_charged_per_attempt(self):
+        self.seed_training_account(coin=560, vip=3)
+        with patch.object(player.random, "getrandbits", return_value=0):
+            replies = self.replay([self.training_request(1101, 10726, (0,))])
+        body = bytes.fromhex(replies[0]["hex"])
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(body, 6, 1)[10726])[2], 10)
+        self.assertEqual(protocol.pb_get_varint(body, 1), (1 << 64) - 560)
+        self.assertEqual(protocol.parse_ids_pb(next(v for n, w, v in protocol.iter_pb_fields(body) if n == 12)), [1])
+
+    def test_old_tutorial_strengthening_cannot_overwrite_live_progress(self):
+        self.seed_training_account()
+        self.replay([self.training_request(1101, 10726, (1,))])
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.by_seq[99]]), 999900, 99, "已过期")
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_recording_without_own_reply_cannot_apply_pushes(self):
+        self.seed_training_account()
+        before = self.save_path.read_bytes()
+        pushes = [f for f in self.expected_group(99) if f["seq"] == 0]
+        with patch.object(replay.Replay, "match", return_value=pushes):
+            self.assert_unavailable_response(self.replay([self.activity_request(1028, [1, 7060])]), 1028, 20000, "缺少完整应答")
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_training_invalid_insufficient_and_save_failure_leave_no_partial_state(self):
+        saved = self.seed_training_account(coin=1)
+        good_exp = self.training_request(1038, 7060, (2, 1, 0, 0))
+        invalid = [self.training_request(1038, 7060, (0, 0, 0, 0)),
+                   self.training_request(1038, 7060, (1, 1, 1)),
+                   self.training_request(1038, 999999, (1, 0, 0, 0)),
+                   self.training_request(1038, 7060, (0, 0, 0, 100)),
+                   self.training_request(1101, 10726, (0,)),
+                   self.training_request(1101, 10726, (2,)),
+                   self.training_request(1101, 10726, (0, 0)),
+                   self.training_request(1101, 999999, (0,)),
+                   self.activity_request(1109, [7059, 7059]), self.activity_request(1109, [999999])]
+        invalid += [dict(good_exp, hex=good_exp["hex"] + suffix) for suffix in ("18", "1801", "089437")]
+        inventory = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+        for cid in training.EXP_PROPS:
+            player.change_item_count(saved, cid, -(protocol.pb_get_varint(inventory.get(cid, b""), 2) or 0), self.role_config)
+        # A valid first deduction followed by a missing second item must roll back too.
+        player.change_item_count(saved, 20196, 2, self.role_config)
+        self.save_path.write_text(json.dumps(saved))
+        invalid.append(good_exp)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            for request in invalid:
+                with self.subTest(request=request):
+                    packet = session.handle(request["opcode"], request["seq"], bytes.fromhex(request["hex"]))[0]
+                    self.assertEqual(struct.unpack(">IIII", packet[:16])[2], 999999)
+                    self.assertEqual(session.save, memory)
+                    self.assertEqual(self.save_path.read_bytes(), disk)
+            request = self.training_request(1038, 7060, (2, 0, 0, 0))
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    session.handle(1038, 20001, bytes.fromhex(request["hex"]))
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
     def test_all_recorded_role_rewards_and_costs_are_persisted(self):
         self.replay(self.requests)
         saved = json.loads(self.save_path.read_text())
@@ -820,8 +1045,8 @@ class ReplayRoutingTests(unittest.TestCase):
                               + protocol.encode_pb_field(2, 2, data if mid == 1003 else payload))
                                for mid, payload in protocol.get_comb_messages(body))
             with self.subTest(data=data.hex()):
-                self.assertEqual(self.replay([dict(self.by_seq[56], hex=changed.hex())]),
-                                 [{"opcode": 999900, "seq": 56, "hex": ""}])
+                self.assert_unavailable_response(self.replay([dict(self.by_seq[56], hex=changed.hex())]),
+                                                 999900, 56, "尚未实现")
                 self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_equipment_updates_merge_without_deleting_old_equipment(self):
@@ -1983,7 +2208,7 @@ class ReplayRoutingTests(unittest.TestCase):
         original = self.save_path.read_bytes()
         request = self.activity_request(1032, (82, 579))
         self.clock.return_value = self.now + 360
-        self.assertEqual(self.replay([request]), [{"opcode": 1032, "seq": 20000, "hex": ""}])
+        self.assert_unavailable_response(self.replay([request]), 1032, 20000, "尚未实现")
         self.assertEqual(self.save_path.read_bytes(), original)
 
     def test_activity_hint_changes_activate_and_clear_on_eligible_operations(self):
