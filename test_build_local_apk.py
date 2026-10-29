@@ -71,7 +71,7 @@ class LanBuildTests(unittest.TestCase):
         handoff = decrypted("assets/scripts/accbyhttp/service_net.so")
         validate = decrypted("assets/scripts/GameUserValid.so")
         errors = decrypted("assets/common_lua/GameErrorMessage.so")
-        self.assertIn('fullPathForFilename("GameServer.json")', login)
+        self.assertIn('fullPathForFilename("LocalGameServer.json")', login)
         self.assertIn('getIntegerForKey("local_account", 1)', login)
         self.assertIn('recentlist = { ["1"] = selected }', login)
         self.assertIn('uuid = "local_account_" .. tostring(account), section = 1', enter)
@@ -83,7 +83,8 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn("port = gamedata.serverlist[tonumber(gamedata.selectserver)].port", network)
         self.assertNotIn("999898", network)
         self.assertIn("self:showUserInput(11)", scene)
-        self.assertIn("setInputFlag(kEditBoxInputFlagPassword)", scene)
+        self.assertIn("self.passwordInputBox:setInputFlag(0)", scene)
+        self.assertIn("self.passwordInputBox:registerScriptEditBoxHandler(noop)", scene)
         self.assertIn("account > 1000", scene)
         self.assertNotIn("acctest:userlogin()", scene)
         self.assertNotIn("acctest:userrigist()", scene)
@@ -145,6 +146,8 @@ class LanBuildTests(unittest.TestCase):
                             guide_config = builder.patch_guide_step(source.read("5/guide_step.json"))
                         self.assertEqual(archive.read(f"assets/config/{section}/guide_step.json"), guide_config)
                 self.assertEqual(list(json.loads(archive.read("assets/GameServer.json"))), ["1", "2"])
+                self.assertEqual(archive.read("assets/LocalGameServer.json"), archive.read("assets/GameServer.json"))
+                self.assertEqual(archive.namelist().count("assets/LocalGameServer.json"), 1)
 
 
 if __name__ == "__main__":

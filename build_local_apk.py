@@ -259,7 +259,8 @@ def patch_login_scene(code):
     self.passwordInputBox = ui.creatInputEditBoxBylable(self.enterLayerItem.userpassword,
         kEditBoxInputModeSingleLine, noop, noop, {fontSize=40, fontColor=ccc3(255,255,255),
         nochecksensitive=true, length=64, PlaceHolder="后台设置的密码"})
-    self.passwordInputBox:setInputFlag(kEditBoxInputFlagPassword)
+    self.passwordInputBox:setInputFlag(0) -- PASSWORD；旧版全局常量未导出。
+    self.passwordInputBox:registerScriptEditBoxHandler(noop) -- 通用回调会记录输入原文。
     self.passwordInputBox:setTouchPriority(-10)
     if self.localLoginHandlers then return end
     self.localLoginHandlers = true
@@ -317,7 +318,7 @@ def get_patched_lua_scripts():
     r1b = b"""function uisdklogin( t )
     gamedata.local_password = nil
     print("[LocalMock] \xe7\x9b\xb4\xe6\x8e\xa5\xe5\x88\x86\xe5\x8f\x91\xe6\x9c\xac\xe5\x9c\xb0\xe7\x99\xbb\xe5\xbd\x95\xe6\x80\x81")
-    local path = CCFileUtils:sharedFileUtils():fullPathForFilename("GameServer.json")
+    local path = CCFileUtils:sharedFileUtils():fullPathForFilename("LocalGameServer.json")
     local servers = LoadJsonFileToTable(path)
     assert(servers and servers["1"], "Missing local account list")
     local last = CCUserDefault:sharedUserDefault():getIntegerForKey("local_account", 1)
@@ -552,6 +553,14 @@ function http_entergame._old_entergame(self,params)
     patched["assets/scripts/window_recharge.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched window_recharge.so (plain scroll container for recharge rows)")
 
+    code = read_script("logError").decode("utf-8").replace("\r\n", "\n")
+    marker = "    errorFunc = {\n"
+    assert code.count(marker) == 1 and "local function userMessageErr()" in code
+    # 未实现请求只提示；默认刷新主城会再次发送未实现请求，形成错误循环。
+    code = code.replace(marker, marker + "        [0] = userMessageErr,\n")
+    patched["assets/scripts/logError.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched logError.so (invalid requests prompt without refreshing the page)")
+
     code = read_script("UIRecharge").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function UIRechargePre(t)\n")
     end = code.index("function UIRechargeSucPre(t)\n", start)
@@ -573,6 +582,12 @@ end
     UIRequest({type = 2099})
 end
 ''' + code[end:]
+    start = code.index("function UIMonthCard(t)\n")
+    end = code.index("\nfunction UIMonthCardGet(t)", start)
+    start = code.index('    if GameScene.layers["activity"].module.openPageTable then\n', start, end)
+    assert all(f"type = {opcode}," in code[start:end] for opcode in (3680, 3684, 5531))
+    # 保留月卡缓存/页面刷新，移除未实现活动的间接预加载。
+    code = code[:start] + "end\n" + code[end:]
     patched["assets/scripts/UIRecharge.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched UIRecharge.so (local simulated payment and persisted entitlement refresh)")
 
@@ -772,6 +787,8 @@ def main(argv=None):
                 data = patch_config_json(data)
             elif item.filename == "assets/GameServer.json":
                 data = patch_game_server_json(data, args.server_ip, args.accounts)
+                # 旧客户端缓存的 GameServer.json 会遮蔽新版 APK 中的局域网地址。
+                zout.writestr("assets/LocalGameServer.json", data)
 
             zout.writestr(item, data)
 

@@ -1684,6 +1684,17 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assert_unavailable_response(self.replay([request]), 116, 20000, "过期")
         self.assertEqual(self.save_path.read_bytes(), before)
 
+    def test_recharge_followup_queries_cannot_change_paid_save(self):
+        self.complete_tutorial()
+        self.replay([self.activity_request(116, [self.recharge_order(3)])])
+        before = self.save_path.read_bytes()
+        requests = [self.activity_request(opcode) for opcode in (3680, 3684, 5531, 2039)]
+        requests.append({"opcode": 999900, "seq": 20000, "hex": "0a0308f50f0a0308f70f0a0308e5320a03089a35"})
+        for request in requests:
+            with self.subTest(opcode=request["opcode"]):
+                self.assert_unavailable_response(self.replay([request]), request["opcode"], 20000, "尚未实现")
+                self.assertEqual(self.save_path.read_bytes(), before)
+
     def test_simulated_recharge_first_gift_deduplicates_owned_general(self):
         self.complete_tutorial()
         saved = json.loads(self.save_path.read_text())
