@@ -10,6 +10,8 @@ phone_screen.png
 
 # Runtime-generated files
 role_save.json
+config_overrides.json
+/backups/
 
 # Recorded frame data backup
 recorded_frames.json.bak

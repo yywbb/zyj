@@ -7,6 +7,11 @@ import hashlib
 import zlib
 import json
 import subprocess
+import argparse
+import ipaddress
+import shutil
+
+from zyj_server.configuration import iter_config_bytes
 
 DELTA = 0x9E3779B9
 XXTEA_KEY = b"3c883f7813a3ee68"
@@ -167,13 +172,18 @@ def patch_guide_step(raw_bytes):
     return raw_bytes
 
 
-def patch_game_server_json(raw_bytes):
-    servers = json.loads(raw_bytes.decode("utf-8", errors="ignore"))
-    for k, s in servers.items():
-        s["ip"] = "127.0.0.1"
-        s["port"] = 14600
-        s["name"] = "忽而今夏"
-    print("  [GameServer] Redirected all server targets to 127.0.0.1:14600")
+def parse_server_ip(text):
+    address = ipaddress.IPv4Address(text)
+    if not address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified or address.is_reserved:
+        raise ValueError("请使用电脑的局域网 IPv4 地址，不能使用回环或公网地址")
+    return str(address)
+
+def patch_game_server_json(raw_bytes, server_ip, accounts):
+    original = json.loads(raw_bytes.decode("utf-8"))
+    template = next(iter(original.values()))
+    servers = {str(i): dict(template, id=i, ip=server_ip, port=14600, name=f"账号 {i}", status="online")
+               for i in range(1, accounts + 1)}
+    print(f"  [GameServer] {accounts} account slots -> {server_ip}:14600 (no ADB)")
     return json.dumps(servers, ensure_ascii=False, indent=2).encode("utf-8")
 
 def patch_recharge_script(code):
@@ -232,11 +242,15 @@ def get_patched_lua_scripts():
     assert t1a in d
     d = d.replace(t1a, r1a)
 
-    # 1b. Mock uisdklogin to directly dispatch login success state (type 3)
+    # 1b. Reuse server selection for local accounts, remembering this device's last choice.
     t1b = b"function uisdklogin( t )\n    gamedata.sdk:Login()\n    LoginScene:showNode(LoginScene.enterLayerItem.channel_loginnode,true)\nend"
     r1b = b"""function uisdklogin( t )
     print("[LocalMock] \xe7\x9b\xb4\xe6\x8e\xa5\xe5\x88\x86\xe5\x8f\x91\xe6\x9c\xac\xe5\x9c\xb0\xe7\x99\xbb\xe5\xbd\x95\xe6\x80\x81")
-    local local_srv = { id = 1, name = "\xe5\xbf\xbd\xe8\x80\x8c\xe4\xbb\x8a\xe5\xa4\x8f", ip = "127.0.0.1", port = 14600, status = "1" }
+    local path = CCFileUtils:sharedFileUtils():fullPathForFilename("GameServer.json")
+    local servers = LoadJsonFileToTable(path)
+    assert(servers and servers["1"], "Missing local account list")
+    local last = CCUserDefault:sharedUserDefault():getIntegerForKey("local_account", 1)
+    local selected = servers[tostring(last)] or servers["1"]
     local mock_data = {
         type = 3,
         user = "local_dev",
@@ -247,8 +261,8 @@ def get_patched_lua_scripts():
         age = 18,
         onlinetime = 0,
         holidays = 0,
-        serverlist = { ["1"] = local_srv },
-        recentlist = { ["1"] = local_srv }
+        serverlist = servers,
+        recentlist = { ["1"] = selected }
     }
     UIResponse(mock_data)
 end"""
@@ -311,7 +325,17 @@ end"""
     with io.BytesIO(read_script("accbyhttp/http_entergame")) as f:
         d = f.read().replace(b"\r\n", b"\n")
     t7 = b"function http_entergame.entergame(self,params)\n\n    self.geturl = gamedata.sdk.address.entergameAddress"
-    r7 = b"function http_entergame.entergame(self,params)\n    print(\"[LocalMock] \xe6\xa8\xa1\xe6\x8b\x9f\xe9\x80\x89\xe6\x9c\x8d\xe6\x88\x90\xe5\x8a\x9f\")\n    local data = { type = 5, uuid = \"local_mock_uuid_10001\", section = 1 }\n    UIResponse(data)\n    return true\nend\nfunction http_entergame._old_entergame(self,params)\n    self.geturl = gamedata.sdk.address.entergameAddress"
+    r7 = b"""function http_entergame.entergame(self,params)
+    local account = assert(tonumber(params.sid), "Missing local account")
+    local defaults = CCUserDefault:sharedUserDefault()
+    defaults:setIntegerForKey("local_account", account)
+    defaults:flush()
+    local data = { type = 5, uuid = "local_account_" .. tostring(account), section = 1 }
+    UIResponse(data)
+    return true
+end
+function http_entergame._old_entergame(self,params)
+    self.geturl = gamedata.sdk.address.entergameAddress"""
     assert t7 in d
     d = d.replace(t7, r7)
     patched["assets/scripts/accbyhttp/http_entergame.so"] = xxtea_encrypt(d, XXTEA_KEY)
@@ -327,15 +351,19 @@ end"""
     patched["assets/scripts/accbyhttp/http_updateconfig.so"] = xxtea_encrypt(d, XXTEA_KEY)
     print("  [Lua] Patched accbyhttp/http_updateconfig.so (offline instant section config)")
 
-    # 9. gameserver.lua (Force GameServer TCP connection to 127.0.0.1:14600)
+    # 9. gameserver.lua (Use the selected account's LAN endpoint)
     with io.BytesIO(read_script("gameserver")) as f:
         d = f.read().replace(b"\r\n", b"\n")
     t9 = b"""function ProcessFromGameServer()\n    local gameserver = {\n        host = gamedata.serverlist[tonumber(gamedata.selectserver)].ip,\n        port = gamedata.serverlist[tonumber(gamedata.selectserver)].port, 10\n    }"""
-    r9 = b"""function ProcessFromGameServer()\n    print("[LocalMock] \xe5\xbc\xba\xe5\x88\xb6\xe8\xbf\x9e\xe6\x8e\xa5\xe6\x9c\xac\xe5\x9c\xb0 Mock Server 127.0.0.1:14600")\n    local gameserver = {\n        host = "127.0.0.1",\n        port = 14600,\n    }"""
+    r9 = b"""function ProcessFromGameServer()
+    local gameserver = {
+        host = gamedata.serverlist[tonumber(gamedata.selectserver)].ip,
+        port = gamedata.serverlist[tonumber(gamedata.selectserver)].port,
+    }"""
     assert t9 in d, "t9 not found in gameserver"
     d = d.replace(t9, r9)
     patched["assets/scripts/gameserver.so"] = xxtea_encrypt(d, XXTEA_KEY)
-    print("  [Lua] Patched gameserver.so (forced TCP connect to 127.0.0.1:14600)")
+    print("  [Lua] Patched gameserver.so (selected account, direct LAN connection)")
 
     # 10. log.so (Unmute Lua logging)
     with zipfile.ZipFile(SRC_APK) as z:
@@ -566,26 +594,35 @@ end
 
 def find_tool(name):
     """定位 Android 构建工具: 优先 PATH, 其次 ANDROID_HOME/build-tools/<ver>/"""
-    exe = name + ((".bat" if name == "apksigner" else ".exe") if os.name == "nt" else "")
-    for base in os.environ.get("PATH", "").split(os.pathsep):
-        cand = os.path.join(base.strip(), exe)
-        if os.path.exists(cand):
-            return cand
+    names = (name, name + (".bat" if name == "apksigner" else ".exe"))
+    if os.name == "nt":
+        names = names[::-1]
+    for executable in names:
+        found = shutil.which(executable)
+        if found:
+            return found
     android_home = os.environ.get("ANDROID_HOME", r"D:\Dev\Env\android")
     bt = os.path.join(android_home, "build-tools")
     if os.path.isdir(bt):
         for ver in sorted(os.listdir(bt), reverse=True):
-            cand = os.path.join(bt, ver, exe)
-            if os.path.exists(cand):
-                return cand
-    raise FileNotFoundError(f"未找到 {exe}，请安装 Android build-tools 并加入 PATH")
+            for executable in names:
+                cand = os.path.join(bt, ver, executable)
+                if os.path.isfile(cand):
+                    return cand
+    raise FileNotFoundError(f"未找到 {name}，请安装 Android build-tools 并加入 PATH 或设置 ANDROID_HOME")
 
 def run_tool(path, args):
     """执行构建工具（.bat 需要经 cmd /c 启动）"""
     cmd = ["cmd", "/c", path] + args if path.lower().endswith(".bat") else [path] + args
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="构建局域网多账号 APK，不依赖 ADB 映射")
+    parser.add_argument("--server-ip", required=True, type=parse_server_ip, help="运行服务端的电脑局域网 IPv4 地址")
+    parser.add_argument("--accounts", type=int, default=2, help="账号槽位数量，1~1000，默认 2")
+    args = parser.parse_args(argv)
+    if not 1 <= args.accounts <= 1000:
+        parser.error("--accounts 必须为 1~1000")
     base = os.path.dirname(os.path.abspath(__file__))
     src_apk = os.path.join(base, "z7_7_4.apk")
     unaligned_apk = os.path.join(base, "zyj_local_unaligned.apk")
@@ -594,6 +631,8 @@ def main():
 
     print("[1/4] Preparing patched Lua scripts...")
     patched_lua = get_patched_lua_scripts()
+    config_data = dict(iter_config_bytes(os.path.join(base, "configs_sec5.zip")))
+    config_entries = {f"assets/config/{section}/{name}" for section in (1, 5) for name in config_data}
 
     print("[2/4] Packaging modified APK...")
     if os.path.exists(unaligned_apk):
@@ -603,6 +642,8 @@ def main():
         for item in zin.infolist():
             # Exclude old signature files
             if item.filename.startswith("META-INF/") and (item.filename.endswith(".SF") or item.filename.endswith(".RSA") or item.filename.endswith(".MF")):
+                continue
+            if item.filename in config_entries:
                 continue
 
             # Check if this item is in patched_lua
@@ -621,25 +662,19 @@ def main():
             elif item.filename == "assets/config.json":
                 data = patch_config_json(data)
             elif item.filename == "assets/GameServer.json":
-                data = patch_game_server_json(data)
+                data = patch_game_server_json(data, args.server_ip, args.accounts)
 
             zout.writestr(item, data)
 
-        sec5_zip_path = os.path.join(base, "configs_sec5.zip")
-        if os.path.exists(sec5_zip_path):
-            print("  [Config] Injecting offline JSON configs into APK assets...")
-            with zipfile.ZipFile(sec5_zip_path, "r") as zsec:
-                count = 0
-                for zitem in zsec.infolist():
-                    base = os.path.basename(zitem.filename)
-                    if base.endswith(".json"):
-                        cdata = zsec.read(zitem.filename)
-                        if base == "guide_step.json":
-                            cdata = patch_guide_step(cdata)
-                        zout.writestr(f"assets/config/1/{base}", cdata)
-                        zout.writestr(f"assets/config/5/{base}", cdata)
-                        count += 1
-                print(f"  [Config] Successfully injected {count} configs into assets/config/1 & assets/config/5")
+        print("  [Config] Injecting offline JSON configs into APK assets...")
+        count = 0
+        for filename, cdata in config_data.items():
+            if filename == "guide_step.json":
+                cdata = patch_guide_step(cdata)
+            zout.writestr(f"assets/config/1/{filename}", cdata)
+            zout.writestr(f"assets/config/5/{filename}", cdata)
+            count += 1
+        print(f"  [Config] Successfully injected {count} configs into assets/config/1 & assets/config/5")
 
     print("[3/4] Running zipalign...")
     if os.path.exists(final_apk):

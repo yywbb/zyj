@@ -8,21 +8,39 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import socket
 import unittest
 from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import activities, battle, formation, guide, player, protocol, recharge, recruit, replay
+from zyj_server import accounts, activities, battle, formation, guide, player, protocol, recharge, recruit, replay
 from zyj_server.session import Session
 
 
+def login_request(account, seq=0):
+    identity = protocol.encode_pb_field(2, 2, f"local_account_{account}".encode("ascii"))
+    return {"opcode": 1000, "seq": seq, "hex": protocol.encode_pb_field(1, 2, identity).hex()}
+
+
 class ReplayConnection:
-    def __init__(self, requests, chunk_size):
+    def __init__(self, requests, chunk_size, account=1, login=True):
+        self.hide_login_reply = bool(login and requests and requests[0]["opcode"] != 1000)
+        if login:
+            requests = [login_request(account, f["seq"]) if f["opcode"] == 1000 else f for f in requests]
+            if self.hide_login_reply:
+                requests.insert(0, login_request(account))
         stream = b"".join(protocol.pack_frame(f["opcode"], f["seq"], bytes.fromhex(f["hex"])) for f in requests)
         self.chunks = iter(stream[i:i + chunk_size] for i in range(0, len(stream), chunk_size))
         self.responses = []
         self.closed = False
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def setsockopt(self, level, option, value):
+        pass
 
     def recv(self, size):
         chunk = next(self.chunks, b"")
@@ -32,6 +50,9 @@ class ReplayConnection:
     def sendall(self, data):
         magic, length, opcode, seq = struct.unpack(">IIII", data[:16])
         assert magic == 0xEE1C and len(data) == 16 + length
+        if self.hide_login_reply and opcode == 1000 and seq == 0:
+            self.hide_login_reply = False
+            return
         self.responses.append({"opcode": opcode, "seq": seq, "hex": data[16:].hex()})
 
     def close(self):
@@ -63,7 +84,14 @@ class ReplayRoutingTests(unittest.TestCase):
         self.addCleanup(clock_patch.stop)
 
     def run_client(self, conn):
-        server.handle_client(conn, ("test", 0), self.tables, self.save_path, self.step_counts, self.role_config)
+        sendall = conn.sendall
+        def send_after_login(packet):
+            if conn.hide_login_reply:
+                return ReplayConnection.sendall(conn, packet)
+            return sendall(packet)
+        with patch.object(conn, "sendall", side_effect=send_after_login):
+            store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+            server.handle_client(conn, ("test", 0), store)
 
     def replay(self, requests, chunk_size=4096):
         conn = ReplayConnection(requests, chunk_size)
@@ -592,13 +620,10 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertTrue(bytes.fromhex(actual[0]["hex"]).endswith(unknown))
         self.assertEqual(json.dumps(frames), before)
 
-    def test_local_login_uuid_remains_compatible_and_shares_login_counter(self):
-        uuid = protocol.encode_pb_field(2, 2, b"local_mock_uuid_10001")
-        login = protocol.encode_pb_field(1, 2, uuid).hex()
-        responses = self.replay([dict(self.by_seq[1], seq=10000, hex=login), dict(self.by_seq[114], seq=10001)])
-        self.assertEqual(len(responses), 2)
-        self.assert_recorded_response(responses[0], 1, 10000)
-        self.assert_recorded_response(responses[1], 114, 10001)
+    def test_repeated_local_login_uses_bound_account_without_recording(self):
+        responses = self.replay([login_request(1, 10000), login_request(1, 10001)])
+        self.assertEqual(responses, [{"opcode": 1000, "seq": seq, "hex": "080010001800"}
+                                     for seq in (10000, 10001)])
         self.assertFalse(self.save_path.exists())
 
     def test_city_init_embeds_saved_role_without_stale_initial_role(self):
@@ -727,6 +752,8 @@ class ReplayRoutingTests(unittest.TestCase):
         sendall = conn.sendall
 
         def check_saved_before_send(packet):
+            if struct.unpack(">I", packet[8:12])[0] == 1000:
+                return sendall(packet)
             saved = json.loads(self.save_path.read_text())
             self.assertEqual((saved["level"], saved["silver"], saved["gold"]), (2, 2960, 10))
             self.assertEqual(saved["guide"]["sections"]["1"]["step"], 8)
@@ -1828,6 +1855,8 @@ class ReplayRoutingTests(unittest.TestCase):
         sendall = conn.sendall
 
         def check_saved_before_send(packet):
+            if struct.unpack(">I", packet[8:12])[0] == 1000:
+                return sendall(packet)
             saved = json.loads(self.save_path.read_text())
             self.assertEqual((saved["role_state"]["stamina"], saved["level"]), (0, 2))
             self.assertEqual(saved["stamina_clock"]["next_at"], self.now + 720)
@@ -2247,7 +2276,7 @@ class ReplayRoutingTests(unittest.TestCase):
 
         conn.sendall = check_saved_before_send
         with redirect_stdout(io.StringIO()), patch.object(player.random, "getrandbits", return_value=42):
-            server.handle_client(conn, ("test", 0), self.tables, self.save_path, self.step_counts, self.role_config)
+            self.run_client(conn)
         replies = conn.responses
         self.assertEqual([r["opcode"] for r in replies[:3]], [1306, 205, 1001])
         result = next(r for r in replies if r["opcode"] == 1306)
@@ -2785,6 +2814,7 @@ class ApkToolTests(unittest.TestCase):
                 for tool, filename in zip(("zipalign", "apksigner"), names):
                     target = base / filename
                     target.touch()
+                    target.chmod(0o755)
                     with patch.dict(os.environ, {"PATH": directory}), patch.object(os, "name", platform):
                         self.assertEqual(apk_builder.find_tool(tool), str(target))
             target = base / "build-tools" / "34.0.0" / "apksigner"
@@ -2792,6 +2822,245 @@ class ApkToolTests(unittest.TestCase):
             target.touch()
             with patch.dict(os.environ, {"PATH": "", "ANDROID_HOME": directory}), patch.object(os, "name", "posix"):
                 self.assertEqual(apk_builder.find_tool("apksigner"), str(target))
+
+
+class LanAccountTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with redirect_stdout(io.StringIO()):
+            cls.step_counts = guide.load_guide_step_counts(server.CONFIG_ZIP)
+            cls.role_config = player.load_role_config(server.CONFIG_ZIP)
+            frames = replay.load_recordings(server.RECORD_PATH)
+            cls.tables = replay.build_routing_tables(frames)
+            # 两个教程隔离用例只用原始抓包；ReplayRoutingTests 仍验证完整混合库。
+            end = next((i for i, f in enumerate(frames) if i and f["c2s"] and f["opcode"] == 1000 and f["seq"] == 1), len(frames))
+            cls.tutorial_tables = replay.build_routing_tables(frames[:end])
+        cls.requests = [f for f in frames[:end] if f["c2s"]]
+        cls.by_seq = {f["seq"]: f for f in cls.requests}
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.save_path = Path(temp.name) / "role_save.json"
+        self.store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        for context in (patch.object(server, "SAVE_PATH", str(self.save_path)),
+                        patch.object(server, "start_admin"),
+                        patch.object(player.time, "time", return_value=1800000000),
+                        redirect_stdout(io.StringIO())):
+            context.__enter__()
+            self.addCleanup(context.__exit__, None, None, None)
+
+    def run_client(self, conn, addr=("same-lan-ip", 1)):
+        self.store.tables = self.tables
+        server.handle_client(conn, addr, self.store)
+
+    def replay(self, requests, chunk_size=4096, account=1):
+        conn = ReplayConnection(requests, chunk_size, account=account)
+        with redirect_stdout(io.StringIO()) as log:
+            self.run_client(conn)
+        self.assertTrue(conn.closed)
+        self.assertNotIn("连接异常", log.getvalue())
+        return conn.responses
+
+    def test_two_accounts_keep_names_guides_and_world_state_after_reconnect(self):
+        self.tables = self.tutorial_tables
+        name = lambda text: {"opcode": 101, "seq": 20000, "hex": protocol.encode_pb_field(1, 2, text.encode("utf-8")).hex()}
+        self.replay([name("手机账号"), self.by_seq[11], self.by_seq[12], self.by_seq[36]], account=1)
+        first = self.save_path.read_bytes()
+        self.replay([name("模拟器账号"), {"opcode": 201, "seq": 20001, "hex": "08011003"}], account=2)
+        second_path = self.store.path(2)
+        self.assertEqual(self.save_path.read_bytes(), first)
+        self.assertEqual(json.loads(second_path.read_text())["role_name"], "模拟器账号")
+        for account, expected_name, expected_step in ((1, "手机账号", 8), (2, "模拟器账号", 3)):
+            responses = self.replay([self.by_seq[12], {"opcode": 200, "seq": 30000, "hex": ""}], account=account)
+            role = dict(protocol.get_comb_messages(bytes.fromhex(responses[0]["hex"])))[1001]
+            self.assertIn((3, 2, expected_name.encode("utf-8")), list(protocol.iter_pb_fields(role)))
+            sections = [value for _, _, value in protocol.iter_pb_fields(bytes.fromhex(responses[1]["hex"]))]
+            self.assertEqual(protocol.pb_get_varint(sections[0], 3), expected_step)
+        self.assertEqual(json.loads(self.save_path.read_text())["level"], 2)
+        self.assertEqual(json.loads(second_path.read_text())["level"], 1)
+
+    def test_recorded_tutorial_can_run_independently_for_two_accounts(self):
+        self.tables = self.tutorial_tables
+        self.replay(self.requests, account=1)
+        first = self.save_path.read_bytes()
+        self.replay(self.requests, chunk_size=7, account=2)
+        self.assertEqual(self.save_path.read_bytes(), first)
+        a = json.loads(first)
+        b = json.loads(self.store.path(2).read_text())
+        for key in ("role_state", "world_state", "guide", "protagonist_snapshot", "activity_state", "stamina_clock"):
+            self.assertEqual(a[key], b[key])
+
+    def test_login_parser_accepts_reconnect_flag_but_rejects_invalid_identity(self):
+        body = bytes.fromhex(login_request(2)["hex"]) + protocol.encode_pb_field(1, 2, b"\x08\x03")
+        self.assertEqual(accounts.parse_login_account(body), 2)
+        for account in ("0", "-1", "01", "1001", "../1", "1/../../2", "1\x00"):
+            with self.subTest(account=account), self.assertRaises(ValueError):
+                accounts.parse_login_account(bytes.fromhex(login_request(account)["hex"]))
+        for body in (b"", b"\x08\x01", b"\x0a\x04\x12\x05x", b"\x0a\x02\x08\x01"):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                accounts.parse_login_account(body)
+
+    def test_unauthenticated_requests_cannot_read_or_modify_saves(self):
+        self.save_path.write_text('{"role_name":"keep"}')
+        before = self.save_path.read_bytes()
+        for opcode in (1001, 200, 101, 201, 999898, 999900):
+            with self.subTest(opcode=opcode):
+                conn = ReplayConnection([{"opcode": opcode, "seq": 1, "hex": ""}], 7, login=False)
+                with patch.object(server, "print_flush"):
+                    self.run_client(conn)
+                self.assertTrue(conn.closed)
+                self.assertEqual(conn.responses, [])
+                self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_connection_cannot_switch_accounts_after_login(self):
+        conn = ReplayConnection([login_request(1, 1), login_request(2, 2)], 7, login=False)
+        with patch.object(server, "print_flush"):
+            self.run_client(conn)
+        self.assertEqual([f["seq"] for f in conn.responses], [1])
+        self.assertFalse(self.store.path(2).exists())
+        self.assertEqual(self.store.active, {})
+
+    def test_oversized_frame_is_rejected_without_touching_save(self):
+        conn = ReplayConnection([], 4096, login=False)
+        conn.chunks = iter([struct.pack(">IIII", 0xEE1C, server.MAX_FRAME_SIZE + 1, 1000, 1)])
+        with patch.object(server, "print_flush"):
+            self.run_client(conn)
+        self.assertEqual(conn.responses, [])
+        self.assertTrue(conn.closed)
+        self.assertFalse(self.save_path.exists())
+
+    def test_duplicate_account_rejected_while_other_account_can_play(self):
+        waiting, release = threading.Event(), threading.Event()
+
+        class HoldingConnection(ReplayConnection):
+            def recv(self, size):
+                data = super().recv(size)
+                if not data:
+                    waiting.set()
+                    if not release.wait(5):
+                        raise TimeoutError("test did not release connection")
+                return data
+
+        conn = HoldingConnection([login_request(1, 1)], 4096, login=False)
+        worker = threading.Thread(target=self.run_client, args=(conn, ("same-ip", 1)))
+        with patch.object(server, "print_flush"):
+            worker.start()
+            try:
+                self.assertTrue(waiting.wait(5))
+                duplicate = ReplayConnection([login_request(1, 2)], 7, login=False)
+                self.run_client(duplicate, ("same-ip", 2))
+                self.assertEqual(duplicate.responses, [])
+                self.assertTrue(duplicate.closed)
+                self.assertIn(1, self.store.active)
+                self.replay([{"opcode": 201, "seq": 10, "hex": "08011003"}], account=2)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.store.active, {})
+        self.replay([{"opcode": 201, "seq": 11, "hex": "08011004"}], account=1)
+
+    def test_failed_login_releases_account_for_retry(self):
+        path = self.store.path(2)
+        path.parent.mkdir(parents=True)
+        path.write_text('{"unfinished":')
+        conn = ReplayConnection([login_request(2, 1)], 4096, login=False)
+        with patch.object(server, "print_flush"):
+            self.run_client(conn)
+        self.assertEqual(conn.responses, [])
+        self.assertEqual(self.store.active, {})
+        path.write_text(json.dumps(player.get_default_save()))
+        self.replay([{"opcode": 201, "seq": 11, "hex": "08011004"}], account=2)
+
+    def test_startup_uses_one_port_and_never_runs_adb(self):
+        with patch.object(server.socket, "socket") as factory, patch("subprocess.run", side_effect=AssertionError("must not run adb")), patch.object(server, "print_flush"):
+            factory.return_value.accept.side_effect = KeyboardInterrupt
+            server.main([])
+            factory.return_value.bind.assert_called_once_with(("0.0.0.0", 14600))
+            factory.return_value.close.assert_called_once()
+
+    def test_reset_only_removes_target_account(self):
+        self.replay([{"opcode": 201, "seq": 1, "hex": "08011003"}], account=1)
+        self.replay([{"opcode": 201, "seq": 1, "hex": "08011004"}], account=2)
+        before = self.save_path.read_bytes()
+        with patch.object(server.socket, "socket") as factory, patch.object(server, "print_flush"):
+            factory.return_value.accept.side_effect = KeyboardInterrupt
+            server.main(["--account", "2", "--reset"])
+        self.assertEqual(self.save_path.read_bytes(), before)
+        self.assertFalse(self.store.path(2).exists())
+
+    def test_occupied_port_prevents_resetting_live_account(self):
+        self.save_path.write_text('{"role_name":"keep"}')
+        before = self.save_path.read_bytes()
+        with patch.object(server.socket, "socket") as factory, patch.object(server, "print_flush"):
+            factory.return_value.bind.side_effect = OSError("address in use")
+            with self.assertRaises(OSError):
+                server.main(["--reset"])
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_reset_guide_preserves_both_accounts_role_data(self):
+        for account in (1, 2):
+            self.replay([{"opcode": 201, "seq": 1, "hex": "08011003"}], account=account)
+        before = self.save_path.read_bytes()
+        second = self.store.path(2)
+        saved = json.loads(second.read_text())
+        with patch.object(server.socket, "socket") as factory, patch.object(server, "print_flush"):
+            factory.return_value.accept.side_effect = KeyboardInterrupt
+            server.main(["--account", "2", "--reset-guide"])
+        current = json.loads(second.read_text())
+        self.assertEqual(current["guide"], {"sections": {}})
+        for key in ("role_name", "has_role", "world_state"):
+            self.assertEqual(current[key], saved[key])
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_tcp_clients_share_one_listener_but_not_saves(self):
+        def read_frame(client):
+            def read_exact(size):
+                data = b""
+                while len(data) < size:
+                    chunk = client.recv(size - len(data))
+                    if not chunk:
+                        raise AssertionError("unexpected disconnect")
+                    data += chunk
+                return data
+            magic, length, opcode, seq = struct.unpack(">IIII", read_exact(16))
+            self.assertEqual(magic, 0xEE1C)
+            return opcode, seq, read_exact(length)
+
+        clients, workers = [], []
+        with socket.socket() as listener, patch.object(server, "print_flush"):
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(2)
+            try:
+                for account in (1, 2):
+                    client = socket.create_connection(listener.getsockname(), timeout=3)
+                    clients.append(client)
+                    conn, addr = listener.accept()
+                    worker = threading.Thread(target=self.run_client, args=(conn, addr))
+                    worker.start()
+                    workers.append(worker)
+                    login = login_request(account, 1)
+                    packet = protocol.pack_frame(1000, 1, bytes.fromhex(login["hex"]))
+                    packet += protocol.pack_frame(201, 2, bytes((8, 1, 16, account + 2)))
+                    for offset in range(0, len(packet), 7):
+                        client.sendall(packet[offset:offset + 7])
+                    self.assertEqual(read_frame(client), (1000, 1, b"\x08\x00\x10\x00\x18\x00"))
+                    self.assertEqual(read_frame(client), (201, 2, b"\x08\x01"))
+                self.assertEqual(set(self.store.active), {1, 2})
+                for account, client in enumerate(clients, 1):
+                    client.sendall(protocol.pack_frame(200, 3, b""))
+                    opcode, seq, body = read_frame(client)
+                    self.assertEqual((opcode, seq), (200, 3))
+                    section = next(value for _, _, value in protocol.iter_pb_fields(body))
+                    self.assertEqual(protocol.pb_get_varint(section, 3), account + 2)
+            finally:
+                for client in clients:
+                    client.close()
+                for worker in workers:
+                    worker.join(5)
+                    self.assertFalse(worker.is_alive())
+        self.assertEqual(self.store.active, {})
 
 
 class EntryPointTests(unittest.TestCase):
@@ -2822,8 +3091,9 @@ class EntryPointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             save_path = Path(directory) / "role_save.json"
             with redirect_stdout(io.StringIO()), patch.object(server, "SAVE_PATH", str(save_path)), \
+                    patch.object(server, "start_admin") as admin_factory, \
                     patch.object(sys, "argv", ["mock_server.py"]), \
-                    patch.object(server, "setup_adb_reverse"), \
+                    patch("subprocess.check_output", side_effect=AssertionError("must not run adb")), \
                     patch.object(server.socket, "socket") as socket_factory, \
                     patch.object(server.threading, "Thread") as thread_factory:
                 socket_factory.return_value.accept.side_effect = [(conn, ("test", 0)), KeyboardInterrupt]
@@ -2833,6 +3103,9 @@ class EntryPointTests(unittest.TestCase):
                 options = thread_factory.call_args.kwargs
                 self.assertIs(options["target"], server.handle_client)
                 self.assertTrue(options["daemon"])
+                self.assertIs(options["args"][2], admin_factory.call_args.args[1])
+                admin_factory.return_value.shutdown.assert_called_once_with()
+                admin_factory.return_value.server_close.assert_called_once_with()
                 options["target"](*options["args"])
             self.assertFalse(save_path.exists())
         self.assertTrue(conn.closed)
@@ -2849,12 +3122,12 @@ class EntryPointTests(unittest.TestCase):
                 with self.subTest(flags=flags):
                     save_path.write_text(original)
                     with redirect_stdout(io.StringIO()), patch.object(server, "SAVE_PATH", str(save_path)), \
+                            patch.object(server, "start_admin"), \
                             patch.object(sys, "argv", ["mock_server.py", *flags]), \
-                            patch.object(server, "setup_adb_reverse") as adb, \
+                            patch("subprocess.check_output", side_effect=AssertionError("must not run adb")), \
                             patch.object(server.socket, "socket") as socket_factory:
                         socket_factory.return_value.accept.side_effect = KeyboardInterrupt
                         server.main()
-                    adb.assert_called_once_with()
                     socket_factory.return_value.bind.assert_called_once_with(("0.0.0.0", 14600))
                     if flags == ["--reset"]:
                         self.assertFalse(save_path.exists())

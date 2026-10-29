@@ -7,9 +7,8 @@ import os
 import random
 import tempfile
 import time
-import zipfile
 
-from . import activities, battle, formation, recharge, recruit
+from . import activities, battle, configuration, formation, recharge, recruit
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -42,15 +41,14 @@ ROLE_FIELD_MAP = {
 
 
 def load_role_config(config_path):
-    with zipfile.ZipFile(config_path) as config_zip:
-        return {name: json.loads(config_zip.read(f"5/{name}.json"))
-                for name in ("role_exp", "copy", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
+    return configuration.load_tables(config_path,
+                            ("role_exp", "copy", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
                              "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "worlddrop", "recruit_deck", "recruit_tenlottery",
-                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift")}
+                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift"))
 
 
 def get_default_save():
@@ -85,6 +83,7 @@ def save_role(save_data, save_path, step_counts):
     temporary_path = None
     try:
         save_data["last_login"] = time.time()
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(save_path), delete=False) as f:
             temporary_path = f.name
             json.dump(save_data, f, ensure_ascii=False, indent=2)

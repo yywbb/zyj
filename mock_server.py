@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-作妖记本地模拟服启动入口：命令行、ADB 与 TCP 收发。
-游戏请求由 zyj_server.session.Session 处理，启动方式不变：
+作妖记局域网模拟服入口：命令行、账号绑定与 TCP 收发，不依赖 ADB。
+游戏请求由 zyj_server.session.Session 处理：
     python3 mock_server.py
-    python3 mock_server.py --reset        清空整个存档
-    python3 mock_server.py --reset-guide  只清引导进度，保留角色数据
+    python3 mock_server.py --account 2 --reset        清空账号 2 的存档
+    python3 mock_server.py --account 2 --reset-guide  只清账号 2 的引导进度
 """
 
+import argparse
 import functools
 import os
 import socket
 import struct
-import subprocess
-import sys
 import threading
 
-from zyj_server import guide, player, replay
-from zyj_server.session import Session
+from zyj_server import accounts, configuration, guide, player, protocol, replay
+from zyj_server.admin.http import start_admin
 
 print_flush = functools.partial(print, flush=True)
 
@@ -25,19 +24,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RECORD_PATH = os.path.join(BASE_DIR, "recorded_frames.json")
 SAVE_PATH = os.path.join(BASE_DIR, "role_save.json")
 CONFIG_ZIP = os.path.join(BASE_DIR, "configs_sec5.zip")
+MAX_FRAME_SIZE = 1024 * 1024
 
 
-def handle_client(conn, addr, tables, save_path, step_counts, role_config):
+def handle_client(conn, addr, account_store):
     print_flush(f"\n[+] 新客户端连入: {addr}")
-    try:
-        session = Session(tables, save_path, step_counts, role_config)
-    except Exception as e:
-        print_flush(f"[!] 载入玩家状态失败: {e}")
-        conn.close()
-        return
+    account = None
+    session = None
     recv_buf = bytearray()
 
     try:
+        conn.settimeout(30)
         while True:
             data = conn.recv(4096)
             if not data:
@@ -56,12 +53,28 @@ def handle_client(conn, addr, tables, save_path, step_counts, role_config):
                         recv_buf.clear()
                         break
 
+                if plen > MAX_FRAME_SIZE:
+                    raise ValueError("协议帧超过 1 MiB 上限")
                 total_len = 16 + plen
                 if len(recv_buf) < total_len:
                     break
 
                 body = bytes(recv_buf[16:total_len])
                 del recv_buf[:total_len]
+                if opcode == 1000:
+                    requested_account = accounts.parse_login_account(body)
+                    if account is not None and requested_account != account:
+                        raise ValueError("连接已绑定账号，切换账号必须重新连接")
+                    if account is None:
+                        session = account_store.open_session(requested_account, addr)
+                        account = requested_account
+                        conn.settimeout(None)
+                        print_flush(f"[★] 连接已绑定账号 {account}")
+                    conn.sendall(protocol.pack_frame(1000, seq, b"\x08\x00\x10\x00\x18\x00"))
+                    continue
+
+                if session is None:
+                    raise ValueError("请先发送登录请求，未登录连接不能访问存档")
                 for packet in session.handle(opcode, seq, body):
                     conn.sendall(packet)
                     _, length, resp_op, send_seq = struct.unpack(">IIII", packet[:16])
@@ -70,62 +83,66 @@ def handle_client(conn, addr, tables, save_path, step_counts, role_config):
     except Exception as e:
         print_flush(f"[!] 连接异常: {e}")
     finally:
-        conn.close()
+        try:
+            conn.close()
+        finally:
+            if account is not None:
+                account_store.close_session(account)
 
 
-def setup_adb_reverse():
-    try:
-        dev_out = subprocess.check_output(["adb", "devices"]).decode("utf-8")
-        devs = [l.split()[0] for l in dev_out.strip().splitlines()[1:] if "\tdevice" in l]
-        for d in devs:
-            subprocess.run(["adb", "-s", d, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            print_flush(f"[+] ADB 端口映射就绪: 设备 {d} 127.0.0.1:{PORT} <-> 电脑 127.0.0.1:{PORT}")
-    except Exception as e:
-        print_flush(f"[!] ADB 端口映射提示: {e}")
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="局域网多账号模拟服，监听 0.0.0.0:14600，不需要 ADB")
+    parser.add_argument("--account", type=accounts.parse_account_id, default=1, help="重置目标账号（默认 1），不限制其他账号登录")
+    parser.add_argument("--admin-port", type=int, default=14601, help="本机网页后台端口（默认 14601，0 为自动分配）")
+    reset = parser.add_mutually_exclusive_group()
+    reset.add_argument("--reset", action="store_true", help="清空目标账号存档后启动")
+    reset.add_argument("--reset-guide", action="store_true", help="仅清空目标账号引导后启动")
+    args = parser.parse_args(argv)
+    if not 0 <= args.admin_port <= 65535:
+        parser.error("--admin-port 必须为 0~65535")
 
-
-def main():
+    configs = configuration.ConfigStore(CONFIG_ZIP)
     step_counts = guide.load_guide_step_counts(CONFIG_ZIP)
     role_config = player.load_role_config(CONFIG_ZIP)
-
-    if "--reset" in sys.argv:
-        if os.path.exists(SAVE_PATH):
-            os.remove(SAVE_PATH)
-            print_flush("[✓] 已成功清空角色存档 role_save.json，重新启动将进入全新号完整新手流程。")
-
-    if "--reset-guide" in sys.argv:
-        if os.path.exists(SAVE_PATH):
-            cur = player.load_save(SAVE_PATH, step_counts)
-            cur["guide"] = {"sections": {}}
-            if not player.save_role(cur, SAVE_PATH, step_counts):
-                raise OSError("重置引导存档失败")
-            print_flush("[✓] 已清空引导进度（保留角色信息），下次登录将从开场剧情重播新手引导。")
-        else:
-            print_flush("[!] 未找到存档，无需重置引导。")
-
-    setup_adb_reverse()
     frames = replay.load_recordings(RECORD_PATH)
     tables = replay.build_routing_tables(frames)
+    account_store = accounts.AccountStore(SAVE_PATH, tables, step_counts, role_config)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", PORT))
-    server.listen(5)
-
-    cur_save = player.load_save(SAVE_PATH, step_counts)
-    print_flush(f"\n=======================================================")
-    print_flush(f"  《作妖记》本地 Mock 模拟服务端 (全流程引导与持久化版) 已启动")
-    print_flush(f"  监听地址: 0.0.0.0:{PORT}")
-    print_flush(f"  当前存档: 玩家【{cur_save.get('role_name') or '未创建'}】 (Lv.{cur_save.get('level', 1)}) -> {guide.describe_guide(guide.get_guide_sections(cur_save, step_counts), step_counts)}")
-    print_flush(f"=======================================================\n")
-
+    admin = None
     try:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("0.0.0.0", PORT))
+        server.listen(5)
+
+        # 先占用监听端口，避免另一个服务端仍在线时重置其存档。
+        if (args.reset or args.reset_guide) and account_store.path(args.account).exists():
+            action = "reset" if args.reset else "reset-guide"
+            result = account_store.maintain(args.account, action, account_store.snapshot(args.account)["revision"])
+            print_flush(f"[✓] 账号 {args.account} 已执行 {action}，原存档备份: {result['backup_id']}")
+        admin = start_admin(args.admin_port, account_store, configs)
+
+        print_flush(f"\n=======================================================")
+        print_flush(f"  《作妖记》局域网多账号模拟服已启动（无需 ADB）")
+        print_flush(f"  监听地址: 0.0.0.0:{PORT}")
+        print_flush(f"  本机管理后台: http://127.0.0.1:{admin.server_port}")
+        print_flush(f"  手机/模拟器直连电脑的局域网 IP:{PORT}；账号 1 沿用 {SAVE_PATH}")
+        print_flush(f"  无密码，仅用于可信局域网，禁止直接暴露公网")
+        print_flush(f"=======================================================\n")
+
         while True:
             conn, addr = server.accept()
-            t = threading.Thread(target=handle_client, args=(conn, addr, tables, SAVE_PATH, step_counts, role_config), daemon=True)
+            # shortcut: 断网旧会话等待 TCP 断开释放；即时跨设备接管需另做会话交接。
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            t = threading.Thread(target=handle_client, args=(conn, addr, account_store), daemon=True)
             t.start()
     except KeyboardInterrupt:
         print_flush("\n[*] 服务端已停止")
+    finally:
+        server.close()
+        if admin is not None:
+            admin.shutdown()
+            admin.server_close()
 
 
 if __name__ == "__main__":
