@@ -7,8 +7,9 @@ import os
 import random
 import tempfile
 import time
+import zipfile
 
-from . import activities, battle, configuration, fashion, formation, online_rewards, recharge, recruit, shop, training
+from . import activities, battle, configuration, fashion, formation, online_rewards, recharge, recruit, shop, training, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -41,6 +42,8 @@ ROLE_FIELD_MAP = {
 
 
 def load_role_config(config_path):
+    with zipfile.ZipFile(config_path) as archive:
+        sign_tables = tuple(n[2:-5] for n in archive.namelist() if n.startswith("5/sign2_") and n.endswith(".json"))
     return configuration.load_tables(config_path,
                             ("role_exp", "copy", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
                              "begin7day", "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
@@ -50,7 +53,9 @@ def load_role_config(config_path):
                              "combskillprobability", "breakskill", "worlddrop", "recruit_deck", "recruit_tenlottery",
                              "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
-                             "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward"))
+                             "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
+                             "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
+                             "growplan_x1", "growplan_global_x1", "chengzhangplan_money", *sign_tables))
 
 
 def get_default_save():
@@ -166,7 +171,8 @@ def get_role_state(save, role_config):
                 state.setdefault(name, value)
     level = state.setdefault("level", save.get("level", 1))
     config = role_config["role_exp"][str(level)]
-    defaults = {"exp": 0, "nextexp": config["nextexp"], "coin": save.get("silver", 0),
+    defaults = {"vip": recharge.vip(save.get("recharge_state", {"rmb": 0}), role_config),
+                "exp": 0, "nextexp": config["nextexp"], "coin": save.get("silver", 0),
                 "gold": save.get("gold", 0), "stamina": config["maxstamina"],
                 "maxstamina": config["maxstamina"], "energy": save.get("energy", 20),
                 "maxenergy": config["maxenergy"], "power": 0, "g_power": 0, "power_all": 0}
@@ -445,6 +451,18 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = online_rewards.prepare(opcode, save, request_body, role_config)
         if opcode == 2038:
             apply_reward(save, body, role_config, now)
+    elif opcode in welfare.OPCODES:
+        body, costs = welfare.prepare(opcode, save, request_body, role_config, now)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if opcode in welfare.CLAIMS:
+            apply_reward(save, body, role_config, now)
+    elif opcode == 300:
+        if request_body:
+            raise ValueError("贵族状态查询不接受参数")
+        body = welfare.rewrite_vip(body, save)
+    elif opcode == 2000:
+        body = welfare.rewrite_activities(body)
     elif opcode in activities.OPCODES:
         body = activities.prepare_response(opcode, save, request_body, role_config, now)
         if opcode == 5031:
@@ -656,6 +674,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     before = copy.deepcopy(save)
     now = int(time.time())
     online_rewards.settle(save, role_config, connected_at, now)
+    welfare.settle(save, now)
     settle_stamina(save, role_config, now)
     packets = []
     for response in responses:
@@ -695,6 +714,7 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
     before = copy.deepcopy(save)
     now = int(time.time())
     online_rewards.settle(save, role_config, connected_at, now)
+    welfare.settle(save, now)
     settle_stamina(save, role_config, now)
     point, old_star = battle.challenge(save, request_body, role_config)
     attack, defense = battle.rosters(save, point, role_config)

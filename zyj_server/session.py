@@ -4,9 +4,9 @@ import copy
 import functools
 import time
 
-from . import activities, fashion, guide, online_rewards, player, recharge, recruit, shop, training
-from .protocol import encode_pb_field, get_comb_ids, pack_frame
-from .replay import Replay
+from . import activities, fashion, guide, online_rewards, player, recharge, recruit, shop, training, welfare
+from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, pack_frame
+from .replay import Replay, normalize_comb_request
 
 print_flush = functools.partial(print, flush=True)
 
@@ -19,11 +19,12 @@ def unavailable_response(opcode, seq, body, message):
 
 
 class Session:
-    def __init__(self, tables, save_path, step_counts, role_config):
+    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None):
         self.replay = Replay(tables)
         self.save_path = save_path
         self.step_counts = step_counts
         self.role_config = role_config
+        self.growth_buyers = growth_buyers
         self.random_replies = {}
         self.connected_at = int(time.time())
         self.save = player.load_save(save_path, step_counts)
@@ -35,6 +36,9 @@ class Session:
         shop.get_state(self.save)
         fashion.get_state(self.save, role_config)
         online_rewards.get_state(self.save, role_config)
+        welfare.get_state(self.save)
+        if self.save.get("has_role"):
+            player.get_role_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
 
         sections = guide.get_guide_sections(self.save, step_counts)
@@ -88,12 +92,39 @@ class Session:
         if opcode == 1401:
             return unavailable_response(opcode, seq, body, "本地服暂未开放此招募方式，请使用普通招募。")
 
+        if opcode in (7094, 7095):
+            working = copy.deepcopy(self.save)
+            now = int(time.time())
+            try:
+                if self.growth_buyers is None:
+                    raise ValueError("全服福利需要绑定本地账号库")
+                welfare.settle(working, now)
+                online_rewards.settle(working, self.role_config, self.connected_at, now)
+                player.settle_stamina(working, self.role_config, now)
+                reply = welfare.prepare_global(opcode, working, body, self.role_config, self.growth_buyers())
+                if opcode == 7095:
+                    player.apply_reward(working, reply, self.role_config, now)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
+            packets = player.save_response_group([pack_frame(opcode, seq, reply)], working, self.save,
+                                                self.save_path, self.step_counts, self.role_config, now)
+            self.save = working
+            return packets
+
+        sign_comb = False
+        if opcode == 999900:
+            # 仅开放原生签到引导的完整二消息模板；仍保留顺序、未知字段和重复字段校验。
+            templates = [encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + empty)
+                         + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x33\x10\x01"))
+                         for empty in (b"", encode_pb_field(2, 2, b""))]
+            sign_comb = normalize_comb_request(body) in templates
+
         fixed_box = False
         if opcode == 1201:
             values = player.parse_prop_use(body)
             fixed_box = shop.fixed_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038,
+        if sign_comb or fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
@@ -107,8 +138,10 @@ class Session:
                     packets = player.prepare_battle_responses(seq, working, body, self.save_path,
                                                              self.step_counts, self.role_config, self.connected_at)
                 else:
+                    reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + encode_pb_field(2, 2, b""))
+                             + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01"))) if sign_comb else b""
                     packets = player.prepare_recorded_responses(
-                        seq, [{"opcode": opcode, "seq": seq, "hex": ""}], working, body,
+                        seq, [{"opcode": opcode, "seq": seq, "hex": reply.hex()}], working, body,
                         self.save_path, self.step_counts, self.role_config, self.connected_at)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
@@ -119,12 +152,14 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (1304, 1402, 2037, 2411, 3611, 7110, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (300, 1304, 1402, 2037, 2411, 3611, 7110, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES):
             working = copy.deepcopy(self.save)
             try:
+                baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900
+                                 for mid, data in get_comb_messages(bytes.fromhex(frame["hex"])) if mid == 300), b"") if opcode == 300 else b""
                 packets = player.prepare_recorded_responses(
-                    seq, [{"opcode": opcode, "seq": seq, "hex": ""}], working, body,
+                    seq, [{"opcode": opcode, "seq": seq, "hex": baseline.hex()}], working, body,
                     self.save_path, self.step_counts, self.role_config, self.connected_at)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))

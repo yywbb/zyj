@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training
+from zyj_server import accounts, activities, battle, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training, welfare
 from zyj_server.session import Session
 
 
@@ -129,8 +129,8 @@ class ReplayRoutingTests(unittest.TestCase):
     def assert_recorded_response(self, response, recorded_seq, live_seq=None):
         expected = self.recorded[(recorded_seq, response["opcode"])]
         self.assertEqual(response["seq"], recorded_seq if live_seq is None else live_seq)
-        if response["opcode"] == 1032:
-            self.assert_replayed_payload(1032, response["hex"], expected["hex"])
+        if response["opcode"] in (1032, 2000):
+            self.assert_replayed_payload(response["opcode"], response["hex"], expected["hex"])
         else:
             self.assertEqual(response["hex"], expected["hex"])
 
@@ -157,7 +157,7 @@ class ReplayRoutingTests(unittest.TestCase):
             values = protocol.parse_ids_pb(bytes.fromhex(actual))
             self.assertEqual(values, [int(self.clock.return_value), protocol.parse_ids_pb(bytes.fromhex(expected))[1]])
         elif opcode == 1032:
-            live_ids = {40, 542, *range(82, 110)}
+            live_ids = set(activities.HINT_IDS)
             actual_fields = list(protocol.iter_pb_fields(bytes.fromhex(actual)))
             expected_fields = list(protocol.iter_pb_fields(bytes.fromhex(expected)))
             self.assertEqual([f for f in actual_fields if not (f[:2] == (1, 0) and f[2] // 100 in live_ids)],
@@ -169,6 +169,8 @@ class ReplayRoutingTests(unittest.TestCase):
         elif opcode == 2037:
             # 教程回归冻结时间，不能继承录制中已到期的在线奖励倒计时。
             self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [1, 60])
+        elif opcode == 2000:
+            self.assertEqual(bytes.fromhex(actual), welfare.rewrite_activities(bytes.fromhex(expected)))
         elif opcode == 3210:
             rows = self.entity_records(bytes.fromhex(actual), 1, 1)
             self.assertEqual(set(rows), set(map(int, self.role_config["gift_bag"])))
@@ -357,6 +359,236 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.assertEqual(frames[0]["opcode"], opcode)
                 self.assertTrue(frames[0]["hex"])
         self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(frames[0]["hex"])), [0, 80001, 1])
+
+    def seed_welfare_account(self):
+        self.now = 1793336400  # 2026-10-30 13:00 UTC+8，有真实月签到配置。
+        self.clock.return_value = self.now
+        self.seed_stamina(20)
+        saved = json.loads(self.save_path.read_text())
+        player.get_role_state(saved, self.role_config)
+        saved["role_state"].update(vip=6, level=8, gold=30000, coin=10000)
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_welfare_login_rewards_reconnect_gap_and_completion(self):
+        self.seed_welfare_account()
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(214)), [1] + [0] * 7)
+        self.replay([self.activity_request(215)])
+        self.assertEqual((self.query_role()[8], self.query_role()[9]), (20000, 30020))
+        original = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(215)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), original)
+        for day in range(1, 5):
+            self.clock.return_value = self.now + day * 86400
+            self.assertEqual(protocol.parse_ids_pb(self.query_world(214))[0], day + 1)
+            self.assertEqual(self.replay([self.activity_request(215)])[0]["opcode"], 215)
+        self.clock.return_value += 3 * 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(214))[:6], [5, 1, 1, 1, 1, 1])
+        self.assertEqual(self.replay([self.activity_request(215)])[0]["opcode"], 999999)
+        self.seed_welfare_account()
+        self.replay([self.activity_request(215)])
+        self.clock.return_value += 2 * 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(214)), [1] + [0] * 7)
+
+    def test_welfare_peach_windows_daily_reset_and_clock_rollback(self):
+        self.seed_welfare_account()
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2010)), [0, 1, 1])
+        self.replay([self.activity_request(2011)])
+        self.assertEqual(self.query_role()[9], 30050)
+        self.assertEqual(self.query_role()[10], 70)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2010)), [2, 1, 1])
+        self.assertEqual(self.replay([self.activity_request(2011)])[0]["opcode"], 999999)
+        self.clock.return_value += 3600
+        self.assertEqual(self.replay([self.activity_request(2011)])[0]["opcode"], 999999)
+        for hour in (18, 21):
+            self.clock.return_value = self.now + (hour - 13) * 3600
+            self.assertEqual(self.replay([self.activity_request(2011)])[0]["opcode"], 2011)
+        self.assertEqual(self.query_role()[9], 30150)
+        self.assertEqual(self.query_role()[10], 170)
+        self.clock.return_value = self.now + 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2010)), [0, 1, 1])
+        before = self.save_path.read_bytes()
+        self.clock.return_value = self.now
+        self.assertEqual(self.replay([self.activity_request(2011)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_welfare_mammon_net_gain_limits_and_cached_retry(self):
+        self.seed_welfare_account()
+        with redirect_stdout(io.StringIO()), patch.object(welfare.random, "randint", side_effect=lambda lo, hi: lo):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            total = 30000
+            for index in range(1, 6):
+                row = self.role_config["mammon"][str(index)]
+                reply = session.handle(2016, index, b"")
+                gain = int(row["gold"] * row["min"]) - row["gold"]
+                total += gain
+                self.assertEqual(protocol.pb_get_varint(reply[0][16:], 2), gain)
+                self.assertEqual(session.save["role_state"]["gold"], total)
+                self.assertEqual(session.handle(2016, index, b""), reply)
+            self.assertEqual(struct.unpack(">IIII", session.handle(2016, 6, b"")[0][:16])[2], 999999)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2015))[0], 6)
+        self.seed_welfare_account()
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["gold"] = 17
+        self.save_path.write_text(json.dumps(saved))
+        before = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2016)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), before)
+        self.seed_welfare_account()
+        self.clock.return_value += 3 * 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2015)), [1, 0])
+        self.assertEqual(self.replay([self.activity_request(2016)])[0]["opcode"], 999999)
+
+    def test_welfare_native_sign_comb_rewards_guide_and_daily_task_atomically(self):
+        self.seed_welfare_account()
+        # 官方请求省略空 data，Guide 字段顺序与描述符相反。
+        request = {"opcode": 999900, "seq": 23456, "hex": "0a0308ba1c0a0908c901120410010833"}
+        conn = ReplayConnection([request, request], 7)
+        send = conn.sendall
+        def committed(packet):
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual(saved["role_state"]["gold"], 30200)
+            self.assertEqual(saved["welfare_state"]["sign_count"], 1)
+            self.assertEqual(saved["guide"]["sections"]["51"]["status"], 2)
+            send(packet)
+        conn.sendall = committed
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertEqual([f["opcode"] for f in conn.responses], [999900, 1034] * 2)
+        self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3641)), [1, 1])
+        flags = protocol.parse_ids_pb(self.query_world(2410))
+        self.assertEqual((flags[6], flags[max(map(int, self.role_config["liveness"])) + 6]), (1, 1))
+        self.replay([self.activity_request(2411)])
+        self.assertEqual(self.query_role()[8], 12000)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 5)
+        self.assertEqual(self.replay([self.activity_request(2411, [107])])[0]["opcode"], 999999)
+        self.clock.return_value += 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3641)), [1, 0])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2410))[6], 0)
+        self.replay([self.activity_request(3642), self.activity_request(2411, [107])])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 10)
+        self.clock.return_value += 86400  # 11月1日，月累计归零。
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3641)), [0, 0])
+        self.clock.return_value += 86400  # 星期一，签到周积分归零。
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 0)
+
+    def test_welfare_sign_comb_rejects_extra_duplicate_and_wrong_fields(self):
+        self.seed_welfare_account()
+        sign = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 3642))
+        guide_message = protocol.encode_pb_field(1, 0, 201)
+        for data in (b"\x08\x33\x10\x02", b"\x08\x01\x10\x01", b"\x08\x33\x10\x01\x18\x00",
+                     b"\x08\x33\x08\x33\x10\x01"):
+            body = sign + protocol.encode_pb_field(1, 2, guide_message + protocol.encode_pb_field(2, 2, data))
+            before = self.save_path.read_bytes()
+            self.assertEqual(self.replay([{"opcode": 999900, "seq": 45, "hex": body.hex()}])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), before)
+        valid = bytes.fromhex("0a0308ba1c0a0908c901120410010833")
+        for body in (valid + sign, valid + b"\x10\x00", valid.replace(sign, sign + sign)):
+            self.assertEqual(self.replay([{"opcode": 999900, "seq": 45, "hex": body.hex()}])[0]["opcode"], 999999)
+
+    def test_welfare_luxury_requires_today_confirmed_payment_and_persists_reward(self):
+        self.seed_welfare_account()
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3643)), [0, 20200, 500, 1000, 50000])
+        order = self.recharge_order(3)
+        self.assertEqual(self.replay([self.activity_request(3644)])[0]["opcode"], 999999)
+        self.replay([self.activity_request(116, [order])])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3643))[0], 1)
+        self.replay([self.activity_request(3644)])
+        self.assertEqual(self.query_role()[8], 60000)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20200], 2), 500)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3643))[0], 2)
+        self.assertEqual(self.replay([self.activity_request(3644)])[0]["opcode"], 999999)
+        self.clock.return_value += 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3643))[0], 0)
+        self.replay([self.activity_request(116, [order])])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3643))[0], 0)
+
+    def test_welfare_vip_and_period_gifts_charge_once_and_reject_locked_tiers(self):
+        self.seed_welfare_account()
+        self.replay([self.activity_request(4611, [1])])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(300))[24:26], [1, 0])
+        self.assertEqual(self.replay([self.activity_request(4611, [0, 100])])[0]["opcode"], 999999)
+        row = self.role_config["vip_welfare"]["6"]["10"]
+        before_gold = self.query_role()[9]
+        self.replay([self.activity_request(4611, [0, 10])])
+        self.assertEqual(self.query_role()[9], before_gold - int(row["discount"].strip(";").split(",")[1]))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(300))[24:26], [1, 1])
+        for opt, cost in ((1, 2000), (2, 6000)):
+            before_gold = self.query_role()[9]
+            reply = self.replay([self.activity_request(4616, [opt])])[0]
+            self.assertEqual(reply["opcode"], 4616)
+            self.assertIsNone(protocol.pb_get_varint(bytes.fromhex(reply["hex"]), 2))
+            self.assertEqual(self.query_role()[9], before_gold - cost)
+            self.assertEqual(self.replay([self.activity_request(4616, [opt])])[0]["opcode"], 999999)
+        self.clock.return_value += 2 * 86400  # 周日，月更换但周礼包仍限购。
+        status = protocol.parse_ids_pb(self.query_world(4615))
+        self.assertEqual((status[0], status[2]), (1, 0))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(300))[24:26], [0, 0])
+        self.clock.return_value += 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(4615))[0], 0)
+
+    def test_welfare_growth_order_is_distinct_from_gold_recharge_and_counts_real_accounts(self):
+        self.seed_welfare_account()
+        old_order = self.recharge_order(5)
+        body = b"\x0a\x02\x08\x05\x0a\x02\x08\x02"
+        reply = self.replay([{"opcode": 115, "seq": 100, "hex": body.hex()}])[0]
+        order = protocol.pb_get_varint(next(v for _, _, v in protocol.iter_pb_fields(bytes.fromhex(reply["hex"]))), 1)
+        self.assertNotEqual(order, old_order)
+        self.assertEqual(self.replay([self.activity_request(116, [old_order])])[0]["opcode"], 999999)
+        self.replay([self.activity_request(116, [order])])
+        self.assertEqual(self.query_role()[9], 30000)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(7091))[:3], [1, 1, 0])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(7094)), [1] + [0] * 12)
+        self.assertEqual(self.replay([self.activity_request(7095, [1])])[0]["opcode"], 999999)
+        self.replay([self.activity_request(7093, [1])])
+        self.assertEqual(self.query_role()[9], 30588)
+        self.assertEqual(self.replay([self.activity_request(7093, [1])])[0]["opcode"], 999999)
+        self.assertEqual(self.replay([self.activity_request(7093, [2])])[0]["opcode"], 999999)
+        self.assertEqual(self.replay([{"opcode": 115, "seq": 101, "hex": body.hex()}])[0]["opcode"], 999999)
+        self.replay([self.activity_request(116, [self.recharge_order(5)])])
+        self.assertEqual(self.query_role()[9], 32088)  # 购买计划没有消耗充值档位的首次翻倍。
+        saved = json.loads(self.save_path.read_text())
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        for account in range(2, 6):
+            path = store.path(account)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(saved))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(7094))[:2], [5, 1])
+        self.replay([self.activity_request(7095, [1])])
+        self.assertEqual(self.query_role()[8], 11000)
+        self.assertEqual(self.replay([self.activity_request(7095, [1])])[0]["opcode"], 999999)
+        self.assertEqual(json.loads(store.path(2).read_text())["welfare_state"]["growth_global_claimed"], [])
+        store.path(2).write_text("broken")
+        before = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(7094)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_welfare_invalid_requests_balance_overflow_and_failed_save_are_atomic(self):
+        self.seed_welfare_account()
+        before = self.save_path.read_bytes()
+        for opcode in welfare.OPCODES + (7094, 7095):
+            for body in (b"\x08", b"\x10\x00", b"\x0a\x00", b"\x08\x01" * 3):
+                reply = self.replay([{"opcode": opcode, "seq": 10, "hex": body.hex()}])
+                self.assertEqual(reply[0]["opcode"], 999999)
+                self.assertEqual(self.save_path.read_bytes(), before)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            for opcode, body in ((215, b""), (3642, b""), (4611, b"\x08\x01"), (4616, b"\x08\x01")):
+                memory = copy.deepcopy(session.save)
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        session.handle(opcode, 20, body)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, before))
+            session.save["role_state"]["gold"] = (1 << 31) - 1
+            memory = copy.deepcopy(session.save)
+            self.assertEqual(struct.unpack(">IIII", session.handle(215, 21, b"")[0][:16])[2], 999999)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, before))
+            session.save["role_state"]["gold"] = 0
+            memory = copy.deepcopy(session.save)
+            self.assertEqual(struct.unpack(">IIII", session.handle(4616, 22, b"\x08\x01")[0][:16])[2], 999999)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, before))
 
     def seed_shop_account(self):
         saved = self.seed_training_account(coin=1000000, vip=27)

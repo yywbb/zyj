@@ -104,6 +104,79 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn("if t.location == 0 then LoginScene:rememberLocalLogin() end", decrypted("assets/scripts/UILogin.so"))
         self.assertIn("LoginScene:failLocalLogin(t.msg, true)", decrypted("assets/scripts/UIErrorMessage.so"))
 
+    def test_welfare_refreshes_queries_keeps_vip_local_callback_and_net_rewards(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("福利回调行为验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.execute('''
+            cclog, printT = function() end, function() end
+            local function message()
+                return {ParseFromString = function(self, data)
+                    for k,v in pairs(data) do self[k] = v end
+                end}
+            end
+            package.preload.ids_pb = function() return {Ids=message} end
+            package.preload.somethings_pb = function() return {SomeThings=message} end
+            package.preload.params_pb = function() return {ParamS=message} end
+            package.preload.result_pb = function() return {Result=message} end
+            gamedata = {cache={role={gold=1000}, mammon={1,100}, chicken={2,2,2},
+                              continueX1={1,1}, signin2={daynum=1,status=1}, luxurySignInStatus={status=2},
+                              vipstatus={vipexchange_free=0}, timegift={}, growplanx1={status={}}}, ext={},
+                        config={mammon={['1']={gold=18}}}}
+            function gamedata:Mammon(data) for _,v in ipairs(data.ids) do table.insert(self.cache.mammon,v) end end
+            function gamedata:SomethingProcess(data)
+                self.cache.role.gold=self.cache.role.gold+(data.gold or 0)
+                return data.gold and {{num=data.gold}} or {}
+            end
+            function gamedata:updateRoleGold(delta) self.cache.role.gold=self.cache.role.gold+delta end
+            function gamedata:Vipstatus(ids) self.cache.vipstatus.vipexchange_free=ids[25] end
+        ''')
+        for name in ("GameActivityMammon", "GameEatChicken", "GameActivityReward", "GameSignIn", "GameRecharge"):
+            lua.execute(scripts[f"assets/scripts/{name}.so"])
+        lua.execute('''
+            for _,row in ipairs({{UIActivityMammonQueryCallBack,2015}, {UIActivityEatChickenQueryCallBack,2010},
+                                 {UIContinue7QueryCallBack1,214}, {UISignIn2StatusCallBack,3641},
+                                 {UILuxurySignInStatusCallBack,3643}, {UIVipStatusCallBack,300}, {UIGrowPlan2CallBack,7091}}) do
+                local remote, opcode, body = row[1]({})
+                assert(remote==1 and opcode==row[2] and body==nil)
+            end
+            NetActivityMammonQueryCallBack({rbuf={ids={1,120}}})
+            NetActivityMammonQueryCallBack({rbuf={ids={1,60}}})
+            assert(#gamedata.cache.mammon==2 and gamedata.cache.mammon[2]==60)
+            local result=NetActivityMammonCallBack({rbuf={gold=36}})
+            assert(gamedata.cache.role.gold==1036 and result.reward[1].num==54)
+            assert(gamedata.cache.mammon[1]==2)
+            gamedata.ext.TimeGiftGold=200
+            NetTimeGiftRewardCallBack({rbuf={}})
+            assert(gamedata.cache.role.gold==836)
+            gamedata.ext.isrechare=true
+            NetRechargeResultCallBack({rbuf={}})
+            assert(gamedata.ext.isrechare==false)
+            local remote, opcode, response=UIVipWelfareExtCallBack({})
+            assert(remote==0 and opcode==46111 and response.vipstatus==gamedata.cache.vipstatus)
+        ''')
+        lua.execute(scripts["assets/scripts/UIRecharge.so"])
+        lua.execute('''
+            GameScene={vipstatus={},layers={activity={module={pageTable={}}}}}
+            gameWindows={windows={buypower={show=false}}}
+            requests={}
+            UIRequest=function(t) table.insert(requests,t.type) end
+            UIVipStatus({vipstatus={vipexchange_free=1}})
+            assert(#requests==1 and requests[1]==46111)
+            requests={}
+            UIRechargefresh()
+            local found={}
+            for _,opcode in ipairs(requests) do found[opcode]=true end
+            assert(found[7091] and found[7094] and found[3643])
+        ''')
+        self.assertIn("[57] = { request = 300,", scripts["assets/scripts/Layer_activity.so"])
+        self.assertIn("desc_muyou:setVisible(false)", scripts["assets/scripts/Layer_activity_newcontinuous.so"])
+        self.assertIn('desc1,"连续登录，可获得 元宝和银币', scripts["assets/scripts/Layer_activity_newcontinuous.so"])
+        self.assertNotIn("isdouble", scripts["assets/scripts/Layer_activity_peace.so"])
+
     def test_shop_refreshes_limits_and_client_deducts_purchase_cost_once(self):
         try:
             from lupa.lua51 import LuaRuntime
@@ -436,6 +509,10 @@ class LanBuildTests(unittest.TestCase):
                     name = f"assets/config/{section}/props.json"
                     self.assertEqual(archive.namelist().count(name), 1)
                     self.assertEqual(json.loads(archive.read(name)), runtime["props"])
+                    for table in ("continue7_X1", "activity_time"):
+                        data = json.loads(archive.read(f"assets/config/{section}/{table}.json"))
+                        self.assertEqual(data, runtime[table])
+                    self.assertTrue(all("1026," not in r["reward"] for r in runtime["continue7_X1"].values()))
                     self.assertEqual(archive.read(f"assets/config/{section}/client_only.json"), b"{}")
                     with zipfile.ZipFile(config_path) as source:
                         with contextlib.redirect_stdout(io.StringIO()):

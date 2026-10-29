@@ -703,6 +703,9 @@ end
     UIRequest({type = 2090, update = true})
     UIRequest({type = 2092, update = true})
     UIRequest({type = 2099})
+    UIRequest({type = 7091, update = true})
+    UIRequest({type = 7094})
+    UIRequest({type = 3643, update = true})
 end
 ''' + code[end:]
     start = code.index("function UIMonthCard(t)\n")
@@ -713,6 +716,48 @@ end
     code = code[:start] + "end\n" + code[end:]
     patched["assets/scripts/UIRecharge.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched UIRecharge.so (local simulated payment and persisted entitlement refresh)")
+
+    # 福利查询每次取服务端日/月状态，避免跨日仍使用上一次的已领缓存。
+    callbacks = {
+        "GameActivityMammon": (("UIActivityMammonQueryCallBack", 2015),),
+        "GameEatChicken": (("UIActivityEatChickenQueryCallBack", 2010),),
+        "GameActivityReward": (("UIContinue7QueryCallBack1", 214),),
+        "GameSignIn": (("UISignIn2StatusCallBack", 3641), ("UILuxurySignInStatusCallBack", 3643)),
+        "GameRecharge": (("UIVipStatusCallBack", 300), ("UIGrowPlan2CallBack", 7091)),
+    }
+    for name, replacements in callbacks.items():
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for callback, opcode in replacements:
+            start = code.index(f"function {callback}(uireq)\n")
+            end = code.index("\nend", start) + len("\nend")
+            assert f"return 1, {opcode}, nil" in code[start:end]
+            extra = '    gamedata.ext.signinParam = uireq.param or ""\n' if opcode == 3641 else ""
+            code = code[:start] + f"function {callback}(uireq)\n{extra}    return 1, {opcode}, nil\nend" + code[end:]
+        if name == "GameActivityMammon":
+            marker = "    gamedata:Mammon(mammonData)"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    gamedata.cache.mammon = {}\n" + marker)
+        if name == "GameRecharge":
+            marker = "    local reward = gamedata:SomethingProcess(SomeThings)\n"
+            start = code.index("function NetRechargeResultCallBack(fd)\n")
+            pos = code.index(marker, start) + len(marker)
+            code = code[:pos] + "    gamedata.ext.isrechare = false\n" + code[pos:]
+        patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_activity_newcontinuous").decode("utf-8").replace("\r\n", "\n")
+    marker = "self.coveritems.desc_muyou:setVisible(true)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "self.coveritems.desc_muyou:setVisible(false)")
+    marker = "ui.setLabelString(self.coveritems.desc1,nil,1)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'ui.setLabelString(self.coveritems.desc1,"连续登录，可获得 元宝和银币 ！\\n如天数中断，需要重新连续登录。\\n奖励仅限",1)')
+    patched["assets/scripts/Layer_activity_newcontinuous.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_activity_peace").decode("utf-8").replace("\r\n", "\n")
+    marker = '..(isdouble and " ("..gameConfig.strings:string_common("ui",13)..")" or "")'
+    assert code.count(marker) == 1 and code.count("    local isdouble = ui.CheckHuodongByParam(5)\n") == 1
+    code = code.replace(marker, "").replace("    local isdouble = ui.CheckHuodongByParam(5)\n", "")
+    patched["assets/scripts/Layer_activity_peace.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("window_recruit").decode("utf-8").replace("\r\n", "\n")
     # 恢复原客户端已有的封神令不足时元宝支付分支，与本地扣费选择一致。
@@ -753,6 +798,9 @@ end
     print("  [Lua] Patched GameShop.so (refresh account purchase limits and replace full lists)")
 
     code = read_script("Layer_activity").decode("utf-8").replace("\r\n", "\n")
+    marker = "[57] = { request = 46111,"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "[57] = { request = 300,")
     old = """function activity.createPagesExt(self)
     self:createOnePage(self.presentPage+1)
     self:createOnePage(self.presentPage-1)

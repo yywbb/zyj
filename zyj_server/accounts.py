@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import player, protocol, storage
+from . import player, protocol, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -121,7 +121,7 @@ class AccountStore:
                 raise ValueError(f"账号 {account} 已在线，请先退出原设备")
             self.active[account] = {"address": str(address[0]), "connected_at": time.time()}
         try:
-            return Session(self.tables, path, self.step_counts, self.role_config)
+            return Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers)
         except Exception as error:
             self.close_session(account)
             raise ValueError(f"载入玩家状态失败: {error}") from error
@@ -129,6 +129,18 @@ class AccountStore:
     def close_session(self, account):
         with self.lock:
             self.active.pop(account, None)
+
+    def growth_buyers(self):
+        """只统计已原子落盘的本地购买账号；损坏存档不能虚增全服人数。"""
+        count = 0
+        for account in self.account_ids():
+            snapshot = self.snapshot(account)
+            if snapshot["error"]:
+                raise ValueError("账号存档损坏，无法统计成长计划人数")
+            save = snapshot["save"]
+            if save.get("has_role") and welfare.get_state(save)["growth_bought"]:
+                count += 1
+        return count
 
     def account_ids(self):
         with self.lock:

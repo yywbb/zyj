@@ -1,6 +1,6 @@
 """研究用本地模拟充值；订单确认即成功，永不调用支付渠道。"""
 
-from . import activities, recruit
+from . import activities, recruit, welfare
 from .protocol import encode_pb_field, iter_pb_fields
 
 
@@ -35,6 +35,8 @@ def get_state(save):
     for key in ("bought", "card_gifts"):
         if not isinstance(state.get(key), list) or any(type(v) is not int or v <= 0 for v in state[key]):
             raise ValueError("充值领取记录无效")
+    if type(state.setdefault("bagid", 0)) is not int or state["bagid"] not in (0, 2):
+        raise ValueError("充值商品类型无效")
     if (not isinstance(state.get("card_days"), dict) or set(state["card_days"]) != {"1", "2"}
             or any(type(v) is not int or v < 0 for v in state["card_days"].values())):
         raise ValueError("月卡领取记录无效")
@@ -54,14 +56,18 @@ def prepare(opcode, save, body, config, now):
         raise ValueError("角色尚未创建")
     if opcode == 115:
         fields = list(iter_pb_fields(body))
-        if len(fields) != 1 or fields[0][:2] != (1, 2):
-            raise ValueError("本地模拟充值仅接受一个充值档位")
+        if len(fields) not in (1, 2) or any(f[:2] != (1, 2) for f in fields):
+            raise ValueError("本地模拟充值参数无效")
         cid = one_id(fields[0][2])
+        bagid = one_id(fields[1][2]) if len(fields) == 2 else 0
+        if bagid and (bagid != 2 or cid != config["chengzhangplan_money"]["1"]["recharge_id"]
+                      or welfare.get_state(save)["growth_bought"]):
+            raise ValueError("成长计划档位无效或已购买")
         row = config["recharge"].get(str(cid))
         if not row or row["show"] != 1 or cid == 2 and state["forever"]:
             raise ValueError("充值档位无效或终身卡已购买")
-        if state["paid"] or state["cid"] != cid:
-            state.update(order=state["order"] + 1, cid=cid, paid=False)
+        if state["paid"] or state["cid"] != cid or state["bagid"] != bagid:
+            state.update(order=state["order"] + 1, cid=cid, bagid=bagid, paid=False)
         get_state(save)
         return encode_pb_field(1, 2, encode_pb_field(1, 0, state["order"]))
     if opcode == 117:
@@ -83,12 +89,20 @@ def prepare(opcode, save, body, config, now):
             return recruit.build_reward(save, [], config)
         row = config["recharge"][str(state["cid"])]
         cid = row["id"]
-        gold = row["gold"] * (max(1, row["isdouble"]) if cid not in state["bought"] else 1)
+        benefits = welfare.get_state(save)
+        if state["bagid"] == 2:
+            if benefits["growth_bought"]:
+                raise ValueError("成长计划已购买")
+            benefits["growth_bought"] = True
+        gold = 0 if state["bagid"] else row["gold"] * (max(1, row["isdouble"]) if cid not in state["bought"] else 1)
         state["paid"] = True
         if 1 <= activities.begin7day_day(save, now) <= 7:
             activities.get_state(save)["begin7day_rmb"] += int(row["rmb"])
         state["rmb"] += int(row["rmb"])
-        if cid not in state["bought"]:
+        if day != benefits["day"]:
+            raise ValueError("服务器日期回拨，请稍后重试")
+        benefits["daily_rmb"] += int(row["rmb"])
+        if not state["bagid"] and cid not in state["bought"]:
             state["bought"].append(cid)
         if cid == 1:
             state["month_until"] = max(day, state["month_until"]) + 30
@@ -98,7 +112,8 @@ def prepare(opcode, save, body, config, now):
             state["card_rmb"] += int(row["rmb"])
         save["role_state"]["vip"] = vip(state, config)
         get_state(save)
-        return recruit.build_reward(save, [(1001, gold)], config)
+        welfare.get_state(save)
+        return recruit.build_reward(save, [(1001, gold)] if gold else [], config)
     if opcode == 2091:
         cid = one_id(body)
         if (cid not in (1, 2) or state["card_days"][str(cid)] >= day

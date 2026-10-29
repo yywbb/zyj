@@ -4,12 +4,11 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 
 PAGE_OPCODES = (4810, 4813, 4814, 5010, 5015, 5017, 5020, 5022, 5030, 5039)
 TRANSACTION_OPCODES = (5031, 5040)
-# 福利页会预加载蟠桃；空成功包使客户端将缺失状态传给原生 setString。
-UNSUPPORTED_OPCODES = (2010, 2011, 4811, 4812, 5011, 5012, 5013, 5014, 5016, 5021, 5023)
+UNSUPPORTED_OPCODES = (2081, 2082, 7092, 4811, 4812, 5011, 5012, 5013, 5014, 5016, 5021, 5023)
 OPCODES = (3610, 3611, 2410, 2411, 6517, 4600, *PAGE_OPCODES, *TRANSACTION_OPCODES)
 CLAIM_OPCODES = (3611, 2411, 5040)
 BEGIN_REWARDS = (*range(80001, 80015), 80030)
-HINT_IDS = (40, *range(82, 110), 542)
+HINT_IDS = (40, *range(82, 110), 542, 30, 32, 36, 132, 245, 252, 429, 551)
 
 
 def get_state(save):
@@ -205,10 +204,14 @@ def get_reward_statuses(save, config, now):
 
 
 def get_hints(save, config, now):
+    from . import welfare
+
     statuses, task_status = get_reward_statuses(save, config, now)
     # shortcut: 其他任务、超值付费页和周宝箱待相应业务开放。
     hints = dict.fromkeys(HINT_IDS, 0)
     hints.update({40: int(task_status == 1), 84: int(statuses[80030] == 1)})
+    hints.update(welfare.get_hints(save, config, now))
+    hints[40] = int(task_status == 1 or welfare.sign_task_status(save, now) == 1)
     for pages in config["begin7day"].values():
         page = pages["1"]
         hints[82 + (page["day"] - 1) * 4] = int(any(statuses.get(page[f"task{i}"]) == 1 for i in (1, 2)))
@@ -242,6 +245,8 @@ def prepare_hints(body, save, request_body, config, now):
 
 
 def prepare_response(opcode, save, request_body, config, now):
+    from . import welfare
+
     try:
         fields = list(iter_pb_fields(request_body))
     except ValueError as e:
@@ -288,6 +293,8 @@ def prepare_response(opcode, save, request_body, config, now):
     statuses, task_status = get_reward_statuses(save, config, now)
     limit = config["liveness"]["16"]["num"]
     score = sum(config["liveness"][str(task)]["point"] for task in state["liveness_claimed"])
+    benefits = welfare.get_state(save)
+    sign_status = welfare.sign_task_status(save, now)
 
     if opcode == 3610:
         flags = [statuses.get(80000 + i, 0) for i in range(1, max(map(int, config["begin7day_task"])) - 80000 + 1)]
@@ -295,14 +302,15 @@ def prepare_response(opcode, save, request_body, config, now):
         return b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid) + encode_pb_field(2, 2, _ids(values)))
                         for mid, values in enumerate(groups))
     if opcode == 2410:
-        # shortcut: 当前仅统计已录制装备强化任务 16，其他任务/日重置待业务接入。
+        # shortcut: 仅签到任务7按日刷新；强化任务16和其他任务日重置待业务接入。
         # 协议按任务 ID 下标排列，配置存在缺号。
         size = max(map(int, config["liveness"]))
         flags, counts = [0] * size, [0] * size
         flags[15], counts[15] = task_status, min(limit, state["strengthen_count"])
+        flags[6], counts[6] = sign_status, int(sign_status > 0)
         return _ids(flags + counts) + b"".join(encode_pb_field(2, 0, 0) for _ in config["liveness_reward"])
     if opcode == 6517:
-        return _ids([score] + [0] * len(config["week_liveness_reward"]))
+        return _ids([score + benefits["sign_week_score"]] + [0] * len(config["week_liveness_reward"]))
     if not save.get("has_role"):
         raise ValueError("活动奖励未解锁或不支持")
     if opcode == 3611:
@@ -317,11 +325,16 @@ def prepare_response(opcode, save, request_body, config, now):
         reward = recruit.build_reward(save, gets, config)
         state["begin7day_claimed"].extend(ids)
         return reward
-    # shortcut: 一键领取目前仅结算任务16；接入其他活跃任务时扩展可领奖励集合。
-    if (ids and ids[0] != 116) or task_status == 0:
+    eligible = [task for task, status in ((7, sign_status), (16, task_status)) if status == 1]
+    requested = [ids[0] - 100] if ids else eligible
+    if not requested or any(task not in eligible for task in requested):
+        if (ids == [107] and sign_status == 2) or (ids == [116] and task_status == 2) or (not ids and task_status == 2):
+            raise ValueError("活动奖励已领取")
         raise ValueError("活动奖励未解锁或不支持")
-    if task_status == 2:
-        raise ValueError("活动奖励已领取")
-    reward = build_reward(save, config["liveness"]["16"]["reward"], config)
-    state["liveness_claimed"].append(16)
+    reward = build_reward(save, ";".join(config["liveness"][str(task)]["reward"] for task in requested), config)
+    if 7 in requested:
+        benefits["sign_task_claimed"] = True
+        benefits["sign_week_score"] += config["liveness"]["7"]["point"]
+    if 16 in requested:
+        state["liveness_claimed"].append(16)
     return reward

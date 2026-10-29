@@ -84,6 +84,11 @@ def load_overrides(config_path, archive):
 
 
 def apply_overrides(name, data, overrides):
+    if name == "continue7_X1":
+        for row in data.values():
+            row["reward"] = ";".join(e for e in row["reward"].split(";") if e and e.split(",")[0] != "1026") + ";"
+    if name == "activity_time":
+        data["132"]["icon"] = "activity_continuous"
     for row, changes in overrides.get(name, {}).items():
         if row not in data:
             raise ValueError(f"配置条目不存在: {name}/{row}")
@@ -107,7 +112,7 @@ def iter_config_bytes(config_path):
             if name.startswith("._"):
                 continue
             raw = archive.read(entry)
-            if name in overrides:
+            if name in overrides or name in ("continue7_X1", "activity_time"):
                 raw = json.dumps(apply_overrides(name, json.loads(raw), overrides), ensure_ascii=False).encode("utf-8")
             yield name + ".json", raw
 
