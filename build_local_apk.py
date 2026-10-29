@@ -234,14 +234,95 @@ def patch_login_scene(code):
     code = code.replace(enter, "        self:showUserInput(11)\n")
     init = "function loginScene.init(self,loginscene,isrelog)\n"
     assert code.count(init) == 1
-    code = code.replace(init, init + "    self.localLoginHandlers = false\n")
+    code = code.replace(init, init + "    self.localLoginHandlers = false\n    self.localAutoLoginOffered = false\n    self.localLoginPending = false\n")
+    select = '        self:showServerList()\n'
+    assert code.count(select) == 1
+    code = code.replace(select, '        self:showUserInput(11)\n')
+    label = '    ui.setLabelString(self.enterLayerItem.touchConstituencyLab, nil, 22)\n'
+    assert code.count(label) == 1
+    code = code.replace(label, '    ui.setLabelString(self.enterLayerItem.touchConstituencyLab, "切换账号", 22)\n')
+    marker = 'end\n\nfunction loginScene.checkOnlineTime(self,first)'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '    if t then self:offerLocalLogin() end\n' + marker)
     start = code.index("function loginScene.showUserInput(self,requestType)\n")
     end = code.index("function loginScene.egameabout(self)\n", start)
     assert 'acctest:userlogin()' in code[start:end]
-    # 复用原生登录表单与设备缩放，只记住账号；密码留在当前进程供断线重连。
-    return code[:start] + '''function loginScene.showUserInput(self,requestType)
+    # 登录状态集中在原生场景；只有 1000 认证成功才能保存下一次自动登录凭据。
+    return code[:start] + '''function loginScene.offerLocalLogin(self)
+    if self.localAutoLoginOffered then return end
+    self.localAutoLoginOffered = true
+    local defaults = CCUserDefault:sharedUserDefault()
+    local password = defaults:getStringForKey("local_password", "")
+    if not defaults:getBoolForKey("local_auto_login", false) or #password < 8 or
+            #password > 64 or password:find("[^!-~]") then
+        self:showUserInput(11)
+        return
+    end
+    self.localAutoLoginPending = true
+    runGamePrompt({msg="2秒后自动登录，可点“切换账号”取消"})
+    self.rootLayer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(2), CCCallFunc:create(function()
+        if not self.localAutoLoginPending then return end
+        self.localAutoLoginPending = false
+        self:startLocalLogin(self.SelectedServer.id, password)
+    end)))
+end
+
+function loginScene.startLocalLogin(self,account,password)
+    if self.localLoginPending then return end
+    local selected = {}
+    for key,value in pairs(gamedata.serverlist["1"] or gamedata.serverlist[1]) do
+        selected[key] = value
+    end
+    selected.id = account
+    selected.name = "账号 " .. tostring(account)
+    self.SelectedServer = selected
+    gamedata.local_account = account
+    gamedata.local_password = password
+    gamedata.local_login_failed = false
+    self.localLoginPending = true
+    local defaults = CCUserDefault:sharedUserDefault()
+    defaults:setBoolForKey("local_auto_login", false)
+    defaults:flush() -- 失败或进程中断后停在表单，成功才重新启用自动登录。
+    self:hideUserInput()
+    self:loginGame()
+    self.rootLayer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(15), CCCallFunc:create(function()
+        if self.localLoginPending then
+            self:failLocalLogin("连接失败，请检查电脑服务与局域网后重试。", false)
+        end
+    end)))
+end
+
+function loginScene.rememberLocalLogin(self)
+    if not self.localLoginPending or gamedata.local_login_failed then return end
+    self.localLoginPending = false
+    local defaults = CCUserDefault:sharedUserDefault()
+    -- shortcut: 自用局域网凭据保存在设备设置；公网版本需独立令牌与安全存储。
+    defaults:setIntegerForKey("local_account", gamedata.local_account)
+    defaults:setStringForKey("local_password", gamedata.local_password)
+    defaults:setBoolForKey("local_auto_login", true)
+    defaults:flush()
+end
+
+function loginScene.failLocalLogin(self,message,rejected)
+    if gamedata.local_login_failed then return end
+    self.localLoginPending = false
+    gamedata.local_login_failed = true
+    gamedata.local_password = nil
+    local defaults = CCUserDefault:sharedUserDefault()
+    defaults:setBoolForKey("local_auto_login", false)
+    if rejected then defaults:setStringForKey("local_password", "") end
+    defaults:flush()
+    UIRequest({type=777777}) -- 停止网络线程的自动重连，确认提示后重建登录页。
+    loading:exitGame(message, true)
+end
+
+function loginScene.showUserInput(self,requestType)
+    self.localAutoLoginPending = false
     self:hideUserInput()
     gamedata.local_password = nil
+    local defaults = CCUserDefault:sharedUserDefault()
+    defaults:setBoolForKey("local_auto_login", false)
+    defaults:flush()
     self.requestType = 11
     self.enterLayerItem.inputTitleSpr1:setVisible(false)
     self.enterLayerItem.inputTitleSpr2:setVisible(true)
@@ -262,6 +343,9 @@ def patch_login_scene(code):
     self.passwordInputBox:setInputFlag(0) -- PASSWORD；旧版全局常量未导出。
     self.passwordInputBox:registerScriptEditBoxHandler(noop) -- 通用回调会记录输入原文。
     self.passwordInputBox:setTouchPriority(-10)
+    if self.SelectedServer.id == defaults:getIntegerForKey("local_account", 1) then
+        self.passwordInputBox:setText(defaults:getStringForKey("local_password", ""))
+    end
     if self.localLoginHandlers then return end
     self.localLoginHandlers = true
     self.enterLayerItem.userconfirm:addHandleOfControlEvent(function()
@@ -277,17 +361,8 @@ def patch_login_scene(code):
             runGamePrompt({msg="密码须为 8–64 位英文字母、数字或符号，不含空格"})
             return
         end
-        local selected = {}
-        for key,value in pairs(gamedata.serverlist["1"] or gamedata.serverlist[1]) do
-            selected[key] = value
-        end
-        selected.id = account
-        selected.name = "账号 " .. tostring(account)
-        self.SelectedServer = selected
-        gamedata.local_password = password
         self.passwordInputBox:setText("")
-        self:hideUserInput()
-        self:loginGame()
+        self:startLocalLogin(account, password)
     end, CCControlEventTouchUpInside)
     self.enterLayerItem.userconcel:addHandleOfControlEvent(function()
         gamedata.local_password = nil
@@ -371,10 +446,36 @@ end"""
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if error.ids[1] == 1000 then
-        return {type = 9997, msg = "登录失败：请检查账号密码、后台启用状态及旧设备是否已退出；连续失败请一分钟后重试。"}
+        return {type = 9997, local_login_failed = true, msg = "登录失败：请检查账号密码、后台启用状态及旧设备是否已退出；连续失败请一分钟后重试。"}
     end
 ''')
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    code = read_script("UILogin").decode("utf-8").replace("\r\n", "\n")
+    marker = "function judgeSelectedServerIDValid(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata.local_login_failed then return end
+    if t.location == 0 then LoginScene:rememberLocalLogin() end
+''')
+    patched["assets/scripts/UILogin.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    code = read_script("UIErrorMessage").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UIErrorMessage7(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if t.local_login_failed then
+        LoginScene:failLocalLogin(t.msg, true)
+        return 0, nil
+    end
+''')
+    patched["assets/scripts/UIErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    code = read_script("UIPrompt").decode("utf-8").replace("\r\n", "\n")
+    for name in ("UIPromptTimeOut", "UIPromptNoSignal"):
+        marker = "function " + name + "()\n"
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + '''    if LoginScene.localLoginPending then
+        LoginScene:failLocalLogin("连接失败，请检查电脑服务与局域网后重试。", false)
+        return 0, nil
+    end
+''')
+    patched["assets/scripts/UIPrompt.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched native login form, credential handoff and login rejection handling")
 
     # 2. http_post.lua (Immediate success response without network call)
@@ -437,9 +538,6 @@ end"""
         return false
     end
     local account = assert(tonumber(params.sid), "Missing local account")
-    local defaults = CCUserDefault:sharedUserDefault()
-    defaults:setIntegerForKey("local_account", account)
-    defaults:flush()
     local data = { type = 5, uuid = "local_account_" .. tostring(account), section = 1 }
     UIResponse(data)
     return true
@@ -472,8 +570,33 @@ function http_entergame._old_entergame(self,params)
     }"""
     assert t9 in d, "t9 not found in gameserver"
     d = d.replace(t9, r9)
+    marker = b"        UIReqeustClear()\n        if loopret == 999 then\n"
+    assert d.count(marker) == 1
+    d = d.replace(marker, b"        if loopret == 999 then\n            UIReqeustClear()\n")
     patched["assets/scripts/gameserver.so"] = xxtea_encrypt(d, XXTEA_KEY)
     print("  [Lua] Patched gameserver.so (selected account, direct LAN connection)")
+
+    # 网络线程直接结束认证失败；重连清队列时不能丢掉 UI 的停止请求。
+    code = read_script("gameloop2").decode("utf-8").replace("\r\n", "\n")
+    marker = "                    UIReqeustClear()\n                    UIRequest_({ type = 1000 })"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''                    local request = uiqueue.getrequestfromui()
+                    while request do
+                        if request.type == 777777 then
+                            fd.sock:close()
+                            return 777777
+                        end
+                        request = uiqueue.getrequestfromui()
+                    end
+                    UIRequest_({ type = 1000 })''')
+    marker = "                        uiqueue.setresponsetoui(uirep)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''                        if uirep.local_login_failed then
+                            fd.sock:close()
+                            return 777777
+                        end
+''')
+    patched["assets/scripts/gameloop2.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     # 10. log.so (Unmute Lua logging)
     with zipfile.ZipFile(SRC_APK) as z:

@@ -1,4 +1,4 @@
-"""本地换将/布阵；基于已保存属性增减装备与缘分，保留原有培养差值。"""
+"""本地换将/布阵/一键装备；增减装备与缘分，保留原有培养差值。"""
 
 from fractions import Fraction
 
@@ -63,7 +63,31 @@ def change(save, opcode, body, config):
         if not 1 <= index <= min(7, maximum):
             raise ValueError("阵位不存在或尚未解锁")
 
-    if opcode == 1009:
+    if opcode == 1007:
+        fields = list(iter_pb_fields(body))
+        if len(fields) != 8 or any(n != 1 or w != 0 or not 0 <= v < (1 << 31) for n, w, v in fields):
+            raise ValueError("一键装备需要阵位、方式及六个装备编号")
+        dest, method, *items = [v for _, _, v in fields]
+        validate_slot(dest)
+        if method != 1:
+            raise ValueError("暂只支持一键装备，武魂穿戴尚未实现")
+        if pb_get_varint(slots.get(dest, b""), 2) not in generals:
+            raise ValueError("请先上阵武将再装备")
+        occupied = {pb_get_varint(v, f) for i, v in old.items() if i != dest for f in range(4, 10)}
+        occupied.update(pb_get_varint(v, f) for v in records(world, 5, 1).values() for f in range(4, 10))
+        kinds = ("weapon", "armor", "accessory", "head", "treasure", "horse")
+        for field, iid, kind in zip(range(4, 10), items, kinds):
+            if not iid:
+                continue
+            if iid not in equips:
+                raise ValueError("装备不存在或不属于当前账号")
+            if iid in occupied:
+                raise ValueError("装备已被其他阵位使用，请刷新后重试")
+            item = parse_ids_pb(equips[iid])
+            if len(item) < 3 or config["equip"].get(str(item[1]), {}).get("type") != kind:
+                raise ValueError("装备部位不匹配")
+            slots[dest] = pb_set_varint(slots[dest], field, iid)
+    elif opcode == 1009:
         fields = list(iter_pb_fields(body))
         if len(fields) != 7 or any(n != 1 or w != 0 or not 0 <= v <= 7 for n, w, v in fields):
             raise ValueError("布阵参数无效")

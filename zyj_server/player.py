@@ -505,7 +505,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if len(ids) >= 6:
             get_role_state(save, role_config).update(power=ids[1], g_power=ids[3], power_all=ids[5])
     elif opcode in (1003, 1009, 1007, 1024, 1027, 1057):
-        if opcode in (1003, 1009) and not body:
+        if opcode in (1003, 1007, 1009) and not body:
             body = formation.change(save, opcode, request_body, role_config)
         record_slot_update(save, body)
         old_protagonist = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
@@ -527,7 +527,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 save["protagonist_snapshot"] = (pb_set_field(value, 10, 2, general) if general else value).hex()
                 if general:
                     get_role_state(save, role_config)["profile"] = pb_get_varint(general, 1)
-        if opcode in (1003, 1009) and save.get("protagonist_snapshot"):
+        if opcode in (1003, 1007, 1009) and save.get("protagonist_snapshot"):
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode == 1306:
         values = {n: v for n, w, v in iter_pb_fields(body)}
@@ -634,7 +634,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
-    if responses and responses[0]["opcode"] in (1003, 1009, *training.OPCODES) and not responses[0]["hex"]:
+    if responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES) and not responses[0]["hex"]:
         state, previous = save["role_state"], get_role_state(before, role_config)
         power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
                          (state["power"] - previous["power"], state["power"], 0, state["g_power"],

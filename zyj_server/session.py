@@ -84,7 +84,7 @@ class Session:
         if opcode == 1401:
             return unavailable_response(opcode, seq, body, "本地服暂未开放此招募方式，请使用普通招募。")
 
-        if opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1009, *training.OPCODES):
+        if opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, *training.OPCODES):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:
@@ -156,9 +156,9 @@ class Session:
             return unavailable_response(opcode, seq, body, "此操作尚未实现或参数不受支持，未更改存档。")
         if not any(r["opcode"] == opcode and r["seq"] != 0 for r in responses):
             return unavailable_response(opcode, seq, body, "此操作缺少完整应答，未更改存档。")
-        if (opcode == 999900 and 1109 in get_comb_ids(body)
+        if (opcode == 999900 and any(mid in (1007, 1109) for mid in get_comb_ids(body))
                 and self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2):
-            return unavailable_response(opcode, seq, body, "教程强化录制已过期，请使用当前阵容单独强化。")
+            return unavailable_response(opcode, seq, body, "教程装备录制已过期，请使用当前阵容单独装备或强化。")
         packets = player.prepare_recorded_responses(seq, responses, self.save, body,
                                                     self.save_path, self.step_counts, self.role_config)
         return packets

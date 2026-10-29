@@ -43,7 +43,7 @@ class LanBuildTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 2)
             build.assert_not_called()
 
-    def test_client_patches_select_and_remember_account_without_loopback(self):
+    def client_scripts(self):
         sources = Path(__file__).parent / "scripts_clean"
 
         def read_reference_script(relative, folder="scripts"):
@@ -64,6 +64,10 @@ class LanBuildTests(unittest.TestCase):
             self.assertEqual(raw[length:-4], b"\0" * (len(raw) - 4 - length))
             return raw[:length].decode("utf-8")
 
+        return {path: decrypted(path) for path in patched}
+
+    def test_client_patches_select_and_remember_account_without_loopback(self):
+        decrypted = self.client_scripts().__getitem__
         login = decrypted("assets/scripts/accbyhttp/service_ui.so")
         enter = decrypted("assets/scripts/accbyhttp/http_entergame.so")
         network = decrypted("assets/scripts/gameserver.so")
@@ -76,7 +80,7 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn('recentlist = { ["1"] = selected }', login)
         self.assertIn('uuid = "local_account_" .. tostring(account), section = 1', enter)
         self.assertIn('tonumber(params.sid)', enter)
-        self.assertIn('defaults:flush()', enter)
+        self.assertNotIn('setIntegerForKey', enter)
         self.assertNotIn("local_mock_uuid_10001", enter)
         self.assertNotIn("127.0.0.1", login + network)
         self.assertIn("host = gamedata.serverlist[tonumber(gamedata.selectserver)].ip", network)
@@ -94,8 +98,214 @@ class LanBuildTests(unittest.TestCase):
         self.assertLess(validate.index("table.insert(params.params, credential)"), validate.index("if gamedata.reconnect_type then"))
         self.assertIn("error.ids[1] == 1000", errors)
         self.assertIn("type = 9997", errors)
+        self.assertIn("local_login_failed = true", errors)
         form = scene[scene.index("function loginScene.showUserInput("):scene.index("function loginScene.egameabout(")]
         self.assertNotIn("setStringForKey", form + enter)
+        self.assertIn("if t.location == 0 then LoginScene:rememberLocalLogin() end", decrypted("assets/scripts/UILogin.so"))
+        self.assertIn("LoginScene:failLocalLogin(t.msg, true)", decrypted("assets/scripts/UIErrorMessage.so"))
+
+    def test_local_login_success_failure_timeout_and_switch_with_lua51(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("Lua5.1 行为验证需本机已有 lupa.lua51；构建/打包回归不依赖它")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.globals().scene_source = scripts["assets/scripts/accbyhttp/LoginScene.so"]
+        lua.execute('''
+            function noop() end
+            print, printT, cclog, ccc3 = noop, noop, noop, noop
+            gameConfig = {strings={}}
+            local values = {}
+            defaults = {
+                getIntegerForKey=function(self,k,d) return values[k] or d end,
+                getStringForKey=function(self,k,d) return values[k] or d end,
+                getBoolForKey=function(self,k,d) if values[k]==nil then return d end; return values[k] end,
+                setIntegerForKey=function(self,k,v) values[k]=v end,
+                setStringForKey=function(self,k,v) values[k]=v end,
+                setBoolForKey=function(self,k,v) values[k]=v end,
+                flush=noop,
+            }
+            CCUserDefault = {sharedUserDefault=function() return defaults end}
+            function node()
+                local n = {text='', handlers={}}
+                function n:setText(v) self.text=v end
+                function n:getText() return self.text end
+                function n:setInputFlag(v) self.flag=v end
+                function n:registerScriptEditBoxHandler(v) self.editHandler=v end
+                function n:addHandleOfControlEvent(v) table.insert(self.handlers,v) end
+                return setmetatable(n,{__index=function() return noop end})
+            end
+            ui = {setLabelString=noop, removeInputEditBox=noop, creatInputEditBoxBylable=function()
+                local n=node(); n.editHandler=function() error('password logged') end; return n end}
+            CCSequence = {createWithTwoActions=function(self,delay,callback) return {delay=delay,callback=callback} end}
+            CCDelayTime = {create=function(self,delay) return delay end}
+            CCCallFunc = {create=function(self,callback) return callback end}
+            function UIRequest(t) table.insert(requests,t) end
+            function runGamePrompt(t) table.insert(prompts,t.msg) end
+            loading = {exitGame=function(self,msg,restart) assert(restart); failures=failures+1 end}
+            package.loaded.device = {channel='', platform='android'}
+            package.loaded.SDKfunction = {isValid=function() return false end}
+            package.loaded.logError = {}
+            function boot()
+                gamedata = {device={SCREEN_WIDTH=1080,SCREEN_HEIGHT=1920},serverlist={['1']={id=1,ip='192.168.1.20'}}}
+                requests, prompts, actions, failures, logins = {}, {}, {}, 0, 0
+                LoginScene = assert(loadstring(scene_source))()
+                LoginScene.SelectedServer = {id=defaults:getIntegerForKey('local_account',1)}
+                LoginScene.enterLayerItem=setmetatable({}, {__index=function(t,k) local n=node();rawset(t,k,n);return n end})
+                LoginScene.rootLayer={runAction=function(self,action) table.insert(actions,action) end}
+                LoginScene.loginGame=function() logins=logins+1 end
+                LoginScene.showEnter=noop
+            end
+        ''')
+        lua.execute(scripts["assets/scripts/UILogin.so"])
+        lua.execute(scripts["assets/scripts/UIErrorMessage.so"])
+        lua.execute(scripts["assets/scripts/UIPrompt.so"])
+        lua.execute('''
+            sendNetError=noop
+            boot()
+            LoginScene:offerLocalLogin()
+            assert(logins==0 and LoginScene.passwordInputBox.flag==0)
+            LoginScene.accountInputBox:setText('1000')
+            LoginScene.passwordInputBox:setText('Simple-123')
+            LoginScene.passwordInputBox.editHandler('ended',LoginScene.passwordInputBox)
+            LoginScene.enterLayerItem.userconfirm.handlers[1]()
+            assert(logins==1 and gamedata.local_account==1000 and gamedata.local_password=='Simple-123')
+            assert(defaults:getStringForKey('local_password','')=='', 'saved before authentication')
+            judgeSelectedServerIDValid({location=0})
+            assert(defaults:getIntegerForKey('local_account',1)==1000)
+            assert(defaults:getStringForKey('local_password','')=='Simple-123')
+            assert(defaults:getBoolForKey('local_auto_login',false))
+            actions[1].callback()
+            assert(failures==0, 'successful login timed out')
+
+            boot()
+            LoginScene:offerLocalLogin()
+            LoginScene:offerLocalLogin()
+            assert(#actions==1 and actions[1].delay==2)
+            actions[1].callback()
+            assert(logins==1 and gamedata.local_account==1000 and gamedata.local_password=='Simple-123')
+            assert(not defaults:getBoolForKey('local_auto_login',true))
+            UIPromptTimeOut()
+            assert(failures==1 and requests[1].type==777777)
+            assert(defaults:getStringForKey('local_password','')=='Simple-123')
+            judgeSelectedServerIDValid({location=0})
+            assert(not defaults:getBoolForKey('local_auto_login',true), 'late success reenabled auto-login')
+            actions[2].callback()
+            assert(failures==1)
+            boot()
+            LoginScene:offerLocalLogin()
+            assert(logins==0 and #actions==0 and LoginScene.passwordInputBox:getText()=='Simple-123')
+            LoginScene.enterLayerItem.userconfirm.handlers[1]()
+            judgeSelectedServerIDValid({location=0})
+
+            boot()
+            LoginScene:offerLocalLogin()
+            LoginScene:showUserInput(11)
+            actions[1].callback()
+            assert(logins==0, 'switch account did not cancel automatic login')
+            LoginScene.accountInputBox:setText('2')
+            LoginScene.passwordInputBox:setText('Wrong-123')
+            LoginScene.enterLayerItem.userconfirm.handlers[1]()
+            UIErrorMessage7({local_login_failed=true,msg='rejected'})
+            assert(failures==1 and not defaults:getBoolForKey('local_auto_login',true))
+            assert(defaults:getStringForKey('local_password','')=='')
+            assert(defaults:getIntegerForKey('local_account',1)==1000, 'rejected account replaced last success')
+            boot()
+            LoginScene:offerLocalLogin()
+            assert(logins==0 and #actions==0 and LoginScene.passwordInputBox:getText()=='')
+            LoginScene.accountInputBox:setText('2')
+            LoginScene.passwordInputBox:setText('Simple-456')
+            LoginScene.enterLayerItem.userconfirm.handlers[1]()
+            judgeSelectedServerIDValid({location=0})
+            assert(defaults:getIntegerForKey('local_account',1)==2)
+            assert(defaults:getStringForKey('local_password','')=='Simple-456')
+
+            boot()
+            LoginScene:offerLocalLogin()
+            actions[1].callback()
+            actions[2].callback()
+            assert(failures==1 and not defaults:getBoolForKey('local_auto_login',true))
+            assert(defaults:getStringForKey('local_password','')=='Simple-456')
+        ''')
+
+    def test_login_network_rejection_and_queued_cancel_stop_reconnecting(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("网络循环行为验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        loop = scripts["assets/scripts/gameloop2.so"]
+        server = scripts["assets/scripts/gameserver.so"]
+        server = server[server.index("function ProcessFromGameServer()"):server.index("local t1 = socket.gettime()")]
+        for case in ("rejected", "cancel-during-disconnect", "unreachable", "reconnect"):
+            with self.subTest(case=case):
+                lua = LuaRuntime()
+                lua.globals().case = case
+                lua.execute('''
+                    function noop() end
+                    print, cclog, cctrace = noop, noop, noop
+                    queue, replies, connects, sends, reads, closes = {}, {}, 0, 0, 0, 0
+                    uiqueue = {
+                        getrequestfromui=function() return table.remove(queue,1) end,
+                        pushrequesttoclient=function(t) table.insert(queue,t) end,
+                        setresponsetoui=function(t) table.insert(replies,t) end,
+                        autorelease=noop,
+                    }
+                    package.loaded.uiqueue, package.loaded.network = uiqueue, {}
+                    package.loaded.error_pb, package.loaded.ids_pb, package.loaded.params_pb = {}, {}, {}
+                    package.loaded.logError = {}
+                    function initPb() return {ids={1000,0}} end
+                    function UIReqeustClear() queue={} end
+                    UIRequest_ = uiqueue.pushrequesttoclient
+                    function checkNetSatus() return true end
+                    function MakeSer() return 1 end
+                    function PackHeader() return '' end
+                    function UnPackHeader() return 1,case=='reconnect' and 1000 or 999999,1 end
+                    socket = {sleep=function() assert(connects<=2,'kept reconnecting') end}
+                    local sock = {close=function() closes=closes+1 end}
+                    fd = {sock={close=noop}}
+                    function ConnectToServer()
+                        connects=connects+1
+                        assert(connects<=2,'kept reconnecting')
+                        if case=='unreachable' then return nil end
+                        return {sock=sock}
+                    end
+                    function TCPSelect1conn(fd)
+                        reads=reads+1
+                        if case=='cancel-during-disconnect' then
+                            queue={{type=1001},{type=777777}}
+                            return nil
+                        end
+                        if case=='reconnect' then
+                            if reads==3 then queue={{type=1001}}; return nil end
+                            if reads==5 then queue={{type=777777}} end
+                        elseif reads>2 then return nil end
+                        fd.wbuf=nil; fd.rlen=0; fd.rbuf='response'
+                        return true
+                    end
+                    gamedata={serverlist={[1]={ip='192.168.1.20',port=14600}},selectserver=1}
+                    game_ui_callback = {
+                        [1000]=function() sends=sends+1; return 1,1000,'login' end,
+                        [777777]=function() return 777777 end,
+                    }
+                    game_net_ext_callback = {}
+                    queue={{type=case=='unreachable' and 777777 or 1000}}
+                ''')
+                lua.execute(scripts["assets/common_lua/GameErrorMessage.so"])
+                lua.execute("game_net_callback = {[999999]=NetErrorMessageCallback9, [1000]=function() return {type=1000,location=0} end}")
+                lua.execute(loop)
+                lua.execute(server)
+                lua.execute('''
+                    assert(ProcessFromGameServer()==777777)
+                    assert(sends==(case=='unreachable' and 0 or case=='reconnect' and 2 or 1))
+                    if case=='rejected' then
+                        assert(connects==1 and #replies==1 and replies[1].local_login_failed)
+                        assert(closes==1)
+                    elseif case=='reconnect' then
+                        assert(connects==2 and #replies==2)
+                    end
+                ''')
 
     def test_find_tool_supports_native_and_windows_sdk_names(self):
         for name, filename in (("zipalign", "zipalign"), ("zipalign", "zipalign.exe"),

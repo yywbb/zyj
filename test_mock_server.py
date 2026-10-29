@@ -1838,6 +1838,99 @@ class ReplayRoutingTests(unittest.TestCase):
         body = protocol.encode_pb_field(1, 0, sid) + protocol.encode_pb_field(3, 0, iid)
         return {"opcode": 1003, "seq": 20000, "hex": body.hex()}
 
+    def test_quick_equip_uses_owned_inventory_and_survives_reconnect(self):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        player.apply_reward(saved, activities.build_reward(saved, "22204,1;", self.role_config), self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        world = self.query_world(1002)
+        inventory = self.entity_records(world, 2, 1)
+        armor = max(inventory)
+        before = self.entity_records(world, 1, 2)[7060]
+        request = self.activity_request(1007, [2, 1, 10719, armor, 10741, 10742, 0, 0])
+        replies = self.replay([request, request], chunk_size=7)
+        self.assertEqual([r["opcode"] for r in replies], [1007, 205, 1007, 205])
+        self.assertEqual(replies[:2], replies[2:])
+        response = bytes.fromhex(replies[0]["hex"])
+        slot = self.entity_records(response, 4, 1)[2]
+        self.assertEqual([protocol.pb_get_varint(slot, f) or 0 for f in range(4, 10)],
+                         [10719, armor, 10741, 10742, 0, 0])
+        after = self.entity_records(response, 1, 2)[7060]
+        self.assertEqual(protocol.pb_get_varint(after, 6), protocol.pb_get_varint(before, 6) + 240 + 130)
+        self.assertEqual(protocol.pb_get_varint(after, 7), protocol.pb_get_varint(before, 7) + 240)
+        self.assertEqual(protocol.pb_get_varint(after, 8), protocol.pb_get_varint(before, 8) + 1000)
+        world = self.query_world(1002)
+        self.assertEqual(self.entity_records(world, 4, 1)[2], slot)
+        self.assertEqual(self.entity_records(world, 1, 2)[7060], after)
+        self.assertEqual(self.entity_records(world, 2, 1), inventory)
+        self.assertEqual(json.loads(self.save_path.read_text())["role_state"]["coin"], saved["role_state"]["coin"])
+        self.replay([request])
+        self.assertEqual(self.entity_records(self.query_world(1002), 1, 2)[7060], after)
+
+    def test_quick_equip_replacement_preserves_training_and_protagonist(self):
+        saved = self.seed_training_account()
+        player.apply_reward(saved, activities.build_reward(saved, "22204,1;", self.role_config), self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        world = self.query_world(1002)
+        inventory = self.entity_records(world, 2, 1)
+        previous = self.entity_records(world, 1, 2)[7059]
+        old_armor = protocol.pb_get_varint(self.entity_records(world, 4, 1)[1], 5)
+        armor = max(inventory)
+        self.replay([self.activity_request(1007, [1, 1, 0, armor, 0, 0, 0, 0])])
+        current = self.entity_records(self.query_world(1002), 1, 2)[7059]
+        self.assertNotEqual(current, previous)
+        snapshot = bytes.fromhex(json.loads(self.save_path.read_text())["protagonist_snapshot"])
+        self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(snapshot) if n == 10), current)
+        self.replay([self.activity_request(1007, [1, 1, 0, old_armor, 0, 0, 0, 0])])
+        restored = self.entity_records(self.query_world(1002), 1, 2)[7059]
+        self.assertEqual(dict((n, v) for n, w, v in protocol.iter_pb_fields(restored)),
+                         dict((n, v) for n, w, v in protocol.iter_pb_fields(previous)))
+        final = json.loads(self.save_path.read_text())
+        self.assertEqual(final["role_state"]["power"], saved["role_state"]["power"])
+        self.assertEqual(self.entity_records(self.query_world(1002), 2, 1), inventory)
+
+    def test_quick_equip_invalid_batch_and_failed_save_are_atomic(self):
+        self.complete_tutorial()
+        valid = [2, 1, 10719, 10740, 10741, 10742, 0, 0]
+        cases = [[], valid[:-1], valid + [0], [2, 2] + valid[2:],
+                 [4, 1] + valid[2:], [0, 1] + valid[2:],
+                 [2, 1, 987654] + valid[3:], [2, 1, 10726] + valid[3:],
+                 [2, 1, 10719, 10719, 10741, 10742, 0, 0],
+                 [2, 1, 10719, 10740, 10741, 10742, 10744, 0]]
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            bodies = [bytes.fromhex(self.activity_request(1007, ids)["hex"]) for ids in cases]
+            bodies += [b"\x08", b"\x0a\x01\x02", bytes.fromhex(self.activity_request(1007, valid)["hex"]) + b"\x10\x01"]
+            for body in bodies:
+                with self.subTest(body=body.hex()):
+                    packet = session.handle(1007, 20000, body)[0]
+                    self.assertEqual(struct.unpack(">IIII", packet[:16])[2], 999999)
+                    self.assertEqual(session.save, memory)
+                    self.assertEqual(self.save_path.read_bytes(), disk)
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    session.handle(1007, 20001, bytes.fromhex(self.activity_request(1007, valid)["hex"]))
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_quick_equip_rejects_advanced_items_and_obsolete_tutorial(self):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        item = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 2, 1)[10719]
+        ids = protocol.parse_ids_pb(item)
+        ids[3] = 1
+        advanced = b"".join(protocol.encode_pb_field(1, 0, v) for v in ids)
+        player.record_slot_update(saved, protocol.encode_pb_field(2, 2, advanced))
+        self.save_path.write_text(json.dumps(saved))
+        before = self.save_path.read_bytes()
+        reply = self.replay([self.activity_request(1007, [2, 1, 10719, 0, 0, 0, 0, 0])])
+        self.assert_unavailable_response(reply, 1007, 20000, "进阶")
+        for request in self.requests:
+            if request["opcode"] == 999900 and 1007 in protocol.get_comb_ids(bytes.fromhex(request["hex"])):
+                self.assert_unavailable_response(self.replay([request]), 999900, request["seq"], "录制已过期")
+        self.assertEqual(self.save_path.read_bytes(), before)
+
     def test_formation_replacement_inherits_equipment_and_is_reversible(self):
         self.complete_tutorial()
         saved = json.loads(self.save_path.read_text())
