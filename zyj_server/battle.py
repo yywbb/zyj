@@ -117,11 +117,13 @@ def damage(attacker, defender, config, skill_id=None, critical=False, *, multipl
     return min(defender["hp"], max(0, total + flat))
 
 
-def _gain_experience(level, experience, gained, table, field):
+def _gain_experience(level, experience, gained, table, field, maximum=None):
     if any(type(v) is not int or v < 0 for v in (level, experience, gained)) or level < 1:
         raise ValueError("经验参数无效")
     experience += gained
     while True:
+        if maximum is not None and level >= maximum:
+            return level, experience
         row = table.get(str(level))
         if not row or row[field] <= 0:
             raise ValueError("经验等级上限规则尚未核实")
@@ -144,9 +146,9 @@ def victory_role_reward(state, point, old_star, star, config):
     return {"gained": gained, "level": level, "exp": experience, "coin": coin, "gold": gold}
 
 
-def general_experience(unit, gained, config):
+def general_experience(unit, gained, config, maximum=None):
     quality = config["general"][str(unit["cid"])]["quality"]
-    level, experience = _gain_experience(unit["level"], unit["exp"], gained, config["general_exp"], f"{quality}exp")
+    level, experience = _gain_experience(unit["level"], unit["exp"], gained, config["general_exp"], f"{quality}exp", maximum)
     return level, experience, level - unit["level"]
 
 
@@ -405,8 +407,8 @@ def simulate(attack, defense, config, seed):
     return report
 
 
-def grown_general(unit, gained, config):
-    level, experience, up = general_experience(unit, gained, config)
+def grown_general(unit, gained, config, maximum=None):
+    level, experience, up = general_experience(unit, gained, config, maximum)
     values = {3: level, 5: experience}
     row = config["general"][str(unit["cid"])]
     deltas = {}
@@ -416,7 +418,7 @@ def grown_general(unit, gained, config):
         values[GENERAL_FIELDS[name]] = unit[name] + delta
         deltas[name] = delta
     # 自研战力仅用于显示：保留旧基值，新增成长按四围增量计分，不参与胜负。
-    power = deltas["atk"] + deltas["def"] + deltas["hp"] // 10 + deltas["speed"]
+    power = deltas["atk"] + deltas["def"] + values[8] // 10 - unit["hp"] // 10 + deltas["speed"]
     if any(not 0 <= value < (1 << 31) for value in values.values()):
         raise ValueError("武将升级数值超出范围")
     return values, power, up
