@@ -16,6 +16,7 @@ import threading
 
 from zyj_server import accounts, configuration, guide, player, protocol, replay
 from zyj_server.admin.http import start_admin
+from zyj_server.diagnostics import DiagnosticLog
 
 print_flush = functools.partial(print, flush=True)
 
@@ -27,15 +28,19 @@ CONFIG_ZIP = os.path.join(BASE_DIR, "configs_sec5.zip")
 MAX_FRAME_SIZE = 1024 * 1024
 
 
-def handle_client(conn, addr, account_store):
+def handle_client(conn, addr, account_store, diagnostic=None):
     print_flush(f"\n[+] 新客户端连入: {addr}")
     account = None
     session = None
     recv_buf = bytearray()
+    opcode = seq = None
+    body, packets, phase = b"", [], "receive"
 
     try:
         conn.settimeout(30)
         while True:
+            opcode = seq = None
+            body, packets, phase = b"", [], "receive"
             data = conn.recv(4096)
             if not data:
                 print_flush(f"[-] 客户端断开连接: {addr}")
@@ -43,6 +48,7 @@ def handle_client(conn, addr, account_store):
             recv_buf.extend(data)
 
             while len(recv_buf) >= 16:
+                body, packets, phase = b"", [], "receive"
                 magic, plen, opcode, seq = struct.unpack(">IIII", recv_buf[:16])
                 if magic != 0x0000ee1c:
                     idx = recv_buf.find(b"\x00\x00\xee\x1c")
@@ -62,6 +68,7 @@ def handle_client(conn, addr, account_store):
                 body = bytes(recv_buf[16:total_len])
                 del recv_buf[:total_len]
                 if opcode == 1000:
+                    phase = "login"
                     try:
                         requested_account, password = accounts.parse_login_credentials(body)
                         if account is not None and requested_account != account:
@@ -75,19 +82,27 @@ def handle_client(conn, addr, account_store):
                             account_store.authenticate(account, password)
                     except ValueError:
                         error = protocol.encode_pb_field(1, 0, 1000) + protocol.encode_pb_field(1, 0, 0)
-                        conn.sendall(protocol.pack_frame(999999, seq, error))
+                        packets = [protocol.pack_frame(999999, seq, error)]
+                        conn.sendall(packets[0])
                         raise
                     conn.sendall(protocol.pack_frame(1000, seq, b"\x08\x00\x10\x00\x18\x00"))
                     continue
 
                 if session is None:
                     raise ValueError("请先发送登录请求，未登录连接不能访问存档")
-                for packet in session.handle(opcode, seq, body):
+                phase = "handle"
+                packets = session.handle(opcode, seq, body)
+                phase = "send"
+                for packet in packets:
                     conn.sendall(packet)
                     _, length, resp_op, send_seq = struct.unpack(">IIII", packet[:16])
                     print_flush(f"  └── [S->C] Opcode: {resp_op:6d}, Seq: {send_seq:3d}, Len: {length:4d} B")
+                if diagnostic is not None:
+                    diagnostic.record(account, addr, opcode, seq, body, packets)
 
     except Exception as e:
+        if diagnostic is not None:
+            diagnostic.record(account, addr, opcode, seq, body, packets, error=e, phase=phase)
         print_flush(f"[!] 连接异常: {e}")
     finally:
         try:
@@ -117,10 +132,15 @@ def main(argv=None):
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     admin = None
+    diagnostic = None
     try:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("0.0.0.0", PORT))
         server.listen(5)
+        try:
+            diagnostic = DiagnosticLog(os.path.join(os.path.dirname(SAVE_PATH), "logs", "diagnostics.log"))
+        except OSError as error:
+            print_flush(f"[!] 无法启用诊断日志: {error}")
 
         # 先占用监听端口，避免另一个服务端仍在线时重置其存档。
         if (args.reset or args.reset_guide) and account_store.path(args.account).exists():
@@ -133,6 +153,8 @@ def main(argv=None):
         print_flush(f"  《作妖记》局域网多账号模拟服已启动（无需 ADB）")
         print_flush(f"  监听地址: 0.0.0.0:{PORT}")
         print_flush(f"  本机管理后台: http://127.0.0.1:{admin.server_port}")
+        if diagnostic is not None:
+            print_flush(f"  空回复/错误诊断: {diagnostic.baseFilename}")
         print_flush(f"  手机/模拟器直连电脑的局域网 IP:{PORT}；账号 1 沿用 {SAVE_PATH}")
         print_flush(f"  请先在后台为账号绑定密码；仅用于可信局域网，禁止直接暴露公网")
         print_flush(f"=======================================================\n")
@@ -141,7 +163,7 @@ def main(argv=None):
             conn, addr = server.accept()
             # shortcut: 断网旧会话等待 TCP 断开释放；即时跨设备接管需另做会话交接。
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            t = threading.Thread(target=handle_client, args=(conn, addr, account_store), daemon=True)
+            t = threading.Thread(target=handle_client, args=(conn, addr, account_store, diagnostic), daemon=True)
             t.start()
     except KeyboardInterrupt:
         print_flush("\n[*] 服务端已停止")
@@ -150,6 +172,8 @@ def main(argv=None):
         if admin is not None:
             admin.shutdown()
             admin.server_close()
+        if diagnostic is not None:
+            diagnostic.close()
 
 
 if __name__ == "__main__":

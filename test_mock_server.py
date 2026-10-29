@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import copy
 import io
 import json
@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, formation, guide, player, protocol, recharge, recruit, replay, training
+from zyj_server import accounts, activities, battle, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training
 from zyj_server.session import Session
 
 
@@ -3352,6 +3352,8 @@ class LanAccountTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.save_path = Path(temp.name) / "role_save.json"
         self.store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        self.diagnostic = diagnostics.DiagnosticLog(Path(temp.name) / "logs" / "diagnostics.log")
+        self.addCleanup(self.diagnostic.close)
         for context in (patch.object(accounts, "PASSWORD_ITERATIONS", 1),
                         patch.object(server, "SAVE_PATH", str(self.save_path)),
                         patch.object(server, "start_admin"),
@@ -3364,7 +3366,7 @@ class LanAccountTests(unittest.TestCase):
 
     def run_client(self, conn, addr=("same-lan-ip", 1)):
         self.store.tables = self.tables
-        server.handle_client(conn, addr, self.store)
+        server.handle_client(conn, addr, self.store, self.diagnostic)
 
     def replay(self, requests, chunk_size=4096, account=1):
         conn = ReplayConnection(requests, chunk_size, account=account)
@@ -3441,6 +3443,129 @@ class LanAccountTests(unittest.TestCase):
             self.assertNotIn(request["hex"], log.getvalue())
             self.assertEqual(self.store.active, {})
             self.assertEqual(self.save_path.read_bytes(), before)
+        text = Path(self.diagnostic.baseFilename).read_text()
+        self.assertNotIn(LOGIN_PASSWORD, text)
+        self.assertNotIn("wrong-password", text)
+        self.assertNotIn("wrong-password".encode().hex(), text)
+        entries = [json.loads(line) for line in text.splitlines()]
+        self.assertEqual(len(entries), 3)
+        for entry in entries:
+            self.assertEqual((entry["event"], entry["phase"]), ("exception", "login"))
+            self.assertTrue(entry["request"]["redacted"])
+            self.assertNotIn("hex", entry["request"])
+            self.assertEqual(entry["responses"][0]["ids"], [1000, 0])
+
+    def test_diagnostic_records_activity_rejections_without_changing_save(self):
+        self.replay([{"opcode": 201, "seq": 1, "hex": "08011003"}])
+        before = self.save_path.read_bytes()
+        requests = [{"opcode": op, "seq": i + 20, "hex": ""}
+                    for i, op in enumerate((8077, 3680, 3682, 5034, 5000))]
+        requests.append({"opcode": 4601, "seq": 25, "hex": "080f0801"})
+        responses = self.replay(requests, chunk_size=7)
+        entries = [json.loads(line) for line in Path(self.diagnostic.baseFilename).read_text().splitlines()]
+        self.assertEqual(len(entries), len(requests))
+        self.assertEqual(len(responses), len(requests) * 2)
+        for request, entry in zip(requests, entries):
+            self.assertEqual((entry["event"], entry["level"]), ("error_response", "WARNING"))
+            self.assertEqual((entry["account"], entry["peer"]), (1, ["same-lan-ip", 1]))
+            for key in ("opcode", "seq", "hex"):
+                self.assertEqual(entry["request"][key], request[key])
+            self.assertIn("尚未实现", entry["reason"])
+            self.assertEqual(entry["responses"][0]["ids"], [request["opcode"], 0])
+        self.assertEqual(entries[-1]["request"]["ids"], [15, 1])
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_diagnostic_distinguishes_empty_replies_no_reply_and_heartbeat(self):
+        self.replay([{"opcode": op, "seq": i + 1, "hex": ""}
+                     for i, op in enumerate((200, 4813, 999904, 999905))])
+        comb = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 4814)
+                                         + protocol.encode_pb_field(2, 2, b""))
+        request = {"opcode": 999900, "seq": 5, "hex": comb.hex()}
+        with patch.object(Session, "handle", return_value=[protocol.pack_frame(999900, 5, comb)]):
+            self.replay([request])
+        with patch.object(Session, "handle", return_value=[]):
+            self.replay([dict(request, seq=6)])
+        entries = [json.loads(line) for line in Path(self.diagnostic.baseFilename).read_text().splitlines()]
+        self.assertEqual([e["request"]["seq"] for e in entries], [1, 2, 5, 6])
+        self.assertEqual([(e["event"], e["level"]) for e in entries],
+                         [("empty_response", "INFO")] * 3 + [("no_response", "WARNING")])
+        self.assertEqual(entries[2]["empty"], [{"opcode": 4814, "seq": 5, "length": 0, "parent_opcode": 999900}])
+        self.assertEqual(entries[2]["request"]["messages"][0]["opcode"], 4814)
+
+    def test_diagnostic_records_parse_save_and_send_failures(self):
+        self.replay([{"opcode": 201, "seq": 1, "hex": "08011003"}])
+        before = self.save_path.read_bytes()
+        malformed = ReplayConnection([{"opcode": 201, "seq": 2, "hex": "ff"}], 7)
+        self.run_client(malformed)
+        failed_save = ReplayConnection([{"opcode": 201, "seq": 3, "hex": "08011004"}], 7)
+        with patch.object(player, "save_role", return_value=False):
+            self.run_client(failed_save)
+        failed_send = ReplayConnection([{"opcode": 200, "seq": 4, "hex": ""}], 7)
+        sendall = failed_send.sendall
+        def send(packet):
+            if struct.unpack(">IIII", packet[:16])[2] == 200:
+                raise OSError("test send failed")
+            sendall(packet)
+        with patch.object(failed_send, "sendall", side_effect=send):
+            self.run_client(failed_send)
+        entries = [json.loads(line) for line in Path(self.diagnostic.baseFilename).read_text().splitlines()]
+        self.assertEqual([e["phase"] for e in entries], ["handle", "handle", "send"])
+        self.assertEqual([e["request"]["seq"] for e in entries], [2, 3, 4])
+        self.assertIn("引导进度保存失败", entries[1]["reason"])
+        self.assertIn("test send failed", entries[2]["traceback"])
+        for conn in (malformed, failed_save, failed_send):
+            self.assertTrue(conn.closed)
+            self.assertEqual(conn.responses, [])
+        self.assertEqual(self.store.active, {})
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_diagnostic_redacts_relogin_and_embedded_credentials(self):
+        secret = "diagnostic-secret"
+        conn = ReplayConnection([login_request(1, 1), login_request(1, 2, secret)], 7, login=False)
+        self.run_client(conn)
+        payload = bytes.fromhex(login_request(1, 3, secret)["hex"])
+        login = protocol.encode_pb_field(1, 0, 1000) + protocol.encode_pb_field(2, 2, payload)
+        for raw in (login, login + protocol.encode_pb_field(1, 0, 101), b"\xff" + payload):
+            comb = protocol.encode_pb_field(1, 2, raw)
+            self.diagnostic.record(1, ("test", 1), 999900, 3, comb)
+        self.diagnostic.record(None, ("test", 1), 101, 4, payload)
+        text = Path(self.diagnostic.baseFilename).read_text()
+        self.assertNotIn(secret, text)
+        self.assertNotIn(secret.encode().hex(), text)
+        for line in text.splitlines():
+            request = json.loads(line)["request"]
+            self.assertTrue(request["redacted"])
+            self.assertNotIn("hex", request)
+
+    def test_diagnostic_rotation_failure_does_not_interrupt_replies_or_saves(self):
+        request = {"opcode": 5000, "seq": 1, "hex": ""}
+        following = {"opcode": 201, "seq": 2, "hex": "08011003"}
+        self.diagnostic.maxBytes = 1
+        with patch.object(self.diagnostic, "doRollover", side_effect=OSError("disk full")), \
+                redirect_stderr(io.StringIO()) as warning:
+            replies = self.replay([request, dict(request, seq=3), following])
+        self.assertEqual(warning.getvalue().count("诊断日志写入失败"), 1)
+        self.assertEqual([r["opcode"] for r in replies], [999999, 1999, 999999, 1999, 201])
+        self.assertEqual(json.loads(self.save_path.read_text())["guide"]["sections"]["1"]["step"], 3)
+        self.replay([request])
+        self.assertEqual(json.loads(Path(self.diagnostic.baseFilename).read_text())["request"]["opcode"], 5000)
+
+    def test_diagnostic_bounds_large_payloads(self):
+        body = b"\x08\x01" * (diagnostics.PAYLOAD_LIMIT + 1)
+        self.diagnostic.record(1, ("test", 1), 999123, 1, body)
+        entry = json.loads(Path(self.diagnostic.baseFilename).read_text())
+        self.assertEqual(entry["request"]["length"], len(body))
+        self.assertTrue(entry["request"]["truncated"])
+        self.assertEqual(len(entry["request"]["hex"]), diagnostics.PAYLOAD_LIMIT * 2)
+
+    def test_diagnostic_keeps_malformed_error_replies_for_debugging(self):
+        for opcode in (1999, 999900):
+            self.diagnostic.record(1, ("test", 1), 5000, 1, b"", [protocol.pack_frame(opcode, 1, b"\xff")])
+        entries = [json.loads(line) for line in Path(self.diagnostic.baseFilename).read_text().splitlines()]
+        self.assertEqual(len(entries), 2)
+        for entry in entries:
+            self.assertEqual(entry["event"], "invalid_response")
+            self.assertTrue(entry["parse_errors"])
 
     def test_repeated_login_still_requires_the_password(self):
         conn = ReplayConnection([login_request(1, 1), login_request(1, 2, "wrong-password")], 7, login=False)
@@ -3656,6 +3781,7 @@ class EntryPointTests(unittest.TestCase):
                 admin_factory.return_value.shutdown.assert_called_once_with()
                 admin_factory.return_value.server_close.assert_called_once_with()
                 options["target"](*options["args"])
+                self.assertIsNone(options["args"][3].stream)
             self.assertFalse(save_path.exists())
         self.assertTrue(conn.closed)
         self.assertEqual(conn.responses, [{"opcode": 200, "seq": 1, "hex": ""}])
