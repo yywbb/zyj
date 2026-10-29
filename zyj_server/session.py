@@ -4,7 +4,7 @@ import copy
 import functools
 import time
 
-from . import activities, fashion, guide, online_rewards, player, recharge, recruit, shop, training, welfare
+from . import activities, development, fashion, guide, online_rewards, player, recharge, recruit, shop, training, welfare
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, pack_frame
 from .replay import Replay, normalize_comb_request
 
@@ -112,19 +112,28 @@ class Session:
             return packets
 
         sign_comb = False
+        break_comb = False
         if opcode == 999900:
             # 仅开放原生签到引导的完整二消息模板；仍保留顺序、未知字段和重复字段校验。
             templates = [encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + empty)
                          + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x33\x10\x01"))
                          for empty in (b"", encode_pb_field(2, 2, b""))]
             sign_comb = normalize_comb_request(body) in templates
+            messages = get_comb_messages(body)
+            if [mid for mid, _ in messages] == [1017, 201]:
+                values = development.ids(messages[0][1])
+                if len(values) in (1, 2) and (len(values) == 1 or values[1] == 0):
+                    expected = (encode_pb_field(1, 2, encode_pb_field(1, 0, 1017) + encode_pb_field(2, 2, messages[0][1]))
+                                + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x05\x10\x04")))
+                    break_comb = normalize_comb_request(body) == expected
 
         fixed_box = False
         if opcode == 1201:
             values = player.parse_prop_use(body)
             fixed_box = shop.fixed_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+                                  *development.MUTATIONS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
@@ -140,6 +149,9 @@ class Session:
                 else:
                     reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + encode_pb_field(2, 2, b""))
                              + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01"))) if sign_comb else b""
+                    if break_comb:
+                        reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 1017) + encode_pb_field(2, 2, b""))
+                                 + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
                     packets = player.prepare_recorded_responses(
                         seq, [{"opcode": opcode, "seq": seq, "hex": reply.hex()}], working, body,
                         self.save_path, self.step_counts, self.role_config, self.connected_at)
@@ -152,7 +164,7 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (300, 1304, 1402, 2037, 2411, 3611, 7110, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (300, 1304, 1402, 2037, 2411, 3611, 7110, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES):
             working = copy.deepcopy(self.save)
             try:

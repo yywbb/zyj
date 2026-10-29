@@ -407,14 +407,21 @@ def simulate(attack, defense, config, seed):
     return report
 
 
+def general_base(row, name, level, advance, config):
+    value = Fraction(str(row[name])) + Fraction(str(row.get(f"{name}-grow", 0))) * (level - 1)
+    if row.get("init_cid") and advance and name in ("atk", "def", "hp"):
+        value *= 1 + Fraction(str(config["general_awake"][str(advance)]["promote"])) / 100
+    return value
+
+
 def grown_general(unit, gained, config, maximum=None):
     level, experience, up = general_experience(unit, gained, config, maximum)
     values = {3: level, 5: experience}
     row = config["general"][str(unit["cid"])]
     deltas = {}
     for name in ("atk", "def", "hp", "speed"):
-        growth = Fraction(str(row[f"{name}-grow"]))
-        delta = int(growth * (level - 1)) - int(growth * (unit["level"] - 1))
+        delta = (int(general_base(row, name, level, unit.get("advance", 0), config))
+                 - int(general_base(row, name, unit["level"], unit.get("advance", 0), config)))
         values[GENERAL_FIELDS[name]] = unit[name] + delta
         deltas[name] = delta
     # 自研战力仅用于显示：保留旧基值，新增成长按四围增量计分，不参与胜负。

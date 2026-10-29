@@ -46,7 +46,7 @@ def bonuses(raw, slot, members, equips, config):
                 if not entry:
                     continue
                 name, amount = entry.split(":")
-                base = Fraction(str(row[name])) + Fraction(str(row.get(f"{name}-grow", 0))) * (level - 1)
+                base = battle.general_base(row, name, level, pb_get_varint(raw, 4) or 0, config)
                 values[battle.GENERAL_FIELDS[name]] += int(base * Fraction(amount) / 100)
     return values, relations
 

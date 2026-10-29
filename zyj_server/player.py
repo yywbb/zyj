@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, configuration, fashion, formation, online_rewards, recharge, recruit, shop, training, welfare
+from . import activities, battle, configuration, development, fashion, formation, online_rewards, recharge, recruit, shop, training, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -55,7 +55,7 @@ def load_role_config(config_path):
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
-                             "growplan_x1", "growplan_global_x1", "chengzhangplan_money", *sign_tables))
+                             "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake", *sign_tables))
 
 
 def get_default_save():
@@ -457,6 +457,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if opcode in welfare.CLAIMS:
             apply_reward(save, body, role_config, now)
+    elif opcode in (*development.QUERIES, *development.MUTATIONS) and not body:
+        body, costs, update = development.prepare(opcode, save, request_body, role_config)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if update:
+            record_slot_update(save, update)
     elif opcode == 300:
         if request_body:
             raise ValueError("贵族状态查询不接受参数")
@@ -682,7 +688,10 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
-    if responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS) and not responses[0]["hex"]:
+    local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS,
+                                                         *development.MUTATIONS) and not responses[0]["hex"])
+    break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
+    if local_update or break_comb:
         state, previous = save["role_state"], get_role_state(before, role_config)
         power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
                          (state["power"] - previous["power"], state["power"], 0, state["g_power"],

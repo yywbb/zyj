@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training, welfare
+from zyj_server import accounts, activities, battle, development, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training, welfare
 from zyj_server.session import Session
 
 
@@ -1473,6 +1473,119 @@ class ReplayRoutingTests(unittest.TestCase):
         self.save_path.write_text(json.dumps(saved))
         self.give_props({20196: 20, 20197: 10, 20198: 5, 20199: 2})
         return json.loads(self.save_path.read_text())
+
+    def test_development_magic_crystals_change_only_requested_attribute_and_commit_once(self):
+        self.seed_training_account()
+        self.give_props({20161: 2000})
+        saved = json.loads(self.save_path.read_text())
+        old = bytes.fromhex(saved["protagonist_snapshot"])
+        iid = protocol.pb_get_varint(old, 1)
+        raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[iid]
+        request = self.activity_request(1055, [1, 10])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            reply = session.handle(1055, 30000, bytes.fromhex(request["hex"]))
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in reply], [1055, 205])
+            self.assertEqual(session.handle(1055, 30000, bytes.fromhex(request["hex"])), reply)
+        changed = self.entity_records(self.query_world(1002), 1, 2)[iid]
+        self.assertEqual(protocol.pb_get_varint(changed, 6), protocol.pb_get_varint(raw, 6) + 10)
+        self.assertEqual(protocol.pb_get_varint(changed, 7), protocol.pb_get_varint(raw, 7))
+        self.assertEqual(protocol.pb_get_varint(bytes.fromhex(json.loads(self.save_path.read_text())["protagonist_snapshot"]), 4), 10)
+        inventory = self.entity_records(self.query_world(1200), 1, 1)
+        old_props = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(inventory[20161], 2), protocol.pb_get_varint(old_props[20161], 2) - 30)
+        self.assertEqual(self.query_role()[14], saved["role_state"]["power"] + 10)
+
+    def test_development_protagonist_preview_keeps_inventory_roster_and_counters(self):
+        self.seed_training_account()
+        self.replay([self.activity_request(1054)])
+        before = json.loads(self.save_path.read_text())
+        rows = self.entity_records(self.query_world(1056), 1, 4)
+        stage = protocol.pb_get_varint(bytes.fromhex(before["protagonist_snapshot"]), 3)
+        self.assertEqual(sorted(rows), list(range(stage + 1, 24)))
+        self.assertEqual(protocol.pb_get_varint(rows[stage + 1], 1), self.role_config["protagonist_grow"][str(stage + 1)][f"general{before['selected_general_id']}"])
+        after = json.loads(self.save_path.read_text())
+        for key in ("world_state", "protagonist_snapshot", "role_state", "guide"):
+            self.assertEqual(after[key], before[key])
+
+    def seed_break_account(self):
+        saved = self.seed_training_account()
+        saved["role_state"]["level"] = 9
+        raw = recruit.new_general(10404, 2000001, self.role_config)
+        raw, _, _ = training.grow_general(raw, 1000, b"", set(), {}, self.role_config)
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+        player.change_item_count(saved, 20017, 100, self.role_config)
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.change_general_request(2, 2000001)])
+        return json.loads(self.save_path.read_text())
+
+    def test_development_partner_preview_and_native_guide_comb_commit_together(self):
+        saved = self.seed_break_account()
+        preview = self.query_world_for_values(1023, [2000001])
+        general = self.entity_records(preview, 1, 2)[2000001]
+        self.assertEqual(protocol.pb_get_varint(general, 4), 1)
+        request = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 1017) + protocol.encode_pb_field(2, 2, b"\x08\xa4\x51\x08\x00"))
+        # CID10404来自当前账号，201的字段顺序与官方一致。
+        request += protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 201) + protocol.encode_pb_field(2, 2, b"\x10\x04\x08\x05"))
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(999900, 30001, request)
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999900, 205])
+            self.assertEqual(session.handle(999900, 30001, request), packets)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["guide"]["sections"]["5"]["step"], 4)
+        self.assertEqual(self.entity_records(bytes.fromhex(after["world_state"]["1002"]), 1, 2)[2000001], general)
+        self.assertEqual(after["role_state"]["coin"], saved["role_state"]["coin"] - 10000)
+        old_props = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+        new_props = self.entity_records(bytes.fromhex(after["world_state"]["1200"]), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(new_props[20017], 2), protocol.pb_get_varint(old_props[20017], 2) - 10)
+        self.assertEqual(self.replay([self.activity_request(1017, [10404, 0])])[0]["opcode"], 999999)
+
+    def query_world_for_values(self, opcode, values):
+        reply = self.replay([self.activity_request(opcode, values)])[0]
+        self.assertEqual(reply["opcode"], opcode)
+        return bytes.fromhex(reply["hex"])
+
+    def test_development_breakthrough_delta_matches_official_leigong(self):
+        frames = json.loads((Path(server.BASE_DIR) / "official_battle_capture_20261028_2210.json").read_text())["connections"][0]["frames"]
+        saved = {"world_state": {"1002": ""}, "has_role": True, "role_state": {"level": 9, "power": 0, "power_all": 0}}
+        for frame in frames:
+            messages = protocol.get_comb_messages(bytes.fromhex(frame["hex"])) if frame["opcode"] == 999900 else [(frame["opcode"], bytes.fromhex(frame["hex"]))]
+            if frame["c2s"] and any(mid == 1017 for mid, _ in messages):
+                break
+            if frame["c2s"]:
+                continue
+            for mid, body in messages:
+                if mid == 1002:
+                    saved["world_state"]["1002"] = body.hex()
+                elif mid in (1024, 1027, 1057):
+                    player.record_slot_update(saved, body)
+                elif mid in (1306, 1038):
+                    for n, w, raw in protocol.iter_pb_fields(body):
+                        if w == 2 and n == (6 if mid == 1306 else 8):
+                            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+        iid = next(i for i, raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).items() if protocol.pb_get_varint(raw, 1) == 10213)
+        reply, _, _ = development.prepare(1023, saved, protocol.encode_pb_field(1, 0, iid), self.role_config)
+        raw = self.entity_records(reply, 1, 2)[iid]
+        self.assertEqual([protocol.pb_get_varint(raw, n) for n in (6, 7, 8, 9)], [1290, 508, 2959, 114])
+
+    def test_development_rejects_bad_parameters_and_save_failures_without_cost(self):
+        self.seed_break_account()
+        self.give_props({20161: 100})
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            original = self.save_path.read_bytes()
+            memory = copy.deepcopy(session.save)
+            for opcode, values in ((1023, [99999]), (1017, [10404, 1]), (1055, [0, 1]), (1055, [1, 0]),
+                                   (1055, [1, 1001]), (1055, [1, 56]), (1056, [1])):
+                reply = session.handle(opcode, 30000, bytes.fromhex(self.activity_request(opcode, values)["hex"]))
+                self.assertEqual(struct.unpack(">IIII", reply[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, original))
+            for opcode, values in ((1017, [10404, 0]), (1055, [1, 10])):
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        session.handle(opcode, 30001, bytes.fromhex(self.activity_request(opcode, values)["hex"]))
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, original))
 
     def training_request(self, opcode, iid, values):
         body = protocol.encode_pb_field(1, 0, iid) + b"".join(protocol.encode_pb_field(2, 0, v) for v in values)
