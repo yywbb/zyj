@@ -8,7 +8,7 @@ import random
 import tempfile
 import time
 
-from . import activities, battle, configuration, fashion, formation, recharge, recruit, shop, training
+from . import activities, battle, configuration, fashion, formation, online_rewards, recharge, recruit, shop, training
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -50,7 +50,7 @@ def load_role_config(config_path):
                              "combskillprobability", "breakskill", "worlddrop", "recruit_deck", "recruit_tenlottery",
                              "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
-                             "fashion_gift_bag", "fashioncoat", "fashionintentify"))
+                             "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward"))
 
 
 def get_default_save():
@@ -441,6 +441,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             raise ValueError("时间查询不接受参数")
         # 客户端把第二项取反作为时区；沿用抓包的 UTC+8，不跟随宿主机时区。
         body = encode_pb_field(1, 0, now) + encode_pb_field(1, 0, (-8) & ((1 << 64) - 1))
+    elif opcode in online_rewards.OPCODES:
+        body = online_rewards.prepare(opcode, save, request_body, role_config)
+        if opcode == 2038:
+            apply_reward(save, body, role_config, now)
     elif opcode in activities.OPCODES:
         body = activities.prepare_response(opcode, save, request_body, role_config, now)
         if opcode == 5031:
@@ -648,9 +652,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     return body
 
 
-def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config):
+def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at):
     before = copy.deepcopy(save)
     now = int(time.time())
+    online_rewards.settle(save, role_config, connected_at, now)
     settle_stamina(save, role_config, now)
     packets = []
     for response in responses:
@@ -686,9 +691,10 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
     return packets
 
 
-def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config):
+def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config, connected_at):
     before = copy.deepcopy(save)
     now = int(time.time())
+    online_rewards.settle(save, role_config, connected_at, now)
     settle_stamina(save, role_config, now)
     point, old_star = battle.challenge(save, request_body, role_config)
     attack, defense = battle.rosters(save, point, role_config)

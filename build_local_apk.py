@@ -752,6 +752,17 @@ end
     patched["assets/scripts/GameShop.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched GameShop.so (refresh account purchase limits and replace full lists)")
 
+    code = read_script("Layer_activity").decode("utf-8").replace("\r\n", "\n")
+    old = """function activity.createPagesExt(self)
+    self:createOnePage(self.presentPage+1)
+    self:createOnePage(self.presentPage-1)
+end"""
+    assert code.count(old) == 1
+    # 点当前页不应初始化相邻活动；实际切页仍由 createPages 加载并查询。
+    code = code.replace(old, "function activity.createPagesExt(self)\nend")
+    patched["assets/scripts/Layer_activity.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    print("  [Lua] Patched Layer_activity.so (query activities only when selected)")
+
     return patched
 
 

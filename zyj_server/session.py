@@ -4,7 +4,7 @@ import copy
 import functools
 import time
 
-from . import activities, fashion, guide, player, recharge, recruit, shop, training
+from . import activities, fashion, guide, online_rewards, player, recharge, recruit, shop, training
 from .protocol import encode_pb_field, get_comb_ids, pack_frame
 from .replay import Replay
 
@@ -25,6 +25,7 @@ class Session:
         self.step_counts = step_counts
         self.role_config = role_config
         self.random_replies = {}
+        self.connected_at = int(time.time())
         self.save = player.load_save(save_path, step_counts)
         player.initialize_world_state(self.save, self.replay.master_comb_packets)
         activities.get_state(self.save)
@@ -33,6 +34,7 @@ class Session:
         recharge.get_state(self.save)
         shop.get_state(self.save)
         fashion.get_state(self.save, role_config)
+        online_rewards.get_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
 
         sections = guide.get_guide_sections(self.save, step_counts)
@@ -91,7 +93,7 @@ class Session:
             values = player.parse_prop_use(body)
             fixed_box = shop.fixed_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009,
+        if fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
@@ -103,11 +105,11 @@ class Session:
             try:
                 if opcode == 1306:
                     packets = player.prepare_battle_responses(seq, working, body, self.save_path,
-                                                             self.step_counts, self.role_config)
+                                                             self.step_counts, self.role_config, self.connected_at)
                 else:
                     packets = player.prepare_recorded_responses(
                         seq, [{"opcode": opcode, "seq": seq, "hex": ""}], working, body,
-                        self.save_path, self.step_counts, self.role_config)
+                        self.save_path, self.step_counts, self.role_config, self.connected_at)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working
@@ -117,13 +119,13 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (1304, 1402, 2411, 3611, 7110, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (1304, 1402, 2037, 2411, 3611, 7110, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 packets = player.prepare_recorded_responses(
                     seq, [{"opcode": opcode, "seq": seq, "hex": ""}], working, body,
-                    self.save_path, self.step_counts, self.role_config)
+                    self.save_path, self.step_counts, self.role_config, self.connected_at)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working
@@ -169,5 +171,5 @@ class Session:
                 and self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2):
             return unavailable_response(opcode, seq, body, "教程装备录制已过期，请使用当前阵容单独装备或强化。")
         packets = player.prepare_recorded_responses(seq, responses, self.save, body,
-                                                    self.save_path, self.step_counts, self.role_config)
+                                                    self.save_path, self.step_counts, self.role_config, self.connected_at)
         return packets

@@ -166,6 +166,9 @@ class ReplayRoutingTests(unittest.TestCase):
                                 if n == 1 and w == 0 and value // 100 in live_ids))
         elif opcode == 3200:
             self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [0] * len(self.role_config["shop"]))
+        elif opcode == 2037:
+            # 教程回归冻结时间，不能继承录制中已到期的在线奖励倒计时。
+            self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [1, 60])
         elif opcode == 3210:
             rows = self.entity_records(bytes.fromhex(actual), 1, 1)
             self.assertEqual(set(rows), set(map(int, self.role_config["gift_bag"])))
@@ -209,6 +212,142 @@ class ReplayRoutingTests(unittest.TestCase):
     def shop_request(self, opcode, cid, count=1):
         item = protocol.encode_pb_field(1, 0, cid) + protocol.encode_pb_field(2, 0, count)
         return {"opcode": opcode, "seq": 20000, "hex": protocol.encode_pb_field(1, 2, item).hex()}
+
+    def test_online_reward_keeps_online_time_but_excludes_offline_time(self):
+        self.complete_tutorial()
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(session.handle(2037, 1, b""), [protocol.pack_frame(2037, 1, b"\x08\x01\x08\x3c")])
+            self.clock.return_value = self.now + 30
+            session.handle(999904, 2, b"")
+            self.assertEqual(json.loads(self.save_path.read_text())["online_reward_state"]["seconds"], 30)
+            self.clock.return_value = self.now + 300
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(session.handle(2037, 3, b""), [protocol.pack_frame(2037, 3, b"\x08\x01\x08\x1e")])
+            self.clock.return_value = self.now + 329
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            error = session.handle(2038, 4, b"")
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in error], [999999, 1999])
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+            self.clock.return_value += 1
+            before = session.save["role_state"]["coin"]
+            reply = session.handle(2038, 5, b"")
+            self.assertEqual(struct.unpack(">IIII", reply[0][:16])[2:], (2038, 5))
+            self.assertEqual(session.save["role_state"]["coin"], before + 30000)
+            self.assertEqual(session.save["online_reward_state"]["claimed"], 1)
+            self.assertEqual(session.handle(2037, 6, b""), [protocol.pack_frame(2037, 6, b"\x08\x05\x08\xf0\x01")])
+            self.clock.return_value += 600
+            restored = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(restored.handle(2037, 7, b""), [protocol.pack_frame(2037, 7, b"\x08\x05\x08\xf0\x01")])
+
+    def test_online_reward_all_tiers_save_once_and_finish_with_empty_query(self):
+        self.complete_tutorial()
+        before = json.loads(self.save_path.read_text())
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.handle(2037, 1, b"")
+            for index, minute in enumerate((1, 5, 10, 15), 1):
+                self.clock.return_value = self.now + minute * 60
+                packets = session.handle(2038, index + 1, b"")
+                saved = json.loads(self.save_path.read_text())
+                self.assertEqual(saved["online_reward_state"]["claimed"], index)
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 2038)
+                self.assertEqual(session.handle(2038, index + 1, b""), packets)
+                self.assertEqual(json.loads(self.save_path.read_text()), saved)
+            self.assertEqual(session.save["role_state"]["coin"], before["role_state"]["coin"] + 130000)
+            self.assertEqual(session.save["role_state"]["gold"], before["role_state"]["gold"] + 100)
+            old_props = self.entity_records(bytes.fromhex(before["world_state"]["1200"]), 1, 1)
+            props = self.entity_records(bytes.fromhex(session.save["world_state"]["1200"]), 1, 1)
+            for cid, count in ((20001, 2), (20005, 2), (20002, 2), (20006, 2), (20014, 1),
+                               (20003, 2), (20007, 2), (20100, 20), (20019, 1)):
+                self.assertEqual(protocol.pb_get_varint(props[cid], 2),
+                                 (protocol.pb_get_varint(old_props.get(cid, b""), 2) or 0) + count)
+            self.assertEqual(session.handle(2037, 10, b""), [protocol.pack_frame(2037, 10, b"")])
+            self.assertEqual(struct.unpack(">IIII", session.handle(2038, 11, b"")[0][:16])[2], 999999)
+        self.assertEqual(self.query_world(2037), b"")
+
+    def test_online_reward_midnight_and_clock_rollback_do_not_duplicate_claims(self):
+        self.complete_tutorial()
+        midnight = ((self.now + 28800) // 86400 + 1) * 86400 - 28800
+        self.clock.return_value = midnight - 120
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.handle(2037, 1, b"")
+            self.clock.return_value = midnight - 60
+            session.handle(2038, 2, b"")
+            self.assertEqual(session.save["online_reward_state"]["claimed"], 1)
+            self.clock.return_value = midnight - 90
+            self.assertEqual(session.handle(2037, 3, b""), [protocol.pack_frame(2037, 3, b"\x08\x05\x08\xf0\x01")])
+            self.clock.return_value = midnight + 10
+            self.assertEqual(session.handle(2037, 4, b""), [protocol.pack_frame(2037, 4, b"\x08\x01\x08\x32")])
+            self.assertEqual(session.save["online_reward_state"]["claimed"], 0)
+            self.clock.return_value = midnight - 1
+            session.handle(2037, 5, b"")
+            self.clock.return_value = midnight + 15
+            self.assertEqual(session.handle(2037, 6, b""), [protocol.pack_frame(2037, 6, b"\x08\x01\x08\x2d")])
+            self.clock.return_value = midnight + 86400 + 100
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(session.handle(2037, 7, b""), [protocol.pack_frame(2037, 7, b"\x08\x01\x08\x3c")])
+
+    def test_online_reward_queries_rewrite_every_main_page_comb(self):
+        self.complete_tutorial()
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.handle(2037, 1, b"")
+            self.clock.return_value = self.now + 20
+            session.handle(999904, 2, b"")
+        refresh = {"opcode": 999900, "seq": 28,
+                   "hex": "0a030889120a0308c0250a0308ff350a03088a190a0308da360a0308f50f0a0308f70f0a0308e5320a03089a35"}
+        for request in (self.by_seq[27], self.by_seq[122], refresh):
+            reply = self.replay([request])[0]
+            messages = dict(protocol.get_comb_messages(bytes.fromhex(reply["hex"])))
+            self.assertEqual(protocol.parse_ids_pb(messages[2037]), [1, 40])
+
+    def test_online_reward_invalid_claims_and_failed_saves_are_atomic(self):
+        self.complete_tutorial()
+        before = self.save_path.read_bytes()
+        for opcode in (2037, 2038):
+            for body in ("08", "0801", "1001", "0a00"):
+                request = {"opcode": opcode, "seq": 66, "hex": body}
+                self.assert_unavailable_response(self.replay([request]), opcode, 66, "参数")
+                self.assertEqual(self.save_path.read_bytes(), before)
+        comb = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 2038))
+        self.assert_unavailable_response(self.replay([{"opcode": 999900, "seq": 67, "hex": comb.hex()}]),
+                                         999900, 67, "尚未")
+        self.assertEqual(self.save_path.read_bytes(), before)
+        baseline = json.loads(before)
+        for overflow in (False, True):
+            with self.subTest(overflow=overflow), redirect_stdout(io.StringIO()):
+                saved = copy.deepcopy(baseline)
+                saved["online_reward_state"]["seconds"] = 60
+                if overflow:
+                    saved["role_state"]["coin"] = (1 << 31) - 1
+                self.save_path.write_text(json.dumps(saved))
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                if overflow:
+                    packets = session.handle(2038, 68, b"")
+                    self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 999999)
+                else:
+                    with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+                        with self.assertRaises(OSError):
+                            session.handle(2038, 68, b"")
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+        self.save_path.write_text(json.dumps(player.get_default_save()))
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(2038)]), 2038, 20000, "角色")
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_online_reward_corrupt_progress_is_not_reset(self):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        for key, value in (("day", True), ("seconds", -1), ("seconds", 901),
+                           ("claimed", 5), ("claimed", False), ("checked_at", -1)):
+            with self.subTest(key=key, value=value):
+                broken = copy.deepcopy(saved)
+                broken["online_reward_state"][key] = value
+                self.save_path.write_text(json.dumps(broken))
+                self.assert_rejected(self.activity_request(2037), "在线奖励存档无效")
 
     def test_shop_tabs_query_current_account_without_recorded_sequence(self):
         self.complete_tutorial()
@@ -260,6 +399,7 @@ class ReplayRoutingTests(unittest.TestCase):
                 if bought:
                     self.replay([self.shop_request(3211, 20101)])
                 gifts = self.query_world(3210)
+                online = self.query_world(2037)
                 self.assertEqual(20101 in self.entity_records(gifts, 1, 1), not bought)
                 before = self.save_path.read_bytes()
                 responses = self.replay(requests, chunk_size=7)
@@ -267,9 +407,10 @@ class ReplayRoutingTests(unittest.TestCase):
                                  [(999900, f["seq"]) for f in requests])
                 for request, response, source in zip(requests, responses, (27, 122, 122, 163)):
                     recorded = dict(protocol.get_comb_messages(bytes.fromhex(self.recorded[(source, 999900)]["hex"])))
+                    recorded.update({3210: gifts, 2037: online})
                     ids = [mid for mid, _ in protocol.get_comb_messages(bytes.fromhex(request["hex"]))]
                     messages = protocol.get_comb_messages(bytes.fromhex(response["hex"]))
-                    self.assertEqual(messages, [(mid, gifts if mid == 3210 else recorded[mid]) for mid in ids])
+                    self.assertEqual(messages, [(mid, recorded[mid]) for mid in ids])
                 self.assertEqual(self.save_path.read_bytes(), before)
                 self.assertEqual(self.replay([refresh]), [dict(responses[1], seq=refresh["seq"])])
         self.assertEqual(self.tables, tables)

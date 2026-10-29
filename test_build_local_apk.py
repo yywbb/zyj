@@ -154,6 +154,42 @@ class LanBuildTests(unittest.TestCase):
             assert(gamedata.cache.role.gold==2492 and gamedata.awarded==2)
         ''')
 
+    def test_activity_touch_does_not_query_adjacent_pages(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("活动页面行为验证需本机已有 lupa.lua51")
+        source = self.client_scripts()["assets/scripts/Layer_activity.so"]
+        source = source[source.index("function activity.createOnePage("):source.index("function activity.setPageByid(")]
+        lua = LuaRuntime()
+        lua.execute('''
+            print = function() end
+            activity, requests, initialized = {}, {}, {}
+            function UIRequest(t) table.insert(requests,t.type) end
+            function ccp(x,y) return {x=x,y=y} end
+            function page(id,request)
+                local node = {setPosition=function() end,setVisible=function() end}
+                return {id=id,request=request,module={init=function()
+                    table.insert(initialized,id); return node end}}
+            end
+        ''')
+        lua.execute(source)
+        lua.execute('''
+            local view = setmetatable({presentPage=2,createsPage={},contentCellSize={x=480},
+                realPageTable={page(19,3641),page(173,4890),page(59,4615)},
+                rootItems={container={addChild=function() end}}}, {__index=activity})
+            view:createPages()
+            view:createPagesExt()
+            view:createPagesExt()
+            assert(#requests==1 and requests[1]==4890 and #initialized==1)
+            view.presentPage=3
+            view:createPages()
+            assert(#requests==2 and requests[2]==4615 and initialized[2]==59)
+            view.presentPage=2
+            view:createPages()
+            assert(#requests==2)
+        ''')
+
     def test_local_login_success_failure_timeout_and_switch_with_lua51(self):
         try:
             from lupa.lua51 import LuaRuntime
