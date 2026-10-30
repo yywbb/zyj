@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, recharge, recruit, rob, shop, star_copy, training, welfare
+from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, recharge, recruit, rob, shop, star_copy, training, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -19,7 +19,7 @@ from .protocol import (
 print_flush = functools.partial(print, flush=True)
 
 WORLD_QUERY_IDS = (1002, 1012, 1107, 1200, 1300)
-SLOT_RECORD_KEYS = {1: 2, 2: 1, 3: 1, 4: 1, 5: 1, 7: 1}
+SLOT_RECORD_KEYS = {1: 2, 2: 1, 3: 1, 4: 1, 5: 1, 7: 1, 17: 1}
 STAMINA_INTERVAL = 360  # 多份 Role 抓包的全部/下次恢复倒计时之差可交叉验证。
 
 # role_pb.Role 的字段号。
@@ -59,10 +59,10 @@ def load_role_config(config_path):
                              "month_welfare", "month_growup", "week_growup_1", "week_growup_2_1",
                              "week_growup_money_1", "week_growup_money_2_1", "recharge_gift_1",
                              "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
-                             "trump", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
+                             "trump", "trump_gem", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
                              "pet3_fragment", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
-                             "mieshendian_award", "mieshendian_reward", *sign_tables))
+                             "mieshendian_award", "mieshendian_reward", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh", *sign_tables))
 
 
 def get_default_save():
@@ -303,6 +303,15 @@ def change_item_count(save, cid, delta, role_config, now=None):
         field = {1000: 1, 1001: 2, 1003: 4}[cid]
         apply_reward(save, encode_pb_field(field, 0, delta & ((1 << 64) - 1)), role_config, now)
         return
+    if str(cid) in role_config["trump_gem"]:
+        roster = bytes.fromhex(save["world_state"]["1002"])
+        previous = next((parse_ids_pb(v) for n, w, v in iter_pb_fields(roster)
+                         if (n, w) == (17, 2) and pb_get_varint(v, 1) == cid), [cid, 0])
+        if len(previous) != 2 or not 0 <= previous[1] + delta < (1 << 31):
+            raise ValueError("神器宝石数量不足或超出范围")
+        record = encode_pb_field(17, 2, encode_pb_field(1, 0, cid) + encode_pb_field(1, 0, previous[1] + delta))
+        record_slot_update(save, record)
+        return
     fragment = role_config["general_fragment"].get(str(cid))
     if fragment is None and str(cid) not in role_config["props"]:
         fragment = next((row for row in role_config["general_fragment"].values() if row["general"] == cid), None)
@@ -536,6 +545,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = recharge.prepare(opcode, save, request_body, role_config, now)
         if opcode in recharge.CLAIMS:
             apply_reward(save, body, role_config, now)
+    elif opcode in blackmarket.OPCODES:
+        body, costs, reward = blackmarket.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode in shop.OPCODES:
         body, costs, reward = shop.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:

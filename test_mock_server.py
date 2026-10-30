@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, daily_events, development, diagnostics, formation, guide, mieshendian, player, protocol, ranking, recharge, recruit, replay, rob, shop, star_copy, training, welfare
+from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, formation, guide, mieshendian, player, protocol, ranking, recharge, recruit, replay, rob, shop, star_copy, training, welfare
 from zyj_server.session import Session
 
 
@@ -4526,6 +4526,189 @@ class ReplayRoutingTests(unittest.TestCase):
         saved["role_state"].update(level=15, nextexp=self.role_config["role_exp"]["15"]["nextexp"])
         self.save_path.write_text(json.dumps(saved))
         return saved
+
+    def prepare_blackmarket(self):
+        saved = self.prepare_mieshendian()
+        saved["role_state"].update(level=16, gold=100000, coin=10000000,
+                                    nextexp=self.role_config["role_exp"]["16"]["nextexp"])
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_blackmarket_query_populates_nine_saved_slots_without_advancing_guide(self):
+        before = self.prepare_blackmarket()
+        data = protocol.parse_ids_pb(self.query_world(3630))
+        self.assertEqual(len(data), 19)
+        self.assertEqual(data[0], 0)
+        self.assertEqual(data[2::2], [0] * 9)
+        self.assertEqual(self.query_world(3630), recharge.ids(data))
+        after = json.loads(self.save_path.read_text())
+        for key in ("role_state", "world_state", "guide", "last_battle", "mieshendian_state"):
+            self.assertEqual(after.get(key), before.get(key))
+
+    def test_blackmarket_purchase_and_paid_refresh_save_once_without_client_cost_duplication(self):
+        self.prepare_blackmarket()
+        self.query_world(3630)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            before = copy.deepcopy(session.save)
+            offer = before["blackmarket_state"]["slots"][0][0]
+            row = self.role_config["blackmarket_items"][str(offer)]
+            cid, price = map(int, row["consume"].rstrip(";").split(","))
+            body = recharge.ids([1, 1])
+            packets = session.handle(3631, 27000, body)
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2:], (3631, 27000))
+            self.assertEqual(session.save["role_state"]["gold" if cid == 1001 else "coin"],
+                             before["role_state"]["gold" if cid == 1001 else "coin"] - price)
+            self.assertEqual(session.save["blackmarket_state"]["slots"][0], [offer, 1])
+            self.assertFalse(protocol.pb_get_varint(packets[0][16:], 1))
+            self.assertFalse(protocol.pb_get_varint(packets[0][16:], 2))
+            self.assertEqual(session.handle(3631, 27000, body), packets)
+            oldgold = session.save["role_state"]["gold"]
+            packets = session.handle(3632, 27001, b"")
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 3632)
+            self.assertEqual(session.save["blackmarket_state"]["refreshes"], 1)
+            self.assertEqual(session.save["role_state"]["gold"], oldgold - self.role_config["buycount_price"]["1"]["blackmarket_refreshgold"])
+            self.assertEqual(session.handle(3632, 27001, b""), packets)
+            self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+
+    def test_blackmarket_token_refresh_is_preferred_and_does_not_duplicate_item_cost(self):
+        self.prepare_blackmarket()
+        self.query_world(3630)
+        saved = json.loads(self.save_path.read_text())
+        player.change_item_count(saved, 20172, 2, self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        result = self.replay([self.activity_request(3632)])[0]
+        self.assertEqual(result["opcode"], 3632)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], saved["role_state"]["gold"])
+        props = self.entity_records(bytes.fromhex(after["world_state"]["1200"]), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20172], 2), 1)
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(result["hex"]))[0], 1)
+
+    def test_blackmarket_scheduled_refreshes_and_day_reset_advance_only_forward(self):
+        self.prepare_blackmarket()
+        self.clock.return_value = 1793318400  # 2026-10-30 08:00 UTC+8。
+        self.query_world(3630)
+        self.replay([self.activity_request(3632)])
+        before = json.loads(self.save_path.read_text())
+        self.clock.return_value += 3600
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3631, [1, 1])]), 3631, 20000, "刷新时间")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.query_world(3630)
+        middle = json.loads(self.save_path.read_text())
+        self.assertGreater(middle["blackmarket_state"]["period"], before["blackmarket_state"]["period"])
+        self.assertEqual(middle["blackmarket_state"]["refreshes"], 1)
+        self.clock.return_value += 15 * 3600
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3630))[0], 0)
+        forward = json.loads(self.save_path.read_text())["blackmarket_state"]
+        self.clock.return_value -= 86400
+        self.query_world(3630)
+        self.assertEqual(json.loads(self.save_path.read_text())["blackmarket_state"], forward)
+
+    def test_blackmarket_limits_and_insufficient_resources_roll_back(self):
+        self.prepare_blackmarket()
+        self.query_world(3630)
+        saved = json.loads(self.save_path.read_text())
+        first = saved["blackmarket_state"]["slots"][0][0]
+        limit = self.role_config["blackmarket_items"][str(first)]["limit"]
+        self.assertEqual(self.replay([self.activity_request(3631, [1, limit])])[0]["opcode"], 3631)
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3631, [1, 1])]), 3631, 20000, "次数不足")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["role_state"].update(gold=0, coin=0)
+        self.save_path.write_text(json.dumps(saved))
+        for opcode, values in ((3631, [1, 1]), (3632, [])):
+            disk = self.save_path.read_bytes()
+            with self.subTest(opcode=opcode):
+                self.assertEqual(self.replay([self.activity_request(opcode, values)])[0]["opcode"], 999999)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_blackmarket_rejects_locked_malformed_and_prequery_mutations(self):
+        baseline = self.prepare_blackmarket()
+        cases = [(3630, [1]), (3632, [1]), (3631, []), (3631, [1]), (3631, [1, 1, 1]),
+                 (3631, [0, 1]), (3631, [10, 1]), (3631, [1, 0]), (3631, [1, 101])]
+        for opcode, values in cases:
+            self.save_path.write_text(json.dumps(baseline))
+            disk = self.save_path.read_bytes()
+            with self.subTest(opcode=opcode, values=values):
+                self.assertEqual(self.replay([self.activity_request(opcode, values)])[0]["opcode"], 999999)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+        baseline["role_state"]["level"] = 15
+        self.save_path.write_text(json.dumps(baseline))
+        self.assert_unavailable_response(self.replay([self.activity_request(3630)]), 3630, 20000, "尚未解锁")
+
+    def test_blackmarket_save_failure_keeps_slots_and_balances_unchanged(self):
+        self.prepare_blackmarket()
+        self.query_world(3630)
+        for opcode, body in ((3631, recharge.ids([1, 1])), (3632, b"")):
+            with self.subTest(opcode=opcode), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(opcode, 27002, body)
+                self.assertEqual(session.save, memory)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+                self.assertEqual(session.random_replies, {})
+
+    def test_blackmarket_all_configured_rewards_and_weighted_pools_are_supported(self):
+        saved = self.prepare_blackmarket()
+        for row in self.role_config["blackmarket_items"].values():
+            with self.subTest(item=row["id"]):
+                gets = [tuple(map(int, entry.split(","))) for entry in row["good"].split(";") if entry]
+                reward = recruit.build_reward(copy.deepcopy(saved), gets, self.role_config)
+                player.apply_reward(copy.deepcopy(saved), reward, self.role_config, self.now)
+        for level in (16, 39, 40, 59, 60, 100, 150):
+            for vip in (0, 12, 27):
+                for refresh in (0, 10):
+                    with self.subTest(level=level, vip=vip, refresh=refresh):
+                        saved["role_state"].update(level=level, vip=vip)
+                        state = blackmarket.get_state(saved, self.role_config)
+                        state["refreshes"] = refresh
+                        blackmarket.refresh(saved, self.role_config, state, 42)
+                        self.assertEqual(len(state["slots"]), 9)
+                        for iid, bought in state["slots"]:
+                            row = self.role_config["blackmarket_items"][str(iid)]
+                            self.assertLessEqual(row["down_level"], level)
+                            self.assertGreaterEqual(row["up_level"], level)
+                            self.assertLessEqual(row["vip"], vip)
+                            self.assertEqual(bought, 0)
+
+    def test_blackmarket_corrupt_state_fails_closed(self):
+        self.prepare_blackmarket()
+        self.query_world(3630)
+        saved = json.loads(self.save_path.read_text())
+        for change in ({"slots": []}, {"refreshes": True}, {"slots": [[999999, 0]] * 9}, {"slots": [[100001, -1]] * 9}):
+            broken = copy.deepcopy(saved)
+            broken["blackmarket_state"].update(change)
+            self.save_path.write_text(json.dumps(broken))
+            disk = self.save_path.read_bytes()
+            with self.subTest(change=change), redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "元宝商店"):
+                Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_blackmarket_artifact_jewel_uses_native_roster_inventory_and_reconnect(self):
+        self.prepare_blackmarket()
+        self.query_world(3630)
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["level"] = 58
+        saved["blackmarket_state"]["slots"][0] = [100130, 0]
+        self.save_path.write_text(json.dumps(saved))
+        result = self.replay([self.activity_request(3631, [1, 1])])[0]
+        self.assertEqual(result["opcode"], 3631)
+        after = json.loads(self.save_path.read_text())
+        jewels = self.entity_records(bytes.fromhex(after["world_state"]["1002"]), 17, 1)
+        self.assertEqual(protocol.parse_ids_pb(jewels[120001]), [120001, 1])
+        self.assertEqual(after["world_state"]["1200"], saved["world_state"]["1200"])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+        self.assertEqual(session.save["world_state"]["1002"], after["world_state"]["1002"])
+        after["blackmarket_state"]["slots"][0][1] = 0
+        player.change_item_count(after, 120001, (1 << 31) - 2, self.role_config, self.now)
+        self.save_path.write_text(json.dumps(after))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(3631, [1, 1])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
 
     def test_mieshendian_query_populates_the_tutorial_floor_without_rewards(self):
         before = self.prepare_mieshendian()
