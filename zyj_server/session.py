@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, blackmarket, daily_events, development, fashion, guide, mieshendian, online_rewards, player, ranking, recharge, recruit, rob, shop, star_copy, training, welfare
+from . import activities, blackmarket, daily_events, development, fashion, guide, mieshendian, online_rewards, player, ranking, recharge, recruit, rob, shop, star_copy, training, watchstar, welfare
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -44,6 +44,7 @@ class Session:
         star_copy.get_state(self.save, role_config)
         mieshendian.get_state(self.save, role_config)
         blackmarket.get_state(self.save, role_config)
+        watchstar.get_state(self.save, role_config)
         if self.save.get("has_role"):
             player.get_role_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
@@ -208,12 +209,17 @@ class Session:
         sign_comb = False
         break_comb = False
         rob_comb = False
+        watch_comb = False
         if opcode == 999900:
-            # 仅开放原生签到引导的完整二消息模板；仍保留顺序、未知字段和重复字段校验。
+            # 仅开放原生签到和观星引导的完整二消息模板；保留顺序及额外字段校验。
             templates = [encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + empty)
                          + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x33\x10\x01"))
                          for empty in (b"", encode_pb_field(2, 2, b""))]
             sign_comb = normalize_comb_request(body) in templates
+            templates = [encode_pb_field(1, 2, encode_pb_field(1, 0, 2063) + empty)
+                         + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x39\x10\x02"))
+                         for empty in (b"", encode_pb_field(2, 2, b""))]
+            watch_comb = normalize_comb_request(body) in templates
             messages = get_comb_messages(body)
             if [mid for mid, _ in messages] == [1017, 201]:
                 values = development.ids(messages[0][1])
@@ -231,7 +237,8 @@ class Session:
             values = player.parse_prop_use(body)
             local_box = shop.openable_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or watch_comb or local_box or opcode in (1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+                                  *watchstar.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
                                   *development.MUTATIONS, *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
@@ -258,6 +265,12 @@ class Session:
                             raise ValueError("挑战引导步骤已变化，请重新进入")
                         reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 1111) + encode_pb_field(2, 2, b""))
                                  + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
+                    if watch_comb:
+                        section = working.get("guide", {}).get("sections", {}).get("57", {})
+                        if section.get("status") == 2 or section.get("step", 0) >= 2:
+                            raise ValueError("观星台引导步骤已变化，请重新进入")
+                        reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 2063) + encode_pb_field(2, 2, b""))
+                                 + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
                     packets = player.prepare_recorded_responses(
                         seq, [{"opcode": opcode, "seq": seq, "hex": reply.hex()}], working, body,
                         self.save_path, self.step_counts, self.role_config, self.connected_at)
@@ -271,7 +284,7 @@ class Session:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
         if opcode in (204, 300, 4016, 1304, 1350, *mieshendian.QUERIES, 1402, 2037, 2411, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
-                      *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES):
+                      *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900

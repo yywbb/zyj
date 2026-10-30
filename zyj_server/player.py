@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, recharge, recruit, rob, shop, star_copy, training, welfare
+from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, recharge, recruit, rob, shop, star_copy, training, watchstar, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -62,7 +62,8 @@ def load_role_config(config_path):
                              "trump", "trump_gem", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
                              "pet3_fragment", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
-                             "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh", *sign_tables))
+                             "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
+                             "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", *sign_tables))
 
 
 def get_default_save():
@@ -556,6 +557,13 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body, costs, reward = blackmarket.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
+    elif opcode in watchstar.OPCODES:
+        body, costs, reward = watchstar.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            if count:
+                change_item_count(save, cid, -count, role_config, now)
         if reward:
             apply_reward(save, reward, role_config, now)
     elif opcode in shop.OPCODES:

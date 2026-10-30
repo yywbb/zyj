@@ -346,6 +346,269 @@ class LanBuildTests(unittest.TestCase):
             end
         ''')
 
+    def test_auto_copy_is_opt_in_sequential_and_stops_safely(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("自动推图回调验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        layer = scripts["assets/scripts/Layer_copy_list.so"]
+        self.assertIn("AutoCopyAttach(self,toppos)", layer)
+        self.assertIn("AutoCopyDetach(self)", layer)
+        self.assertIn("AutoCopyBlockManual()", layer)
+        self.assertIn('[1306] = 1', scripts["assets/scripts/gameloop2.so"])
+        self.assertIn('os.time() > timeinteval[uireq["type"]]+2', scripts["assets/scripts/gameloop2.so"])
+        lua = LuaRuntime()
+        lua.execute('''
+            print,printT,cclog=function() end,function() end,function() end
+            package.preload.BattleReportAbbToKey=function() return {} end
+            events={}; requests={}; notices={}; confirmed=nil
+            local function event(kind,value) table.insert(events,{kind=kind,value=value}) end
+            UIRequest=function(req) table.insert(requests,req) end
+            runGamePrompt=function(t) table.insert(notices,t.msg) end
+            RunbattleCallBack=function(kind,t,cb) event('battle',t.result) end
+            updateDataLife=function(reward) event('rewards',reward) end
+            setTriggerGiftEnable=function() end
+            guide={controller={isOnGuide=false}}
+            gamedata={config={copy={
+                ['42101']={['1']={physical=5,challenge=3},['2']={physical=5,challenge=3}},
+                ['42102']={['1']={physical=6,challenge=3}}}}}
+            local function root() return {children={},addChild=function(self,child) table.insert(self.children,child) end} end
+            local function scheduler()
+                return {stopAllActions=function(self) self.action=nil end,
+                    runAction=function(self,action) self.action=action end,
+                    fire=function(self) local action=self.action;self.action=nil;if action then action.callback() end end}
+            end
+            CCNode={create=function() return scheduler() end}
+            CCDelayTime={create=function(_,delay) return delay end}
+            CCCallFunc={create=function(_,callback) return callback end}
+            CCSequence={createWithTwoActions=function(_,delay,callback) return {delay=delay,callback=callback} end}
+            CCControlStateNormal=0
+            ui={createControlButton1=function(args) return {callback=args.callback,
+                setTouchPriority=function() end,setSwallowsTouch=function() end} end,
+                createLabel=function() return {setString=function(self,value) self.value=value end} end}
+            setControlButtonTitle=function(button,title) button.title=title end
+            gameWindows={windows={},openWindow=function(self,name,args,cb) confirmed=cb end}
+            gameConfig={originSize={width=1080}}
+            GameScene={presentLayer='copy_map',roleinfo={stamina=20},layers={
+                copy_map={show=true,module={}},copy_chapter={show=false,module={}}},
+                addUpdate=function() end,checkopenlevelbyId=function() return false end}
+            function makeLayer()
+                local layer={datatype='normal',rootNode=root(),data={id=42101,
+                    points={['1']={id=1,star=0,kill=0}}}}
+                function layer:reloadnormalData(copy,param) self.lastParam=param end
+                GameScene.layers.copy_map.module=layer
+                return layer
+            end
+            function dataFor(map,point,nextmap,nextpoint)
+                return {result=1,map=map,point=point,localAutoCopy=1,localAutoStamina=10,
+                    exp={oldlevel=16,newlevel=16},reward={},copy={['1']={maps={
+                        [tostring(nextmap-42100)]={id=nextmap,points={[tostring(nextpoint)]={id=nextpoint,star=0,kill=0}}}}}}}
+            end
+        ''')
+        lua.execute(scripts["assets/scripts/UICopy.so"])
+        lua.execute('''
+            layer=makeLayer();AutoCopyAttach(layer,1500)
+            assert(layer.autoCopyButton.title=='自动推图' and #requests==0)
+            layer.autoCopyButton.callback();assert(confirmed and #requests==0)
+            confirmed();assert(layer.autoCopyTimer.action.delay>=3);layer.autoCopyTimer:fire()
+            assert(#requests==1 and requests[1].type==1306 and requests[1].map==42101 and requests[1].point==1)
+            assert(requests[1].local_auto_copy and layer.autoCopyButton.title=='停止推图')
+            assert(AutoCopyBlockManual())
+            UICopyAttack2(dataFor(42101,1,42101,2))
+            assert(#requests==2 and requests[2].type==1001)
+            assert(layer.lastParam.section==1 and layer.lastParam.map==1 and layer.lastParam.point==2)
+            assert(layer.autoCopyTimer.action.delay>=3)
+            layer.autoCopyTimer:fire()
+            assert(#requests==3 and requests[3].point==2)
+            UICopyAttack2(dataFor(42101,2,42102,1))
+            layer.autoCopyTimer:fire()
+            assert(requests[#requests].map==42102 and requests[#requests].point==1)
+            assert(layer.lastParam.section==1 and layer.lastParam.map==2 and layer.lastParam.point==1)
+            local lost=dataFor(42102,1,42102,1);lost.result=0
+            UICopyAttack2(lost)
+            assert(not AutoCopyIsRunning() and layer.autoCopyButton.title=='自动推图')
+            assert(events[#events].kind=='battle' and events[#events].value==0)
+            local count=#requests;layer.autoCopyTimer:fire();assert(#requests==count)
+        ''')
+        lua.execute('''
+            layer=makeLayer();AutoCopyAttach(layer,1500);layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            local before=#requests
+            layer.autoCopyButton.callback();assert(not AutoCopyIsRunning())
+            layer.autoCopyButton.callback();assert(#requests==before)
+            UICopyAttack2(dataFor(42101,1,42101,2))
+            assert(#requests>=before and events[#events].kind=='battle')
+            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            local changed=dataFor(42101,1,42101,2);changed.exp.newlevel=17
+            UICopyAttack2(changed);assert(not AutoCopyIsRunning() and events[#events].kind=='battle')
+        ''')
+        lua.execute('''
+            layer=makeLayer();AutoCopyAttach(layer,1500);layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            local low=dataFor(42101,1,42101,2);low.localAutoStamina=4
+            UICopyAttack2(low);local count=#requests;layer.autoCopyTimer:fire()
+            assert(not AutoCopyIsRunning() and #requests==count and notices[#notices]:find('体力'))
+            layer=makeLayer();AutoCopyAttach(layer,1500);layer.autoCopyButton.callback();confirmed()
+            guide.controller.isOnGuide=true;count=#requests;layer.autoCopyTimer:fire()
+            assert(not AutoCopyIsRunning() and #requests==count and notices[#notices]:find('引导'))
+            guide.controller.isOnGuide=false
+            layer.autoCopyButton.callback();confirmed();gameWindows.windows.interrupt={show=true};layer.autoCopyTimer:fire()
+            assert(not AutoCopyIsRunning() and #requests==count and notices[#notices]:find('弹窗'))
+            gameWindows.windows.interrupt.show=false
+        ''')
+        lua.execute('''
+            layer=makeLayer();GameScene.roleinfo.stamina=4;AutoCopyAttach(layer,1500)
+            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            assert(not AutoCopyIsRunning() and notices[#notices]:find('体力'))
+            GameScene.roleinfo.stamina=20;guide.controller.isOnGuide=true
+            layer.autoCopyButton.callback();assert(not AutoCopyIsRunning() and notices[#notices]:find('引导'))
+            guide.controller.isOnGuide=false
+            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+        ''')
+        lua.execute('package.preload.logError=function() return {errorMessage={},errorFunc={}} end')
+        lua.execute(scripts["assets/scripts/UIPrompt.so"])
+        lua.execute('''
+            local previous=confirmed
+            UIPrompt({msgtype='shortphysical',localAutoCopy=1})
+            assert(not AutoCopyIsRunning() and not AutoCopyBlockManual())
+            assert(confirmed==previous and notices[#notices]:find('体力'))
+            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            layer.autoCopyButton.callback();assert(not AutoCopyIsRunning() and AutoCopyBlockManual())
+            assert(not AutoCopyLocalReject({msgtype='shortphysical'}))
+            assert(AutoCopyBlockManual())
+            UIPrompt({msgtype='shortphysical',localAutoCopy=1})
+            assert(not AutoCopyBlockManual())
+            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            function gameConfig:checkBuildOpen() return true end
+            function gameWindows:closeAllWindowDirect() end
+            function GameScene:UpdatePresentLayer() end
+        ''')
+        lua.execute(scripts["assets/scripts/UIErrorMessage.so"])
+        lua.execute('''
+            UIErrorMessage({errornum=0,request_opcode=1306})
+            assert(not AutoCopyIsRunning() and not AutoCopyBlockManual())
+            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            local count=#requests
+            assert(layer.autoCopyTimer.action.delay==20);layer.autoCopyTimer:fire()
+            assert(not AutoCopyIsRunning() and AutoCopyBlockManual() and #requests==count)
+            layer.autoCopyButton.callback();assert(#requests==count)
+            UICopyAttack2(dataFor(42101,1,42101,2))
+            assert(not AutoCopyBlockManual() and events[#events].kind=='battle')
+            for _,req in ipairs(requests) do assert(req.type==1306 or req.type==1001) end
+            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
+            AutoCopyDetach(layer);assert(not AutoCopyIsRunning())
+        ''')
+
+    def test_auto_copy_network_handoff_keeps_real_stamina_and_manual_behavior(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("自动推图网络回调验证需本机已有 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            print,cclog,printT=function() end,function() end,function() end
+            local function message() return {ids={},SerializeToString=function(self) return self.ids end,
+                ParseFromString=function(self,data) for k,v in pairs(data) do self[k]=v end end} end
+            for _,name in ipairs({'copies_pb','copyattack_pb','copyall3starreward_pb','result_pb','somethings_pb','PickBattleResultReport'}) do
+                package.preload[name]=function() return {} end
+            end
+            package.preload.ids_pb=function() return {Ids=message} end
+            package.preload.battleresult_pb=function() return {BattleResult=message} end
+            table.copy=function(t) local out={} for k,v in pairs(t) do out[k]=type(v)=='table' and table.copy(v) or v end return out end
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            PickBattleResultReport=function(result) return result.battlereport end
+            UIResponse=function() end
+            gamedata={cache={role={stamina=20},copy={[42101]={id=42101,status=0,pa1=1,pa2=1,pa3=1,points={}}}},ext={},
+                config={copy={['42101']={['1']={physical=5,challenge=3,coin=100}}},
+                    map={['42101']={section=40001,star1=3,star2=6,star3=9}},
+                    section={['40001']={name='测试',basemap='test'}},global_kv={}}}
+            function gamedata:SomethingProcess() return {} end
+            function gamedata:updateRoleExp() return {oldlevel=16,newlevel=16} end
+            function gamedata:Encounters() return {} end
+            function gamedata:updateRoleStamina(value) self.cache.role.stamina=self.cache.role.stamina+value end
+            function gamedata:Generals() end
+            function gamedata:GeneralsEXP() return {} end
+        ''')
+        lua.execute(self.client_scripts()["assets/scripts/GameCopy.so"])
+        lua.execute('''
+            local remote,opcode,body=UICopyAttack2Callback({map=42101,point=1,local_auto_copy=1})
+            assert(remote==1 and opcode==1306 and body[1]==42101 and body[2]==1)
+            local reply=NetCopyAttack2Callback({rbuf={result=1,star=3,reward={},exp={generals={}},generals={},encounters={},battlereport='{}'}})
+            assert(reply.localAutoCopy==1 and reply.localAutoStamina==15 and reply.map==42101 and reply.point==1)
+            remote,opcode,body=UICopyAttack2Callback({map=42101,point=1})
+            assert(remote==1 and opcode==1306)
+            reply=NetCopyAttack2Callback({rbuf={result=1,star=3,reward={},exp={generals={}},generals={},encounters={},battlereport='{}'}})
+            assert(reply.localAutoCopy==nil and reply.localAutoStamina==10)
+            gamedata.cache.role.stamina=0
+            remote,opcode,body=UICopyAttack2Callback({map=42101,point=1,local_auto_copy=1})
+            assert(remote==0 and opcode==503 and body.msgtype=='shortphysical' and body.localAutoCopy==1)
+            remote,opcode,body=UICopyAttack2Callback({map=42101,point=1})
+            assert(body.localAutoCopy==nil)
+        ''')
+
+        lua.execute('''
+            package.preload.error_pb=function() return {} end
+            package.preload.params_pb=function() return {} end
+            package.preload.logError=function() return {errorMessage={}} end
+            initPb=function(_,fd) return fd.rbuf end
+            printf=function() end
+        ''')
+        lua.execute(self.client_scripts()["assets/common_lua/GameErrorMessage.so"])
+        lua.execute('''
+            local err=NetErrorMessageCallback9({rbuf={ids={1306,0}}})
+            assert(err.type==9999 and err.request_opcode==1306)
+            local login=NetErrorMessageCallback9({rbuf={ids={1000,0}}})
+            assert(login.type==9997 and login.local_login_failed)
+        ''')
+
+    def test_watchstar_original_client_parses_status_and_deducts_cost_once(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("观星台客户端回调验证需本机已有 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            print,cclog=function() end,function() end
+            local function ids() return {ParseFromString=function(self,data) self.ids=data end} end
+            package.preload.ids_pb=function() return {Ids=ids} end
+            package.preload.mysticalcave_pb=function() return {} end
+            package.preload.somethings_pb=function() return {SomeThings=function() return {
+                ParseFromString=function(self,data) self.data=data end} end} end
+            gamedata={cache={role={gold=100}},ext={}}
+            function gamedata:updateRoleGold(value) self.cache.role.gold=self.cache.role.gold+value end
+            function gamedata:updateStaff(item) self.lastCost=item end
+            function gamedata:SomethingProcess(reward) return reward.data end
+            values={45,1,10,1,1,3,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,2}
+        ''')
+        game_data = builder.read_script("gamedata").decode("utf-8")
+        start = game_data.index("function gamedata.ActivityWatchStar(self,data)")
+        end = game_data.index("function gamedata.ActivityMonthGrowQuery(self, data)", start)
+        lua.execute(game_data[start:end])
+        lua.execute(builder.read_script("GameActivityHole").decode("utf-8"))
+        lua.execute('''
+            local remote,opcode,body=UIMysticalStargazingCallBack({})
+            assert(remote==1 and opcode==2062 and body==nil)
+            local reply=NetMysticalStargazingCallBack({rbuf=values})
+            assert(reply.data.starnum==45 and reply.data.forecastnum==1 and reply.data.changenum==10)
+            assert(#reply.data.starstatus==8 and #reply.data.rewardstatus==10 and reply.data.rewardlevel==2)
+            assert(reply.data.starstatus[3]==3 and reply.data.rewardstatus[3]==1)
+            remote,opcode,body=UIMysticalChangeSwacthStarCallBack({xnum=10})
+            assert(remote==1 and opcode==2064 and body==nil)
+            reply=NetMysticalChangeSwacthStarCallBack({rbuf=values})
+            assert(reply.gold==90 and gamedata.cache.role.gold==90)
+            remote,opcode,body=UIWatchStarWatchExCallBack({xnum=60})
+            assert(remote==1 and opcode==2067 and body==nil)
+            NetWatchStarWatchExCallBack({rbuf=values})
+            assert(gamedata.cache.role.gold==30)
+            remote,opcode,body=UIWatchStarUpLevelCallBack({need={{cid=1001,num=10}}})
+            assert(remote==1 and opcode==2068 and body==nil)
+            reply=NetWatchStarUpLevelCallBack({rbuf={3}})
+            assert(reply.data.rewardlevel==3 and gamedata.lastCost.cid==1001 and gamedata.lastCost.num==-10)
+            remote,opcode,body=UIWatchStarRewardCallBack({})
+            assert(remote==1 and opcode==2066 and body==nil)
+            reply=NetWatchStarRewardCallBack({rbuf='reward'})
+            assert(reply.reward=='reward')
+        ''')
+
     def test_battle_overlapping_dodges_keep_ghosts_alive_until_their_own_cleanup(self):
         try:
             from lupa.lua51 import LuaRuntime

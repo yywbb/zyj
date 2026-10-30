@@ -4534,6 +4534,185 @@ class ReplayRoutingTests(unittest.TestCase):
         self.save_path.write_text(json.dumps(saved))
         return saved
 
+    def prepare_watchstar(self):
+        saved = self.prepare_blackmarket()
+        saved["role_state"].update(level=17, nextexp=self.role_config["role_exp"]["17"]["nextexp"])
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_watchstar_query_and_exact_guide_comb_commit_once(self):
+        baseline = self.prepare_watchstar()
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2062)), [0, 0, 0] + [0] * 18 + [1])
+        self.assertEqual(json.loads(self.save_path.read_text())["guide"], baseline["guide"])
+        # 空 data 可省略；Guide 的 section/step 顺序可以不同。
+        body = bytes.fromhex("0a03088f100a0908c901120410020839")
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(999900, 31001, body)
+            messages = protocol.get_comb_messages(packets[0][16:])
+            self.assertEqual([mid for mid, _ in messages], [2063, 201])
+            values = protocol.parse_ids_pb(messages[0][1])
+            self.assertEqual(values[1:3], [1, 0])
+            self.assertTrue(all(1 <= v <= 8 for v in values[3:11]))
+            self.assertEqual(session.save["guide"]["sections"]["57"]["step"], 2)
+            self.assertEqual(session.handle(999900, 31001, body), packets)
+            self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+        self.assertEqual(self.replay([{"opcode": 999900, "seq": 31002, "hex": body.hex()}])[0]["opcode"], 999999)
+
+    def test_watchstar_rejects_bad_comb_and_standalone_parameters(self):
+        self.prepare_watchstar()
+        sign = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 2063))
+        for data in (b"\x08\x39\x10\x03", b"\x08\x39\x10\x02\x18\x00", b"\x08\x39\x08\x39\x10\x02"):
+            body = sign + protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 201) + protocol.encode_pb_field(2, 2, data))
+            disk = self.save_path.read_bytes()
+            self.assertEqual(self.replay([{"opcode": 999900, "seq": 31003, "hex": body.hex()}])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+        for opcode in range(2062, 2069):
+            disk = self.save_path.read_bytes()
+            self.assertEqual(self.replay([self.activity_request(opcode, [1])])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["level"] = 16
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(2062)])[0]["opcode"], 999999)
+
+    def test_watchstar_empty_data_comb_and_extra_fields(self):
+        self.prepare_watchstar()
+        valid = bytes.fromhex("0a05088f1012000a0908c901120408391002")
+        extra = bytes.fromhex("0a03088f10")
+        for body in (valid + extra, valid + b"\x10\x00", extra + valid):
+            disk = self.save_path.read_bytes()
+            self.assertEqual(self.replay([{"opcode": 999900, "seq": 31004, "hex": body.hex()}])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+        self.assertEqual(self.replay([{"opcode": 999900, "seq": 31005, "hex": valid.hex()}])[0]["opcode"], 999900)
+
+    def test_watchstar_change_collect_claim_and_reconnect(self):
+        self.prepare_watchstar()
+        self.query_world(2062)
+        saved = json.loads(self.save_path.read_text())
+        state = saved["watchstar_state"]
+        state.update(forecasts=1, changes=10, slots=[1, 1, 3, 1, 1, 1, 1, 1])
+        self.save_path.write_text(json.dumps(saved))
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            gold = session.save["role_state"]["gold"]
+            packets = session.handle(2064, 31010, b"")
+            values = protocol.parse_ids_pb(packets[0][16:])
+            self.assertEqual(values[2], 11)
+            self.assertEqual((values[3], values[5]), (1, 3))
+            self.assertEqual(session.save["role_state"]["gold"], gold - 10)
+            self.assertEqual(session.handle(2064, 31010, b""), packets)
+            self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+        saved = json.loads(self.save_path.read_text())
+        saved["watchstar_state"]["slots"] = [1, 1, 3, 1, 1, 1, 1, 1]
+        self.save_path.write_text(json.dumps(saved))
+        reply = self.replay([self.activity_request(2065)])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(reply["hex"]))[:11], [10, 1, 11] + [0] * 8)
+        self.assertEqual(self.replay([self.activity_request(2065)])[0]["opcode"], 999999)
+        saved = json.loads(self.save_path.read_text())
+        saved["watchstar_state"]["stars"] = 45
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2062))[11:21], [1, 1, 1] + [0] * 7)
+        self.assertEqual(self.replay([self.activity_request(2066)])[0]["opcode"], 2066)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], saved["role_state"]["coin"] + 10000)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2062))[11:21], [2, 2, 2] + [0] * 7)
+        self.assertEqual(self.replay([self.activity_request(2066)])[0]["opcode"], 999999)
+
+    def test_watchstar_daily_reset_and_clock_rollback_preserve_reward_level(self):
+        self.prepare_watchstar()
+        self.query_world(2062)
+        saved = json.loads(self.save_path.read_text())
+        saved["watchstar_state"].update(stars=45, forecasts=1, changes=2, slots=[1] * 8, claimed=[1], reward_level=2)
+        self.save_path.write_text(json.dumps(saved))
+        self.clock.return_value += 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(2062)), [0, 0, 0] + [0] * 18 + [2])
+        reset = json.loads(self.save_path.read_text())["watchstar_state"]
+        self.clock.return_value -= 86400
+        self.query_world(2062)
+        self.assertEqual(json.loads(self.save_path.read_text())["watchstar_state"], reset)
+
+    def test_watchstar_onekey_upgrade_and_insufficient_money_are_atomic(self):
+        self.prepare_watchstar()
+        self.query_world(2062)
+        saved = json.loads(self.save_path.read_text())
+        saved["watchstar_state"].update(forecasts=1, slots=[1, 1, 3, 1, 1, 1, 1, 1])
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(2067)])[0]["opcode"], 999999)
+        saved["role_state"].update(vip=4, gold=0)
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2067)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["role_state"].update(gold=1000, level=40)
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(self.replay([self.activity_request(2067)])[0]["hex"]))[3:11], list(range(1, 9)))
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], 800)
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(self.replay([self.activity_request(2068)])[0]["hex"])), [2])
+        self.assertEqual(self.replay([self.activity_request(2068)])[0]["opcode"], 999999)
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"].update(level=50, gold=99)
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2068)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["role_state"]["gold"] = 100
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(self.replay([self.activity_request(2068)])[0]["hex"])), [3])
+        self.assertEqual(json.loads(self.save_path.read_text())["role_state"]["gold"], 0)
+
+    def test_watchstar_forecast_limits_free_changes_and_reconnect(self):
+        self.prepare_watchstar()
+        self.query_world(2062)
+        saved = json.loads(self.save_path.read_text())
+        saved["watchstar_state"].update(forecasts=2, changes=9, slots=[2, 1, 4, 3, 6, 5, 8, 7])
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(2063)])[0]["opcode"], 999999)
+        self.assertEqual(self.replay([self.activity_request(2064)])[0]["opcode"], 2064)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], saved["role_state"]["gold"])
+        self.assertEqual(after["watchstar_state"]["changes"], 10)
+        self.replay([self.activity_request(2065)])
+        self.assertEqual(self.replay([self.activity_request(2063)])[0]["opcode"], 2063)
+        self.replay([self.activity_request(2065)])
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2063)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_watchstar_all_configured_reward_levels_and_corrupt_state(self):
+        saved = self.prepare_watchstar()
+        for level in range(1, 13):
+            with self.subTest(level=level):
+                specification = "".join(self.role_config["watchstar_reward"][str(i)][f"rewards{level}"] for i in range(1, 11))
+                working = copy.deepcopy(saved)
+                reward = activities.build_reward(working, specification, self.role_config)
+                player.apply_reward(working, reward, self.role_config, self.now)
+        self.query_world(2062)
+        saved = json.loads(self.save_path.read_text())
+        for change in ({"slots": [0] * 7}, {"slots": [0, 1] * 4}, {"stars": True},
+                       {"claimed": [1, 1]}, {"claimed": [11]}, {"reward_level": 13}):
+            broken = copy.deepcopy(saved)
+            broken["watchstar_state"].update(change)
+            self.save_path.write_text(json.dumps(broken))
+            disk = self.save_path.read_bytes()
+            with self.subTest(change=change), redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "观星台"):
+                Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_watchstar_save_failure_does_not_commit_or_reply(self):
+        self.prepare_watchstar()
+        self.query_world(2062)
+        for opcode, body in ((2063, b""), (999900, bytes.fromhex("0a03088f100a0908c901120410020839"))):
+            with self.subTest(opcode=opcode), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(opcode, 31020, body)
+                self.assertEqual(session.save, memory)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+                self.assertEqual(session.random_replies, {})
+
     def test_blackmarket_query_populates_nine_saved_slots_without_advancing_guide(self):
         before = self.prepare_blackmarket()
         data = protocol.parse_ids_pb(self.query_world(3630))

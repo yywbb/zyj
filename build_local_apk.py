@@ -449,6 +449,9 @@ end"""
         return {type = 9997, local_login_failed = true, msg = "登录失败：请检查账号密码、后台启用状态及旧设备是否已退出；连续失败请一分钟后重试。"}
     end
 ''')
+    marker = "    return { type = 9999, errornum = error.ids[2], msg = cnMessage }"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    return { type = 9999, errornum = error.ids[2], msg = cnMessage, request_opcode = error.ids[1] }")
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("UILogin").decode("utf-8").replace("\r\n", "\n")
     marker = "function judgeSelectedServerIDValid(t)\n"
@@ -458,6 +461,9 @@ end"""
 ''')
     patched["assets/scripts/UILogin.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("UIErrorMessage").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UIErrorMessage(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if AutoCopyServerError then AutoCopyServerError(t) end\n")
     marker = "function UIErrorMessage7(t)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if t.local_login_failed then
@@ -467,6 +473,9 @@ end"""
 ''')
     patched["assets/scripts/UIErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("UIPrompt").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UIPrompt(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if AutoCopyLocalReject and AutoCopyLocalReject(t) then return end\n")
     for name in ("UIPromptTimeOut", "UIPromptNoSignal"):
         marker = "function " + name + "()\n"
         assert code.count(marker) == 1
@@ -474,6 +483,7 @@ end"""
         LoginScene:failLocalLogin("连接失败，请检查电脑服务与局域网后重试。", false)
         return 0, nil
     end
+    if AutoCopyStop then AutoCopyStop("自动推图已停止：网络连接异常") end
 ''')
     patched["assets/scripts/UIPrompt.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched native login form, credential handoff and login rejection handling")
@@ -991,7 +1001,45 @@ end
     assert code.count(marker) == 1
     code = code.replace(marker, '''    -- 次数取已结算的将领经验，不能按过期的客户端体力重算。
     local challenge = math.floor(copyAttackResultPb.exp.generals[1].exp/config[tostring(map)][tostring(point)].xp)''')
+    start = code.index("function UICopyAttack2Callback(uireq)")
+    end = code.index("function UICopyAll3StarRewardCallback(uireq)", start)
+    attack = code[start:end]
+    marker = "    gamedata.ext.copyattack = {map = uireq.map, point = uireq.point }"
+    assert attack.count(marker) == 1
+    attack = attack.replace(marker, "    gamedata.ext.copyattack = {map = uireq.map, point = uireq.point, local_auto_copy = uireq.local_auto_copy}")
+    for marker in ('msgtype = "shortphysical", param = gamedata.cache.props',
+                   'msgtype = "shortCopyChallenge" , msg = "挑战次数不足！"'):
+        assert attack.count(marker) == 1
+        attack = attack.replace(marker, marker + ', localAutoCopy = uireq.local_auto_copy')
+    marker = "    t.point = point\n"
+    assert attack.count(marker) == 1
+    attack = attack.replace(marker, marker + '''    t.localAutoCopy = gamedata.ext.copyattack.local_auto_copy
+    t.localAutoStamina = gamedata.cache.role.stamina
+''')
+    code = code[:start] + attack + code[end:]
     patched["assets/scripts/GameCopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("UICopy").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UICopyAttack2(t)\n"
+    assert code.count(marker) == 1
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "auto_copy.lua"), encoding="utf-8") as source:
+        auto_copy = source.read()
+    code = code.replace(marker, auto_copy + "\n" + marker + "    if AutoCopyHandle(t) then return end\n")
+    patched["assets/scripts/UICopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_copy_list").decode("utf-8").replace("\r\n", "\n")
+    marker = "    self:setParam(param)\n    self:reloaddata()\nend\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    self:setParam(param)\n    self:reloaddata()\n    if self.datatype == \"normal\" then AutoCopyAttach(self,toppos) end\nend\n")
+    marker = "function copymap.clear(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    AutoCopyDetach(self)\n")
+    for marker in ("function copymap.wipeFunc(self,data,method)\n", "    item.explore:addHandleOfControlEvent(function()\n",
+                   '        self.rootItems["r_button"..i]:addHandleOfControlEvent(function()\n'):
+        assert code.count(marker) == 1
+        indent = "    " if marker.startswith("function") else "        " if marker.startswith("    item") else "            "
+        code = code.replace(marker, marker + indent + "if AutoCopyBlockManual() then return end\n")
+    patched["assets/scripts/Layer_copy_list.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("battlegeneral").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function general.dodgeAction(self,data)")
