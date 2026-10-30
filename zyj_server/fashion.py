@@ -4,7 +4,7 @@ from . import formation, recharge, shop
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_varint
 
 
-QUERIES = (1070, 1075, 1076)
+QUERIES = (1070, 1075, 1076, 6911)
 TRANSACTIONS = (1071, 1072, 1073, 1074)
 OPCODES = QUERIES + TRANSACTIONS
 
@@ -41,6 +41,11 @@ def attributes(levels, config):
 
 
 def prepare(opcode, save, body, config, now):
+    if opcode == 6911:
+        if body:
+            raise ValueError("本地伙伴时装暂只支持完整列表查询")
+        # 伙伴时装尚无购买/领取入口，当前真实拥有列表为空，不混用主角时装。
+        return b"", [], b""
     state = get_state(save, config)
     levels = state["levels"]
     event = config["activity_time"]["43"]

@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, configuration, daily_events, development, fashion, formation, online_rewards, recharge, recruit, shop, training, welfare
+from . import activities, battle, configuration, daily_events, development, fashion, formation, online_rewards, recharge, recruit, rob, shop, training, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -18,7 +18,7 @@ from .protocol import (
 
 print_flush = functools.partial(print, flush=True)
 
-WORLD_QUERY_IDS = (1002, 1012, 1200, 1300)
+WORLD_QUERY_IDS = (1002, 1012, 1107, 1200, 1300)
 SLOT_RECORD_KEYS = {1: 2, 2: 1, 3: 1, 4: 1, 5: 1, 7: 1}
 STAMINA_INTERVAL = 360  # 多份 Role 抓包的全部/下次恢复倒计时之差可交叉验证。
 
@@ -58,7 +58,7 @@ def load_role_config(config_path):
                              "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake",
                              "month_welfare", "month_growup", "week_growup_1", "week_growup_2_1",
                              "week_growup_money_1", "week_growup_money_2_1", "recharge_gift_1",
-                             "speedup_gift_time_x1", "speedup_gift", *sign_tables))
+                             "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop", *sign_tables))
 
 
 def get_default_save():
@@ -250,7 +250,7 @@ def initialize_world_state(save, master_packets):
             if field == 1 and wire == 2:
                 if mid == 1300:
                     merge_pb_records(value, b"", {7: 1})
-                elif mid in (1012, 1200):
+                elif mid in (1012, 1107, 1200):
                     count = pb_get_varint(value, 2)
                     if count is None or not 0 <= count < (1 << 31):
                         raise ValueError("存档道具数量无效")
@@ -302,10 +302,11 @@ def change_item_count(save, cid, delta, role_config, now=None):
     fragment = role_config["general_fragment"].get(str(cid))
     if fragment is None and str(cid) not in role_config["props"]:
         fragment = next((row for row in role_config["general_fragment"].values() if row["general"] == cid), None)
-    query = "1012" if fragment else "1200"
+    equip_fragment = str(cid) in role_config["treasure2_fragment"] or str(cid) in role_config["equip_fragment"]
+    query = "1012" if fragment else "1107" if equip_fragment else "1200"
     if fragment:
         cid = fragment["general"]
-    elif str(cid) not in role_config["props"]:
+    elif not equip_fragment and str(cid) not in role_config["props"]:
         raise ValueError(f"未实现的物品类型: {cid}")
     world = save["world_state"]
     body = bytes.fromhex(world[query])
@@ -441,11 +442,19 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             if field == 1 and wire == 2:
                 mid, data = next(messages)
                 updated = prepare_recorded_response(mid, data, save, requests.get(mid, b""), step_counts, role_config, now)
+                if mid == 1111 and pb_get_varint(updated, 1) == 0:
+                    # 原生引导收到 1111 成功包就进入翻牌；失败整组回滚，避免跳到不存在的奖励窗口。
+                    raise ValueError("未战胜本地守卫，请先提升阵容；引导未推进，未消耗精力。")
                 if updated != data:
                     value = pb_set_field(value, 2, 2, updated)
             out.extend(encode_pb_field(field, wire, value))
         return bytes(out)
-    if opcode == 999905:
+    if opcode == 204:
+        gender = pb_get_varint(bytes.fromhex(save.get("role_snapshot", "")), 2)
+        if request_body or not save.get("has_role") or gender not in (0, 1):
+            raise ValueError("角色性别查询参数或角色状态无效")
+        body = encode_pb_field(1, 0, 1 if gender else 2)
+    elif opcode == 999905:
         if request_body:
             raise ValueError("时间查询不接受参数")
         # 客户端把第二项取反作为时区；沿用抓包的 UTC+8，不跟随宿主机时区。
@@ -516,6 +525,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             record_protagonist_general(save, general)
             record_slot_update(save, encode_pb_field(1, 2, general)
                                + encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
+    elif opcode in rob.OPCODES:
+        body, costs, reward = rob.prepare(opcode, save, request_body, role_config, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode in WORLD_QUERY_IDS:
         body = bytes.fromhex(save["world_state"][str(opcode)])
         if opcode == 1002 and save.get("protagonist_snapshot"):
@@ -701,10 +716,11 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb:
         state, previous = save["role_state"], get_role_state(before, role_config)
-        power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
-                         (state["power"] - previous["power"], state["power"], 0, state["g_power"],
-                          state["power_all"] - previous["power_all"], state["power_all"]))
-        packets.append(pack_frame(205, 0, power))
+        if any(state[key] != previous[key] for key in ("power", "g_power", "power_all")):
+            power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
+                             (state["power"] - previous["power"], state["power"], state["g_power"] - previous["g_power"], state["g_power"],
+                              state["power_all"] - previous["power_all"], state["power_all"]))
+            packets.append(pack_frame(205, 0, power))
     return save_response_group(packets, save, before, save_path, step_counts, role_config, now)
 
 

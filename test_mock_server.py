@@ -863,6 +863,189 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(self.replay([self.activity_request(1074, [80001])])[0]["opcode"], 999999)
         self.assertEqual(self.save_path.read_bytes(), original)
 
+    def test_fashion_appearance_changes_do_not_emit_zero_power_animations(self):
+        self.seed_shop_account()
+        bought = self.replay([self.activity_request(1074, [80001])])
+        self.assertTrue(any(f["opcode"] == 205 for f in bought))
+        before = json.loads(self.save_path.read_text())
+        for opcode, values in ((1073, [80001]), (1071, []), (1071, []), (1073, [80001])):
+            replies = self.replay([self.activity_request(opcode, values)])
+            self.assertEqual([f["opcode"] for f in replies], [opcode])
+            saved = json.loads(self.save_path.read_text())
+            for key in ("power", "power_all", "g_power"):
+                self.assertEqual(saved["role_state"][key], before["role_state"][key])
+        self.give_props({20281: 10})
+        strengthened = self.replay([self.activity_request(1072, [80001])])
+        push = next(f for f in strengthened if f["opcode"] == 205)
+        self.assertGreater(protocol.parse_ids_pb(bytes.fromhex(push["hex"]))[4], 0)
+
+    def test_rankings_use_local_saves_pagination_and_unique_viewer_ids_without_writes(self):
+        self.seed_shop_account()
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        baseline = json.loads(self.save_path.read_text())
+        for account, level, power in ((1, 11, 5000), (2, 12, 4000), (3, 11, 5000)):
+            saved = copy.deepcopy(baseline)
+            saved["role_name"] = f"本地角色{account}"
+            saved["role_state"].update(level=level, power=power, power_all=power)
+            path = store.path(account)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(saved))
+        files = {path: path.read_bytes() for path in self.save_path.parent.glob("**/*.json")}
+        rows = list(self.entity_records(self.query_world_for_values(3500, [1, 1, 50]), 1, 1).values())
+        names = lambda records: [next(v.decode() for n, w, v in protocol.iter_pb_fields(row) if n == 2) for row in records]
+        self.assertEqual(names(rows), ["本地角色2", "本地角色1", "本地角色3"])
+        self.assertEqual(protocol.pb_get_varint(rows[1], 1), protocol.pb_get_varint(bytes.fromhex(baseline["role_snapshot"]), 1))
+        self.assertEqual(names(self.entity_records(self.query_world_for_values(3500, [2, 2, 1]), 1, 1).values()), ["本地角色3"])
+        self.assertEqual(self.query_world_for_values(3500, [1, 20, 50]), b"")
+        for method in (6, 8, 19):
+            self.assertTrue(self.query_world_for_values(3500, [method, 1, 50]))
+        for path, raw in files.items():
+            self.assertEqual(path.read_bytes(), raw)
+
+    def test_rankings_reject_bad_requests_and_corrupt_saves(self):
+        self.seed_shop_account()
+        before = self.save_path.read_bytes()
+        for values in ([], [1, 0, 50], [1, 1, 0], [1, 1, 1001], [10, 1, 50], [1, 1, 50, 1]):
+            self.assertEqual(self.replay([self.activity_request(3500, values)])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), before)
+        path = self.save_path.parent / "accounts" / "2" / "role_save.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("broken")
+        self.assertEqual(self.replay([self.activity_request(3500, [1, 1, 50])])[0]["opcode"], 999999)
+        self.assertEqual(path.read_text(), "broken")
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def seed_rob_account(self):
+        self.seed_shop_account()
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["level"] = 11
+        saved["guide"]["sections"]["52"] = {"status": 1, "step": 2, "steps": [1, 2]}
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def rob_guide_request(self, rid):
+        return {"opcode": 999900, "seq": 12345, "hex": b"".join(
+            protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid) + protocol.encode_pb_field(2, 2, data))
+            for mid, data in ((1111, bytes.fromhex(self.activity_request(1111, [rid, 999])["hex"])),
+                              (201, b"\x08\x34\x10\x03"))).hex()}
+
+    def test_rob_guide_battle_rewards_fragments_and_compound_survive_reconnect(self):
+        self.seed_rob_account()
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1112)), [0])
+        players = list(self.entity_records(self.query_world_for_values(1110, [28010]), 1, 1).values())
+        self.assertEqual(len(players), 3)
+        rid = protocol.pb_get_varint(players[0], 1)
+        self.assertGreater(rid, 2146483648)
+        before = json.loads(self.save_path.read_text())
+        request = self.rob_guide_request(rid)
+        replies = self.replay([request, request])
+        self.assertEqual(replies[0], replies[1])
+        result = dict(protocol.get_comb_messages(bytes.fromhex(replies[0]["hex"])))[1111]
+        self.assertEqual(protocol.pb_get_varint(result, 1), 1)
+        report = json.loads(next(v for n, w, v in protocol.iter_pb_fields(result) if n == 5))
+        self.assert_battle_report(report)
+        saved = json.loads(self.save_path.read_text())
+        self.assertEqual(saved["role_state"]["energy"], before["role_state"]["energy"] - 1)
+        self.assertEqual(saved["role_state"]["stamina"], before["role_state"]["stamina"])
+        self.assertEqual(saved["guide"]["sections"]["52"]["step"], 3)
+        fragments = self.entity_records(self.query_world(1107), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(fragments[28010], 2), 1)
+        compound = self.replay([self.activity_request(1108, [26102])])[0]
+        self.assertEqual(compound["opcode"], 1108)
+        equipment = self.entity_records(self.query_world(1002), 2, 1)
+        self.assertEqual(sum(protocol.parse_ids_pb(raw)[1] == 26102 for raw in equipment.values()), 1)
+        fragments = self.entity_records(self.query_world(1107), 1, 1)
+        self.assertTrue(all(cid not in fragments for cid in (28010, 28011, 28012)))
+        initial = self.replay([dict(self.by_seq[12], seq=23456)])[0]
+        restored = self.entity_records(dict(protocol.get_comb_messages(bytes.fromhex(initial["hex"])))[1107], 1, 1)
+        self.assertTrue(all(cid not in restored for cid in (28010, 28011, 28012)))
+        self.assertEqual(self.replay([self.activity_request(1108, [26102])])[0]["opcode"], 999999)
+
+    def test_rob_invalid_requests_and_save_failure_do_not_charge_or_advance_guide(self):
+        self.seed_rob_account()
+        players = list(self.entity_records(self.query_world_for_values(1110, [28010]), 1, 1).values())
+        rid = protocol.pb_get_varint(players[0], 1)
+        original = self.save_path.read_bytes()
+        for request in (self.activity_request(1107, [1]), self.activity_request(1110, [28011]), self.activity_request(1110, [28014]),
+                        self.activity_request(1111, [250, 0]), self.activity_request(1111, [rid, 1]),
+                        self.activity_request(1111, [rid, 0, 0]), self.activity_request(1108, [26102])):
+            self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), original)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            baseline = copy.deepcopy(session.save)
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(999900, 12345, bytes.fromhex(self.rob_guide_request(rid)["hex"]))
+        self.assertEqual(session.save, baseline)
+        self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_rob_guide_comb_rejects_unmatched_fields_and_saves_before_reply(self):
+        self.seed_rob_account()
+        rows = self.entity_records(self.query_world_for_values(1110, [28010]), 1, 1)
+        rid = next(iter(rows))
+        request = self.rob_guide_request(rid)
+        original = self.save_path.read_bytes()
+        raw = bytes.fromhex(request["hex"])
+        for invalid in (raw + b"\x10\x01", raw + raw[:raw[1] + 2], raw.replace(b"\x08\x34\x10\x03", b"\x08\x34\x10\x04")):
+            self.assertEqual(self.replay([dict(request, hex=invalid.hex())])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), original)
+        conn = ReplayConnection([request], 7)
+        send = conn.sendall
+        def check_saved(packet):
+            saved = json.loads(self.save_path.read_text())
+            self.assertEqual(saved["guide"]["sections"]["52"]["step"], 3)
+            self.assertEqual(saved["role_state"]["energy"], 19)
+            self.assertEqual(protocol.pb_get_varint(self.entity_records(bytes.fromhex(saved["world_state"]["1107"]), 1, 1)[28010], 2), 1)
+            send(packet)
+        conn.sendall = check_saved
+        with redirect_stdout(io.StringIO()):
+            self.run_client(conn)
+        self.assertEqual([f["opcode"] for f in conn.responses], [999900])
+
+    def test_rob_real_loss_spends_energy_without_rewards_or_stat_changes(self):
+        saved = self.seed_rob_account()
+        world = bytes.fromhex(saved["world_state"]["1002"])
+        for raw in self.entity_records(world, 1, 2).values():
+            for field, value in ((6, 1), (7, 0), (8, 1), (9, 1)):
+                raw = protocol.pb_set_varint(raw, field, value)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            player.record_protagonist_general(saved, raw)
+        self.save_path.write_text(json.dumps(saved))
+        players = list(self.entity_records(self.query_world_for_values(1110, [28010]), 1, 1).values())
+        rid = protocol.pb_get_varint(players[0], 1)
+        before = json.loads(self.save_path.read_text())
+        reply = self.replay([self.activity_request(1111, [rid, 0])])[0]
+        self.assertEqual(reply["opcode"], 1111)
+        self.assertEqual(protocol.pb_get_varint(bytes.fromhex(reply["hex"]), 1), 0)
+        saved = json.loads(self.save_path.read_text())
+        self.assertEqual(saved["world_state"], before["world_state"])
+        for key, value in before["role_state"].items():
+            self.assertEqual(saved["role_state"][key], value - 1 if key == "energy" else value)
+        before = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.rob_guide_request(rid)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_latest_missing_read_queries_reports_and_hint_retrieval(self):
+        self.seed_shop_account()
+        self.query_world(1032)
+        before = self.save_path.read_bytes()
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(204)), [1])
+        self.assertEqual(self.query_world(6911), b"")
+        rows = self.begin7day_groups(self.query_world(4016))
+        self.assertEqual(set(rows), set(range(1, 6)))
+        for group, counts in rows.items():
+            self.assertEqual(counts, [0] * max(map(int, self.role_config["exchange_shop"].get(str(group), {})), default=0))
+        self.assertEqual(self.query_world_for_values(999901, [12]), b"\x08\x0c")
+        reply = self.replay([self.activity_request(999989, [1032])])[0]
+        self.assertEqual((reply["opcode"], reply["hex"]), (1032, self.query_world(1032).hex()))
+        self.assertEqual(self.save_path.read_bytes(), before)
+        for request in (self.activity_request(204, [1]), self.activity_request(6911, [1]),
+                        self.activity_request(4016, [1]), self.activity_request(4017, [1, 1]),
+                        self.activity_request(999901), self.activity_request(999901, [12, 12]),
+                        self.activity_request(999989, [1111])):
+            self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), before)
+
     def test_shop_purchase_is_saved_before_reply_and_retry_is_not_recharged(self):
         self.seed_shop_account()
         request = self.shop_request(3201, 21)
@@ -4119,7 +4302,12 @@ class ReplayRoutingTests(unittest.TestCase):
             with self.subTest(opcode=opcode):
                 reply = self.replay([self.activity_request(opcode)])[0]
                 self.assertEqual(reply["opcode"], opcode)
-                self.assert_rejected(self.activity_request(opcode, [1]), "活动请求格式错误")
+                if opcode == 4016:
+                    before = self.save_path.read_bytes()
+                    self.assertEqual([f["opcode"] for f in self.replay([self.activity_request(opcode, [1])])], [999999, 1999])
+                    self.assertEqual(self.save_path.read_bytes(), before)
+                else:
+                    self.assert_rejected(self.activity_request(opcode, [1]), "活动请求格式错误")
         shop = protocol.parse_ids_pb(bytes.fromhex(self.replay([self.activity_request(5015)])[0]["hex"]))
         self.assertEqual(len(shop), 3 + max(map(int, self.role_config["goddown_exchange_1"])))
         rank = self.replay([self.activity_request(5017)])[0]

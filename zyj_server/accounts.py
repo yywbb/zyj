@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import player, protocol, storage, welfare
+from . import player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -121,7 +121,8 @@ class AccountStore:
                 raise ValueError(f"账号 {account} 已在线，请先退出原设备")
             self.active[account] = {"address": str(address[0]), "connected_at": time.time()}
         try:
-            return Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers)
+            return Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
+                           lambda body: self.rank_query(account, body))
         except Exception as error:
             self.close_session(account)
             raise ValueError(f"载入玩家状态失败: {error}") from error
@@ -141,6 +142,16 @@ class AccountStore:
             if save.get("has_role") and welfare.get_state(save)["growth_bought"]:
                 count += 1
         return count
+
+    def rank_query(self, viewer, body):
+        saves = {}
+        for account in self.account_ids():
+            snapshot = self.snapshot(account)
+            if snapshot["error"]:
+                raise ValueError("账号存档损坏，无法生成排行榜")
+            if snapshot["save"].get("has_role"):
+                saves[account] = snapshot["save"]
+        return ranking.query(body, saves, viewer, self.role_config)
 
     def account_ids(self):
         with self.lock:

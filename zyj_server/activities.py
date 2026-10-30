@@ -2,9 +2,9 @@
 
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
-PAGE_OPCODES = (4810, 4813, 4814, 5010, 5015, 5017, 5020, 5022, 5030, 5039)
+PAGE_OPCODES = (4016, 4810, 4813, 4814, 5010, 5015, 5017, 5020, 5022, 5030, 5039)
 TRANSACTION_OPCODES = (5031, 5040)
-UNSUPPORTED_OPCODES = (2081, 2082, 7092, 4811, 4812, 5011, 5012, 5013, 5014, 5016, 5021, 5023)
+UNSUPPORTED_OPCODES = (2081, 2082, 7092, 4017, 4811, 4812, 5011, 5012, 5013, 5014, 5016, 5021, 5023)
 OPCODES = (3610, 3611, 2410, 2411, 6517, 4600, *PAGE_OPCODES, *TRANSACTION_OPCODES)
 CLAIM_OPCODES = (3611, 2411, 5040)
 BEGIN_REWARDS = (*range(80001, 80015), 80030)
@@ -71,7 +71,8 @@ def build_reward(save, specification, config, quantity=1):
             coin += count
         elif cid == 1001:
             gold += count
-        elif str(cid) in config["props"] or str(cid) in config["general_fragment"]:
+        elif (str(cid) in config["props"] or str(cid) in config["general_fragment"]
+              or str(cid) in config["treasure2_fragment"] or str(cid) in config["equip_fragment"]):
             record = encode_pb_field(1, 0, cid) + encode_pb_field(2, 0, count)
             props.append(encode_pb_field(1, 2, record))
         elif str(cid) in config["equip"]:
@@ -125,6 +126,10 @@ def record_gold_spend(save, amount, config, now):
 
 def prepare_page(opcode, save, config, now):
     state = get_state(save)
+    if opcode == 4016:
+        # 兑换尚未开放，没有本地已兑换次数；原生页面要求五组完整的逐项计数。
+        return b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, group) + encode_pb_field(2, 2,
+                        _ids([0] * max(map(int, config["exchange_shop"].get(str(group), {})), default=0)))) for group in range(1, 6))
     if opcode == 4810:
         # 空拍卖行无竞价记录；不复用抓包的两秒刷新计时，避免无物品时反复轮询。
         return _ids([2, 0])

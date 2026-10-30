@@ -4,8 +4,8 @@ import copy
 import functools
 import time
 
-from . import activities, daily_events, development, fashion, guide, online_rewards, player, recharge, recruit, shop, training, welfare
-from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, pack_frame
+from . import activities, daily_events, development, fashion, guide, online_rewards, player, recharge, recruit, rob, shop, training, welfare
+from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame
 from .replay import Replay, normalize_comb_request
 
 print_flush = functools.partial(print, flush=True)
@@ -19,12 +19,13 @@ def unavailable_response(opcode, seq, body, message):
 
 
 class Session:
-    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None):
+    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None):
         self.replay = Replay(tables)
         self.save_path = save_path
         self.step_counts = step_counts
         self.role_config = role_config
         self.growth_buyers = growth_buyers
+        self.rank_query = rank_query
         self.random_replies = {}
         self.connected_at = int(time.time())
         self.save = player.load_save(save_path, step_counts)
@@ -93,6 +94,31 @@ class Session:
         if opcode == 1401:
             return unavailable_response(opcode, seq, body, "本地服暂未开放此招募方式，请使用普通招募。")
 
+        if opcode == 1107 and body:
+            return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
+
+        if opcode == 3500:
+            try:
+                if self.rank_query is None:
+                    raise ValueError("排行榜需要绑定本地账号库")
+                return [pack_frame(opcode, seq, self.rank_query(body))]
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
+
+        if opcode in (999901, 999989):
+            try:
+                fields = list(iter_pb_fields(body))
+                if len(fields) != 1 or fields[0][:2] != (1, 0) or not 0 < fields[0][2] < (1 << 31):
+                    raise ValueError("行为上报或响应重取参数无效")
+                if opcode == 999989:
+                    # 仅重建只读提示查询，绝不重做消费、战斗或奖励交易。
+                    if fields[0][2] != 1032:
+                        raise ValueError("暂只支持重新获取提示状态，请重新打开对应页面")
+                    return self.handle(1032, seq, b"")
+                return [pack_frame(opcode, seq, body)]
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
+
         if opcode in (7094, 7095):
             working = copy.deepcopy(self.save)
             now = int(time.time())
@@ -114,6 +140,7 @@ class Session:
 
         sign_comb = False
         break_comb = False
+        rob_comb = False
         if opcode == 999900:
             # 仅开放原生签到引导的完整二消息模板；仍保留顺序、未知字段和重复字段校验。
             templates = [encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + empty)
@@ -127,13 +154,18 @@ class Session:
                     expected = (encode_pb_field(1, 2, encode_pb_field(1, 0, 1017) + encode_pb_field(2, 2, messages[0][1]))
                                 + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x05\x10\x04")))
                     break_comb = normalize_comb_request(body) == expected
+            if [mid for mid, _ in messages] == [1111, 201]:
+                expected = (encode_pb_field(1, 2, encode_pb_field(1, 0, 1111) + encode_pb_field(2, 2, messages[0][1]))
+                            + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x34\x10\x03")))
+                rob_comb = normalize_comb_request(body) == expected
 
         fixed_box = False
         if opcode == 1201:
             values = player.parse_prop_use(body)
             fixed_box = shop.fixed_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or break_comb or fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+                                  *rob.MUTATIONS,
                                   *development.MUTATIONS, *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
             key = (seq, body)
@@ -152,6 +184,12 @@ class Session:
                              + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01"))) if sign_comb else b""
                     if break_comb:
                         reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 1017) + encode_pb_field(2, 2, b""))
+                                  + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
+                    if rob_comb:
+                        section = working.get("guide", {}).get("sections", {}).get("52", {})
+                        if section.get("status") != 1 or section.get("step") != 2:
+                            raise ValueError("挑战引导步骤已变化，请重新进入")
+                        reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 1111) + encode_pb_field(2, 2, b""))
                                  + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
                     packets = player.prepare_recorded_responses(
                         seq, [{"opcode": opcode, "seq": seq, "hex": reply.hex()}], working, body,
@@ -165,7 +203,7 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (300, 1304, 1402, 2037, 2411, 3611, 7110, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (204, 300, 4016, 1304, 1402, 2037, 2411, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES):
             working = copy.deepcopy(self.save)
             try:
