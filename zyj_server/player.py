@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, configuration, daily_events, development, fashion, formation, online_rewards, recharge, recruit, rob, shop, training, welfare
+from . import activities, battle, configuration, daily_events, development, fashion, formation, online_rewards, recharge, recruit, rob, shop, star_copy, training, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -45,7 +45,7 @@ def load_role_config(config_path):
     with zipfile.ZipFile(config_path) as archive:
         sign_tables = tuple(n[2:-5] for n in archive.namelist() if n.startswith("5/sign2_") and n.endswith(".json"))
     return configuration.load_tables(config_path,
-                            ("role_exp", "copy", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
+                            ("role_exp", "copy", "star_copy", "star_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
                              "begin7day", "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
@@ -493,6 +493,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = daily_events.prepare(opcode, save, request_body, role_config, now)
         if opcode in daily_events.CLAIMS:
             apply_reward(save, body, role_config, now)
+    elif opcode == 1350:
+        body = star_copy.query(save, request_body, role_config, now)
+    elif opcode == 1351:
+        body, reward = star_copy.fight(save, request_body, role_config, now, random.getrandbits(64))
+        apply_reward(save, reward, role_config, now)
     elif opcode == 300:
         if request_body:
             raise ValueError("贵族状态查询不接受参数")

@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, daily_events, development, fashion, guide, online_rewards, player, ranking, recharge, recruit, rob, shop, training, welfare
+from . import activities, daily_events, development, fashion, guide, online_rewards, player, ranking, recharge, recruit, rob, shop, star_copy, training, welfare
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -41,6 +41,7 @@ class Session:
         online_rewards.get_state(self.save, role_config)
         welfare.get_state(self.save)
         daily_events.get_state(self.save)
+        star_copy.get_state(self.save, role_config)
         if self.save.get("has_role"):
             player.get_role_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
@@ -228,7 +229,7 @@ class Session:
             values = player.parse_prop_use(body)
             local_box = shop.openable_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1307, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1307, 1351, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
                                   *rob.MUTATIONS,
                                   *development.MUTATIONS, *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
@@ -267,7 +268,7 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (204, 300, 4016, 1304, 1402, 2037, 2411, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (204, 300, 4016, 1304, 1350, 1402, 2037, 2411, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES):
             working = copy.deepcopy(self.save)
             try:

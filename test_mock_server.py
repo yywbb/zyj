@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, daily_events, development, diagnostics, formation, guide, player, protocol, ranking, recharge, recruit, replay, rob, shop, training, welfare
+from zyj_server import accounts, activities, battle, daily_events, development, diagnostics, formation, guide, player, protocol, ranking, recharge, recruit, replay, rob, shop, star_copy, training, welfare
 from zyj_server.session import Session
 
 
@@ -169,6 +169,10 @@ class ReplayRoutingTests(unittest.TestCase):
         elif opcode == 2037:
             # 教程回归冻结时间，不能继承录制中已到期的在线奖励倒计时。
             self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [1, 60])
+        elif opcode == 1350:
+            # 这里比较新号初始化的历史应答，不能拿后续教程通关后的存档当期望。
+            self.assertEqual(self.star_copy_groups(bytes.fromhex(actual)),
+                             {0: [0], **{mid: [mid, -1] for mid in range(42101, 42106)}})
         elif opcode == 2000:
             saved = json.loads(self.save_path.read_text())
             body = daily_events.rewrite_periods(welfare.rewrite_activities(bytes.fromhex(expected)), saved,
@@ -4515,6 +4519,225 @@ class ReplayRoutingTests(unittest.TestCase):
                 report = battle.simulate(attack, defense, self.role_config, 7)
                 self.assert_battle_report(report)
                 self.assertEqual(report["rules"], "zyj-v2")
+
+    def star_copy_groups(self, body):
+        return {mid: [value - (1 << 64) if value >= (1 << 63) else value for value in values]
+                for mid, values in self.begin7day_groups(body).items()}
+
+    def prepare_star_copy(self, strong=True):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"].update(level=14, nextexp=self.role_config["role_exp"]["14"]["nextexp"])
+        for raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).values():
+            for field in (6, 8):
+                raw = protocol.pb_set_varint(raw, field, 100000 if strong else 1)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            player.record_protagonist_general(saved, raw)
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_star_copy_query_populates_guide_chapter_without_granting_progress(self):
+        before = self.prepare_star_copy()
+        body = self.query_world(1350)
+        groups = self.star_copy_groups(body)
+        self.assertEqual(groups[0], [0])
+        self.assertEqual(set(groups), {0, 42101, 42102, 42103, 42104, 42105})
+        self.assertEqual(groups[42101], [42101, 0, 1, -1, 0])
+        self.assertTrue(all(groups[mid] == [mid, -1] for mid in range(42102, 42106)))
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(before["guide"], after["guide"])
+        self.assertEqual(before["world_state"], after["world_state"])
+        self.assertEqual(before["role_state"], after["role_state"])
+
+    def test_star_copy_first_win_is_live_atomic_and_not_a_campaign_clear(self):
+        before = self.prepare_star_copy()
+        body = bytes.fromhex(self.activity_request(1351, [42101, 1])["hex"])
+        with redirect_stdout(io.StringIO()), patch.object(player.random, "getrandbits", return_value=42):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            with patch.object(player, "save_role", wraps=player.save_role) as persist:
+                packets = session.handle(1351, 25000, body)
+                self.assertEqual(persist.call_count, 1)
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2:], (1351, 25000))
+            fields = {n: v for n, w, v in protocol.iter_pb_fields(packets[0][16:])}
+            self.assertEqual(fields[1], 1)
+            report = json.loads(fields[5])
+            self.assertTrue(report["result"])
+            self.assert_battle_report(report)
+            after = copy.deepcopy(session.save)
+            self.assertEqual(json.loads(self.save_path.read_text()), after)
+            self.assertEqual(session.handle(1351, 25000, body), packets)
+        self.assertEqual(after["role_state"]["gold"] - before["role_state"]["gold"], 40)
+        for key in ("level", "exp", "coin", "stamina", "energy", "power"):
+            self.assertEqual(after["role_state"][key], before["role_state"][key])
+        for key in ("guide", "last_battle"):
+            self.assertEqual(after.get(key), before.get(key))
+        for mid in (1002, 1012, 1107, 1300):
+            self.assertEqual(after["world_state"][str(mid)], before["world_state"][str(mid)])
+        self.assertEqual(self.star_copy_groups(self.query_world(1350))[42101], [42101, 1, 1, 1, 0])
+        result = self.replay([self.activity_request(1351, [42101, 1])])
+        self.assertEqual(result[0]["opcode"], 999999)
+
+    def test_star_copy_initial_comb_uses_local_query_instead_of_empty_capture(self):
+        self.prepare_star_copy()
+        result = self.replay([dict(self.by_seq[12], seq=25100)])[0]
+        body = next(data for mid, data in protocol.get_comb_messages(bytes.fromhex(result["hex"])) if mid == 1350)
+        self.assertEqual(self.star_copy_groups(body)[42101], [42101, 0, 1, -1, 0])
+        self.assertEqual(body, self.query_world(1350))
+
+    def test_star_copy_losses_do_not_grant_rewards_or_consume_success_counts(self):
+        before = self.prepare_star_copy(strong=False)
+        result = self.replay([self.activity_request(1351, [42101, 1])])[0]
+        self.assertEqual(result["opcode"], 1351)
+        fields = {n: v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(result["hex"]))}
+        self.assertEqual(fields[1], 0)
+        self.assert_battle_report(json.loads(fields[5]))
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"], before["role_state"])
+        self.assertEqual(after["world_state"], before["world_state"])
+        self.assertEqual(after["star_copy_state"]["progress"], {})
+        self.assertEqual(after["star_copy_state"]["wins"], {})
+        self.assertEqual(after["guide"], before["guide"])
+
+    def test_star_copy_day_reset_keeps_first_win_and_never_reopens_on_clock_rollback(self):
+        saved = self.prepare_star_copy()
+        for pid in self.role_config["copy"]["42102"]:
+            player.record_copy_win(saved, bytes.fromhex(self.activity_request(1306, [42102, int(pid)])["hex"]),
+                                   3, self.role_config, allow_repeat=True)
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(1351, [42101, 1])])
+        won = json.loads(self.save_path.read_text())
+        self.clock.return_value += 86400
+        rows = self.star_copy_groups(self.query_world(1350))
+        self.assertEqual(rows[0], [0])
+        self.assertEqual(rows[42101], [42101, 1, 1, 0, 0])
+        self.assertEqual(rows[42102], [42102, 0, 1, -1, 0])
+        self.replay([self.activity_request(1351, [42101, 1])])
+        repeated = json.loads(self.save_path.read_text())
+        self.assertEqual(repeated["role_state"]["gold"], won["role_state"]["gold"])
+        self.clock.return_value -= 86400
+        rows = self.star_copy_groups(self.query_world(1350))
+        self.assertEqual(rows[0], [1])
+        self.assertEqual(rows[42101], [42101, 1, 1, 1, 0])
+        result = self.replay([self.activity_request(1351, [42101, 1])])
+        self.assertEqual(result[0]["opcode"], 999999)
+
+    def test_star_copy_rejects_malformed_locked_and_exhausted_requests_without_mutation(self):
+        baseline = self.prepare_star_copy()
+        valid = bytes.fromhex(self.activity_request(1351, [42101, 1])["hex"])
+        cases = [(1350, b"\x08\x01", "query"), (1351, b"", "empty"), (1351, b"\x08", "truncated"),
+                 (1351, valid + b"\x08\x01", "extra"), (1351, valid + b"\x10\x01", "wire"),
+                 (1351, valid, "level"), (1351, valid, "ordinary"), (1351, valid, "limit")]
+        cases += [(1351, bytes.fromhex(self.activity_request(1351, values)["hex"]), str(values))
+                  for values in ([0, 1], [99999, 1], [42101, 2], [42102, 1], [42104, 2], [42106, 1], [1 << 31, 1])]
+        for opcode, body, kind in cases:
+            saved = copy.deepcopy(baseline)
+            if kind == "level":
+                saved["role_state"]["level"] = 13
+            elif kind == "ordinary":
+                saved["world_state"]["1300"] = ""
+            elif kind == "limit":
+                saved["star_copy_state"].update(day=(self.now + 8 * 3600) // 86400,
+                    progress={str(mid): max(map(int, self.role_config["star_copy"][str(mid)])) for mid in range(42101, 42106)},
+                    wins={f"{mid}/1": 1 for mid in range(42101, 42106)})
+            self.save_path.write_text(json.dumps(saved))
+            original = self.save_path.read_bytes()
+            with self.subTest(kind=kind), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory = copy.deepcopy(session.save)
+                packets = session.handle(opcode, 25200, body)
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 999999)
+                self.assertEqual(session.save, memory)
+                self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_star_copy_save_failure_and_reward_overflow_roll_back_the_whole_win(self):
+        baseline = self.prepare_star_copy()
+        body = bytes.fromhex(self.activity_request(1351, [42101, 1])["hex"])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1351, 25300, body)
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+            self.assertEqual(session.random_replies, {})
+            self.assertEqual(struct.unpack(">IIII", session.handle(1351, 25300, body)[0][:16])[2], 1351)
+            baseline["role_state"]["gold"] = (1 << 31) - 20
+            self.save_path.write_text(json.dumps(baseline))
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            self.assertEqual(struct.unpack(">IIII", session.handle(1351, 25301, body)[0][:16])[2], 999999)
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_star_copy_chapter_progress_and_daily_cap_survive_reconnect(self):
+        saved = self.prepare_star_copy()
+        for mid in range(42101, 42106):
+            for pid in self.role_config["copy"][str(mid)]:
+                player.record_copy_win(saved, bytes.fromhex(self.activity_request(1306, [mid, int(pid)])["hex"]),
+                                       3, self.role_config, allow_repeat=True)
+        self.save_path.write_text(json.dumps(saved))
+        for mid, pid in ((42101, 1), (42102, 1), (42103, 1), (42104, 1), (42104, 2)):
+            result = self.replay([self.activity_request(1351, [mid, pid])])
+            self.assertEqual(result[0]["opcode"], 1351)
+            self.assertEqual(protocol.pb_get_varint(bytes.fromhex(result[0]["hex"]), 1), 1)
+        groups = self.star_copy_groups(self.query_world(1350))
+        self.assertEqual(groups[0], [5])
+        self.assertEqual(groups[42104], [42104, 1, 1, 1, 0, 2, 1, 0])
+        self.assertEqual(groups[42105], [42105, 0, 1, -1, 0])
+        before = self.save_path.read_bytes()
+        result = self.replay([self.activity_request(1351, [42105, 1])])
+        self.assert_unavailable_response(result, 1351, 20000, "次数已用完")
+        self.assertEqual(self.save_path.read_bytes(), before)
+        self.clock.return_value += 86400
+        for pid in (1, 2):
+            self.assertEqual(self.replay([self.activity_request(1351, [42105, pid])])[0]["opcode"], 1351)
+        groups = self.star_copy_groups(self.query_world(1350))
+        self.assertEqual(groups[0], [2])
+        self.assertEqual(groups[42105], [42105, 1, 1, 1, 0, 2, 1, 0])
+        result = self.replay([self.activity_request(1351, [42106, 1])])
+        self.assert_unavailable_response(result, 1351, 20000, "仅开放第一章")
+
+    def test_star_copy_maps_follow_ordinary_conditions_not_an_extra_named_map_gate(self):
+        saved = self.prepare_star_copy()
+        for pid in self.role_config["copy"]["42105"]:
+            player.record_copy_win(saved, bytes.fromhex(self.activity_request(1306, [42105, int(pid)])["hex"]),
+                                   3, self.role_config, allow_repeat=True)
+        self.save_path.write_text(json.dumps(saved))
+        groups = self.star_copy_groups(self.query_world(1350))
+        self.assertEqual(groups[42105], [42105, 0, 1, -1, 0])
+        result = self.replay([self.activity_request(1351, [42105, 1])])
+        self.assertEqual(result[0]["opcode"], 1351)
+        self.assertEqual(json.loads(self.save_path.read_text())["star_copy_state"]["progress"], {"42105": 1})
+
+    def test_star_copy_corrupt_progress_fails_closed_without_changing_the_save(self):
+        baseline = self.prepare_star_copy()
+        bad = [{"day": True, "progress": {}, "wins": {}}, {"day": 0, "progress": {"42101": 2}, "wins": {}},
+               {"day": 0, "progress": {}, "wins": {"42101/1": 1}},
+               {"day": 0, "progress": {"42101": 1}, "wins": {"42101/1": 2}},
+               {"day": 0, "progress": {}, "wins": []}]
+        for state in bad:
+            baseline["star_copy_state"] = state
+            self.save_path.write_text(json.dumps(baseline))
+            before = self.save_path.read_bytes()
+            with self.subTest(state=state), redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "名将副本"):
+                Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_star_copy_first_chapter_rosters_reports_and_positive_drops_are_supported(self):
+        saved = self.prepare_star_copy()
+        checked = 0
+        for mid, points in self.role_config["star_copy"].items():
+            if self.role_config["star_map"][mid]["section"] != star_copy.SECTION:
+                continue
+            for pid, point in points.items():
+                with self.subTest(map=mid, point=pid):
+                    checked += 1
+                    attack, defense = battle.rosters(saved, point, self.role_config)
+                    self.assert_battle_report(battle.simulate(attack, defense, self.role_config, 7))
+                    for i in range(1, 6):
+                        if point[f"drop{i}"] and point[f"drop{i}prob"]:
+                            activities.build_reward(saved, f'{point[f"drop{i}"]},{point[f"drop{i}number"]}', self.role_config)
+        self.assertEqual(checked, 7)
 
     def test_campaign_zero_weight_drops_are_disabled_not_invalid(self):
         point = self.role_config["copy"]["42106"]["1"]
