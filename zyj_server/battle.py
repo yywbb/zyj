@@ -8,7 +8,7 @@ from .protocol import iter_pb_fields, pb_get_varint
 
 
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
-MAPS = (42102, 42103, 42104)
+MAPS = (42102, 42103, 42104, 42105)
 MAX_ROUNDS = 30
 GENERAL_FIELDS = {"cid": 1, "iid": 2, "level": 3, "advance": 4, "exp": 5,
                   "atk": 6, "def": 7, "hp": 8, "speed": 9,
@@ -25,7 +25,7 @@ def challenge(save, body, config):
         raise ValueError("关卡挑战参数无效")
     map_id, point_id = (v for _, _, v in fields)
     if map_id not in MAPS:
-        raise ValueError("战斗 v2 暂支持奈河桥、葬剑谷、轮回殿关卡")
+        raise ValueError("战斗 v2 暂支持奈河桥、葬剑谷、轮回殿、阎王殿关卡")
     row = config["copy"].get(str(map_id), {}).get(str(point_id))
     if not row or not save.get("has_role"):
         raise ValueError("关卡不存在或角色尚未创建")

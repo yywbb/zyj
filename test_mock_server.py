@@ -1523,7 +1523,7 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_out_of_scope_standalone_battle_does_not_spend_or_start_empty_battle(self):
         self.replay(self.requests)
         before = self.save_path.read_bytes()
-        request = dict(self.activity_request(1306, [42105, 1]), seq=36)
+        request = dict(self.activity_request(1306, [42106, 1]), seq=36)
         responses = self.replay([request, dict(request, seq=37), self.activity_request(1300)], chunk_size=7)
         self.assert_unavailable_response(responses[:2], 1306, 36, "关卡")
         self.assert_unavailable_response(responses[2:4], 1306, 37, "关卡")
@@ -4494,6 +4494,82 @@ class ReplayRoutingTests(unittest.TestCase):
             copies_after = self.entity_records(bytes.fromhex(current["world_state"]["1300"]), 1, 1)
             self.assertEqual(protocol.pb_get_varint(self.entity_records(copies_after[42102], 7, 1)[5], 3),
                              protocol.pb_get_varint(self.entity_records(copies[42102], 7, 1)[5], 3))
+
+    def test_hades_shared_battles_unlock_progress_boxes_and_next_map(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        for mid in (42102, 42103, 42104):
+            for pid in self.role_config["copy"][str(mid)]:
+                player.record_copy_win(saved, bytes.fromhex(self.activity_request(1306, [mid, int(pid)])["hex"]),
+                                       3, self.role_config, allow_repeat=True)
+        saved["role_state"]["stamina"] = 100
+        for raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).values():
+            for field in (6, 8):
+                raw = protocol.pb_set_varint(raw, field, 100000)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            player.record_protagonist_general(saved, raw)
+        self.save_path.write_text(json.dumps(saved))
+        before = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(1306, [42105, 2])]), 1306, 20000, "未解锁")
+        self.assertEqual(self.save_path.read_bytes(), before)
+        for pid, point in sorted(self.role_config["copy"]["42105"].items(), key=lambda row: int(row[0])):
+            with self.subTest(point=pid), patch.object(player.random, "getrandbits", return_value=7):
+                replies = self.replay([self.activity_request(1306, [42105, int(pid)])])
+                self.assertEqual(replies[0]["opcode"], 1306)
+                fields = {n: v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(replies[0]["hex"]))}
+                self.assertEqual((fields[1], fields[2]), (1, 3))
+                report = json.loads(fields[5])
+                self.assert_battle_report(report)
+                self.assertEqual(report["rules"], "zyj-v2")
+                self.assertEqual(report["meta"]["defense"]["n"], point["name"])
+                committed = json.loads(self.save_path.read_text())
+                self.assertEqual(committed["role_state"]["stamina"], saved["role_state"]["stamina"] - point["physical"])
+                self.assertEqual(self.query_world(1300).hex(), committed["world_state"]["1300"])
+                saved = committed
+        copies = self.entity_records(bytes.fromhex(saved["world_state"]["1300"]), 1, 1)
+        self.assertIn(42106, copies)
+        self.assertEqual(protocol.pb_get_varint(copies[42105], 2), 3)
+        self.assertEqual(len(self.entity_records(copies[42105], 7, 1)), 6)
+        for index, method in enumerate((0, 3, 6), 1):
+            request = self.activity_request(1304, [42105, method])
+            reply = self.replay([request])[0]
+            self.assertEqual(reply["opcode"], 1304)
+            raw = bytes.fromhex(reply["hex"])
+            props = next(v for n, w, v in protocol.iter_pb_fields(raw) if (n, w) == (5, 2))
+            actual = {cid: protocol.pb_get_varint(v, 2) for cid, v in self.entity_records(props, 1, 1).items()}
+            if protocol.pb_get_varint(raw, 2):
+                actual[1001] = protocol.pb_get_varint(raw, 2)
+            expected = dict(tuple(map(int, item.split(","))) for item in self.role_config["map"]["42105"][f"award{index}"].split(";") if item)
+            self.assertEqual(actual, expected)
+            before = self.save_path.read_bytes()
+            self.assert_unavailable_response(self.replay([request]), 1304, 20000, "已领取")
+            self.assertEqual(self.save_path.read_bytes(), before)
+        copies = self.entity_records(self.query_world(1300), 1, 1)
+        self.assertEqual([protocol.pb_get_varint(copies[42105], field) for field in (4, 5, 6)], [3, 3, 3])
+
+    def test_hades_loss_and_failed_save_keep_rewards_and_progress_atomic(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        player.record_copy_win(saved, bytes.fromhex(self.activity_request(1306, [42104, 6])["hex"]), 3, self.role_config)
+        for raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).values():
+            for field in (6, 7, 8, 9):
+                raw = protocol.pb_set_varint(raw, field, 1)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            player.record_protagonist_general(saved, raw)
+        self.save_path.write_text(json.dumps(saved))
+        request = self.activity_request(1306, [42105, 1])
+        with patch.object(player.os, "replace", side_effect=OSError("disk full")):
+            self.assert_rejected(request, "保存失败")
+        reply = self.replay([request])[0]
+        self.assertEqual(reply["opcode"], 1306)
+        fields = {n: v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(reply["hex"]))}
+        self.assertEqual((fields[1], fields[2]), (0, 0))
+        self.assert_battle_report(json.loads(fields[5]))
+        committed = json.loads(self.save_path.read_text())
+        self.assertEqual(committed["world_state"], saved["world_state"])
+        for key in ("coin", "gold", "level", "exp"):
+            self.assertEqual(committed["role_state"][key], saved["role_state"][key])
+        self.assertEqual(committed["role_state"]["stamina"], saved["role_state"]["stamina"] - 4)
 
     def test_live_battle_stars_include_threshold_and_order_is_stable(self):
         for incoming, stars in ((30, 3), (31, 2), (70, 2), (71, 1)):
