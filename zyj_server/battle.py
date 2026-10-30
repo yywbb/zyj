@@ -4,7 +4,7 @@ import copy
 import random
 from fractions import Fraction
 
-from .protocol import iter_pb_fields, pb_get_varint
+from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
@@ -14,6 +14,13 @@ GENERAL_FIELDS = {"cid": 1, "iid": 2, "level": 3, "advance": 4, "exp": 5,
                   "atk": 6, "def": 7, "hp": 8, "speed": 9,
                   "critical": 10, "dodge": 11, "parry": 12, "resilience": 13,
                   "hit": 14, "arp": 15, "criticaldmg": 16, "skilllevel": 18}
+
+
+def _copy_points(save, map_id):
+    copies = bytes.fromhex(save["world_state"]["1300"])
+    current = next((v for n, w, v in iter_pb_fields(copies)
+                    if n == 1 and w == 2 and pb_get_varint(v, 1) == map_id), b"")
+    return current, {pb_get_varint(v, 1): v for n, w, v in iter_pb_fields(current) if n == 7 and w == 2}
 
 
 def challenge(save, body, config):
@@ -27,10 +34,7 @@ def challenge(save, body, config):
     row = config["copy"].get(str(map_id), {}).get(str(point_id))
     if not row or str(map_id) not in config["map"] or not save.get("has_role"):
         raise ValueError("关卡不存在或角色尚未创建")
-    copies = bytes.fromhex(save["world_state"]["1300"])
-    current = next((v for n, w, v in iter_pb_fields(copies)
-                    if n == 1 and w == 2 and pb_get_varint(v, 1) == map_id), b"")
-    points = {pb_get_varint(v, 1): v for n, w, v in iter_pb_fields(current) if n == 7 and w == 2}
+    current, points = _copy_points(save, map_id)
     if not current or (point_id > 1 and not pb_get_varint(points.get(point_id - 1, b""), 3)):
         raise ValueError("关卡尚未解锁")
     previous = points.get(point_id, b"")
@@ -39,6 +43,31 @@ def challenge(save, body, config):
     if save["role_state"]["stamina"] < row["physical"]:
         raise ValueError("体力不足")
     return row, pb_get_varint(previous, 3) or 0
+
+
+def sweep(save, body, config):
+    try:
+        fields = list(iter_pb_fields(body))
+    except ValueError as error:
+        raise ValueError("扫荡参数无效") from error
+    if len(fields) != 4 or any(n != 1 or w != 0 or not 0 <= v < (1 << 31) for n, w, v in fields):
+        raise ValueError("扫荡参数无效")
+    map_id, point_id, method, exchange = (v for _, _, v in fields)
+    if method not in (0, 1):
+        raise ValueError("扫荡方式无效")
+    if exchange != 0:
+        raise ValueError("经验兑换扫荡尚未实现，请选择不兑换")
+    location = encode_pb_field(1, 0, map_id) + encode_pb_field(1, 0, point_id)
+    point, star = challenge(save, location, config)
+    if star != 3:
+        raise ValueError("三星通关后才能扫荡")
+    state = save["role_state"]
+    level_key, vip_key = ("copy_wipe_level10", "copy_sweep") if method else ("copy_wipe_level", "b_fbsd")
+    if state["level"] < int(config["global_kv"][level_key]["value"]) and not config["vip"][str(state["vip"])][vip_key]:
+        raise ValueError("等级或VIP不足，尚未解锁此扫荡方式")
+    _, points = _copy_points(save, map_id)
+    remaining = point["challenge"] - (pb_get_varint(points[point_id], 4) or 0)
+    return point, min(remaining, state["stamina"] // point["physical"]) if method else 1
 
 
 def rosters(save, point, config):
@@ -717,7 +746,8 @@ def drops(point, first_win, config, seed):
         if not row:
             raise ValueError("不支持的关卡掉落表")
         entries = [tuple(map(int, value.split(","))) for value in row["drop"].split(";") if value]
-        if not entries or any(len(e) != 3 or min(e) <= 0 for e in entries):
+        if (not entries or any(len(e) != 3 or min(e[:2]) <= 0 or e[2] < 0 for e in entries)
+                or not any(e[2] for e in entries)):
             raise ValueError("关卡掉落配置无效")
         draw = rng.randrange(sum(e[2] for e in entries))
         for cid, count, weight in entries:

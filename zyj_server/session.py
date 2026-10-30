@@ -228,7 +228,7 @@ class Session:
             values = player.parse_prop_use(body)
             local_box = shop.openable_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1307, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
                                   *rob.MUTATIONS,
                                   *development.MUTATIONS, *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
@@ -240,9 +240,9 @@ class Session:
                 return list(cached[1])
             working = copy.deepcopy(self.save)
             try:
-                if opcode == 1306:
+                if opcode in (1306, 1307):
                     packets = player.prepare_battle_responses(seq, working, body, self.save_path,
-                                                             self.step_counts, self.role_config, self.connected_at)
+                                                             self.step_counts, self.role_config, self.connected_at, opcode=opcode)
                 else:
                     reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + encode_pb_field(2, 2, b""))
                              + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01"))) if sign_comb else b""

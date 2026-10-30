@@ -757,29 +757,40 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
     return packets
 
 
-def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config, connected_at):
+def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config, connected_at, *, opcode=1306):
     before = copy.deepcopy(save)
     now = int(time.time())
     online_rewards.settle(save, role_config, connected_at, now)
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
-    point, old_star = battle.challenge(save, request_body, role_config)
+    if opcode == 1307:
+        point, attempts = battle.sweep(save, request_body, role_config)
+        old_star = 3
+        location = encode_pb_field(1, 0, point["map"]) + encode_pb_field(1, 0, point["point"])
+    else:
+        point, old_star = battle.challenge(save, request_body, role_config)
+        attempts, location = 1, request_body
     attack, defense = battle.rosters(save, point, role_config)
     seed = random.getrandbits(64)
-    report = battle.simulate(attack, defense, role_config, seed)
-    report["meta"]["attack"]["n"] = save.get("role_name") or "主角"
-    report["meta"]["defense"]["n"] = point["name"]
+    report = None if opcode == 1307 else battle.simulate(attack, defense, role_config, seed)
+    if report is not None:
+        report["meta"]["attack"]["n"] = save.get("role_name") or "主角"
+        report["meta"]["defense"]["n"] = point["name"]
+    won, star = (True, 3) if report is None else (report["result"], report["star"])
     state = get_role_state(save, role_config)
     rewards, generals, experience, power_delta = {}, [], b"", 0
     gained = 0
-    if report["result"]:
-        reward = battle.victory_role_reward(state, point, old_star, report["star"], role_config)
-        rewards = battle.drops(point, old_star == 0, role_config, seed ^ 0xD09)
-        for cid, name in ((1000, "coin"), (1001, "gold")):
-            if reward[name]:
-                rewards[cid] = rewards.get(cid, 0) + reward[name]
-        gained = reward["gained"]
-        state.update(level=reward["level"], exp=reward["exp"])
+    if won:
+        for index in range(attempts):
+            reward = battle.victory_role_reward(state, point, old_star, star, role_config)
+            drops = battle.drops(point, old_star == 0, role_config, (seed + index) ^ 0xD09)
+            for cid, name in ((1000, "coin"), (1001, "gold")):
+                if reward[name]:
+                    drops[cid] = drops.get(cid, 0) + reward[name]
+            for cid, count in drops.items():
+                rewards[cid] = rewards.get(cid, 0) + count
+            gained += reward["gained"]
+            state.update(level=reward["level"], exp=reward["exp"])
         level_config = role_config["role_exp"][str(state["level"])]
         state.update(nextexp=level_config["nextexp"], maxstamina=level_config["maxstamina"], maxenergy=level_config["maxenergy"])
         world = bytes.fromhex(save["world_state"]["1002"])
@@ -790,40 +801,45 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
         maximum = min(state["level"] * int(role_config["global_kv"]["general_level"]["value"]),
                       max(map(int, role_config["general_exp"])))
         for _, unit in sorted(attack.items()):
-            raw, increase, up = training.grow_general(records[unit["iid"]], point["xp"], slots[unit["iid"]],
+            raw, increase, up = training.grow_general(records[unit["iid"]], point["xp"] * attempts, slots[unit["iid"]],
                                                      members, equips, role_config, maximum)
             record_slot_update(save, encode_pb_field(1, 2, raw))
             record_protagonist_general(save, raw)
             generals.append(encode_pb_field(6, 2, raw))
             power_delta += increase
             experience += encode_pb_field(4, 2, b"".join(encode_pb_field(n, 0, v) for n, v in
-                                                        ((1, unit["iid"]), (2, point["xp"]), (3, int(up > 0)))))
+                                                        ((1, unit["iid"]), (2, point["xp"] * attempts), (3, int(up > 0)))))
         if save.get("protagonist_snapshot"):
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
         for key in ("power", "power_all"):
             state[key] += power_delta
             if not 0 <= state[key] < (1 << 31):
                 raise ValueError("角色战力超出范围")
-        record_copy_win(save, request_body, report["star"], role_config, allow_repeat=True)
+        for _ in range(attempts):
+            record_copy_win(save, location, star, role_config, allow_repeat=True)
     reward_body = activities.build_reward(save, ";".join(f"{cid},{count}" for cid, count in sorted(rewards.items())), role_config)
     apply_reward(save, reward_body, role_config, now)
-    state["stamina"] -= point["physical"]
+    state["stamina"] -= point["physical"] * attempts
     settle_stamina(save, role_config, now)
     experience = b"".join(encode_pb_field(n, 0, v) for n, v in ((1, gained), (2, state["level"]), (3, state["exp"]))) + experience
-    body = (encode_pb_field(1, 0, int(report["result"])) + encode_pb_field(2, 0, report["star"])
-            + encode_pb_field(3, 2, experience) + encode_pb_field(4, 2, reward_body)
-            + encode_pb_field(5, 2, json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-            + b"".join(generals))
-    packets = [pack_frame(1306, seq, body)]
+    body = (encode_pb_field(1, 0, int(won)) + encode_pb_field(2, 0, star)
+             + encode_pb_field(3, 2, experience) + encode_pb_field(4, 2, reward_body)
+            + (encode_pb_field(5, 2, json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) if report is not None else b"")
+             + b"".join(generals))
+    packets = [pack_frame(opcode, seq, body)]
     if power_delta:
         power = b"".join(encode_pb_field(1, 0, value) for value in
                          (power_delta, state["power"], 0, state["g_power"], power_delta, state["power_all"]))
         packets.append(pack_frame(205, 0, power))
     if save.get("role_snapshot"):
-        # 放在 1306 后同步绝对值，避免客户端先同步体力再按挑战成本扣第二次。
+        # 放在关卡应答后同步绝对值，避免客户端再按挑战/扫荡成本扣第二次。
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
-    save["last_battle"] = {"rules": report["rules"], "seed": seed, "map": point["map"], "point": point["point"],
-                           "won": report["result"], "star": report["star"], "rounds": report["round"]}
+    if report is not None:
+        save["last_battle"] = {"rules": report["rules"], "seed": seed, "map": point["map"], "point": point["point"],
+                               "won": won, "star": star, "rounds": report["round"]}
     packets = save_response_group(packets, save, before, save_path, step_counts, role_config, now)
-    print_flush(f"[战斗 v2] {point['map']}/{point['point']} seed={seed} 胜={report['result']} 星={report['star']} 回合={report['round']}")
+    if report is None:
+        print_flush(f"[扫荡] {point['map']}/{point['point']} seed={seed} 次数={attempts}")
+    else:
+        print_flush(f"[战斗 v2] {point['map']}/{point['point']} seed={seed} 胜={won} 星={star} 回合={report['round']}")
     return packets

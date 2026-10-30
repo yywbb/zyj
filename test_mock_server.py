@@ -4516,6 +4516,201 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.assert_battle_report(report)
                 self.assertEqual(report["rules"], "zyj-v2")
 
+    def test_campaign_zero_weight_drops_are_disabled_not_invalid(self):
+        point = self.role_config["copy"]["42106"]["1"]
+        disabled = {int(row.split(",")[0]) for row in self.role_config["worlddrop"]["29000"]["drop"].split(";")
+                    if row and int(row.split(",")[2]) == 0}
+        for seed in range(100):
+            rewards = battle.drops(point, True, self.role_config, seed)
+            self.assertFalse(disabled & rewards.keys())
+        forced = dict(point, randdropprob=100, randdropprob1=0)
+        for entries in ("", "28001,1,0;", "28001,1,-1;", "0,1,1;", "28001,0,1;", "28001,1;"):
+            config = {**self.role_config, "worlddrop": {**self.role_config["worlddrop"], "29000": {"drop": entries}}}
+            with self.subTest(entries=entries), self.assertRaisesRegex(ValueError, "掉落配置"):
+                battle.drops(forced, True, config, 0)
+
+    def test_every_active_campaign_drop_group_and_positive_reward_is_supported(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        self.assertTrue(all(point["xp"] > 0 for points in self.role_config["copy"].values() for point in points.values()))
+        groups = {str(point[f"randdrop{suffix}"]) for points in self.role_config["copy"].values() for point in points.values()
+                  for suffix in ("", "1") if point[f"randdropprob{suffix}"] > 0}
+        for group in sorted(groups):
+            with self.subTest(group=group):
+                point = dict(self.role_config["copy"]["42106"]["1"], drop1=0, drop2=0, drop3=0,
+                             randdrop=group, randdropprob=100, randdropprob1=0)
+                self.assertTrue(battle.drops(point, False, self.role_config, 0))
+                for entry in self.role_config["worlddrop"][group]["drop"].split(";"):
+                    if entry:
+                        cid, count, weight = map(int, entry.split(","))
+                        if weight > 0:
+                            activities.build_reward(saved, f"{cid},{count}", self.role_config)
+
+    def test_campaign_sweep_batch_matches_singles_and_commits_once_before_reply(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        location = bytes.fromhex(self.activity_request(1306, [42102, 1])["hex"])
+        player.record_copy_win(saved, location, 3, self.role_config, allow_repeat=True)
+        config = copy.deepcopy(self.role_config)
+        point = config["copy"]["42102"]["1"]
+        point.update(drop=20014, drop1prob=0, drop2prob=0, drop3prob=0, randdropprob=0, randdropprob1=0)
+        saved["role_state"].update(vip=2, stamina=point["physical"] * 3 + 1,
+                                   exp=config["role_exp"][str(saved["role_state"]["level"])]["nextexp"] - 1)
+        self.save_path.write_text(json.dumps(saved))
+        request = bytes.fromhex(self.activity_request(1307, [42102, 1, 1, 0])["hex"])
+        with redirect_stdout(io.StringIO()), patch.object(battle, "simulate", side_effect=AssertionError("扫荡不能伪造战报")):
+            session = Session(self.tables, self.save_path, self.step_counts, config)
+            with patch.object(player, "save_role", wraps=player.save_role) as persist:
+                packets = session.handle(1307, 21000, request)
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2:], (1307, 21000))
+                self.assertEqual(persist.call_count, 1)
+            batch = copy.deepcopy(session.save)
+            self.assertEqual(json.loads(self.save_path.read_text()), batch)
+            self.assertEqual(session.handle(1307, 21000, request), packets)
+            self.assertEqual(session.save, batch)
+            fields = {n: v for n, w, v in protocol.iter_pb_fields(packets[0][16:])}
+            self.assertEqual((fields[1], fields[2]), (1, 3))
+            self.assertNotIn(5, fields)
+            for n, w, value in protocol.iter_pb_fields(fields[3]):
+                if (n, w) == (4, 2):
+                    self.assertEqual(protocol.pb_get_varint(value, 2), point["xp"] * 3)
+            self.assertIn(1001, [struct.unpack(">IIII", packet[:16])[2] for packet in packets[1:]])
+            self.assertEqual(batch["role_state"]["stamina"], 1)
+            self.assertEqual(batch["world_state"]["1200"], saved["world_state"]["1200"])
+            self.assertEqual(batch.get("last_battle"), saved.get("last_battle"))
+            self.save_path.write_text(json.dumps(saved))
+            singles = Session(self.tables, self.save_path, self.step_counts, config)
+            for seq in range(3):
+                body = bytes.fromhex(self.activity_request(1307, [42102, 1, 0, 0])["hex"])
+                result = singles.handle(1307, 22000 + seq, body)
+                self.assertEqual(struct.unpack(">IIII", result[0][:16])[2], 1307)
+            self.assertEqual(singles.save, batch)
+        self.assertEqual(self.query_world(1300).hex(), batch["world_state"]["1300"])
+
+    def test_hefei_first_challenge_with_active_random_drop_saves_before_success(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        for mid in (42102, 42103, 42104, 42105):
+            for pid in self.role_config["copy"][str(mid)]:
+                player.record_copy_win(saved, bytes.fromhex(self.activity_request(1306, [mid, int(pid)])["hex"]),
+                                       3, self.role_config, allow_repeat=True)
+        for raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).values():
+            for field in (6, 8):
+                raw = protocol.pb_set_varint(raw, field, 100000)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            player.record_protagonist_general(saved, raw)
+        self.save_path.write_text(json.dumps(saved))
+        with patch.object(player.random, "getrandbits", return_value=0xD09):
+            packets = self.replay([self.activity_request(1306, [42106, 1])])
+        self.assertEqual(packets[0]["opcode"], 1306)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual((after["last_battle"]["map"], after["last_battle"]["point"], after["last_battle"]["won"]), (42106, 1, True))
+        self.assertEqual(after["role_state"]["stamina"], saved["role_state"]["stamina"] - 4)
+
+    def test_sweep_clips_attempts_and_obeys_level_or_vip_unlock(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        location = bytes.fromhex(self.activity_request(1306, [42102, 1])["hex"])
+        player.record_copy_win(saved, location, 3, self.role_config, allow_repeat=True)
+        for level, vip, method, expected in ((12, 0, 0, 1), (29, 1, 1, None), (29, 2, 1, 3), (30, 0, 1, 3)):
+            saved["role_state"].update(level=level, vip=vip, stamina=self.role_config["copy"]["42102"]["1"]["physical"] * 3 + 1)
+            body = bytes.fromhex(self.activity_request(1307, [42102, 1, method, 0])["hex"])
+            with self.subTest(level=level, vip=vip, method=method):
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError, "等级或VIP"):
+                        battle.sweep(saved, body, self.role_config)
+                else:
+                    self.assertEqual(battle.sweep(saved, body, self.role_config)[1], expected)
+        copies = self.entity_records(bytes.fromhex(saved["world_state"]["1300"]), 1, 1)
+        current = self.entity_records(copies[42102], 7, 1)[1]
+        for _ in range(self.role_config["copy"]["42102"]["1"]["challenge"] - protocol.pb_get_varint(current, 4) - 1):
+            player.record_copy_win(saved, location, 3, self.role_config, allow_repeat=True)
+        self.assertEqual(battle.sweep(saved, body, self.role_config)[1], 1)
+
+    def test_sweep_settles_recovery_before_selecting_batch_size(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        location = bytes.fromhex(self.activity_request(1306, [42102, 1])["hex"])
+        player.record_copy_win(saved, location, 3, self.role_config, allow_repeat=True)
+        point = self.role_config["copy"]["42102"]["1"]
+        saved["role_state"].update(vip=2, stamina=point["physical"] * 3 - 1)
+        saved["stamina_clock"] = {"next_at": self.now, "checked_at": self.now - 1}
+        self.save_path.write_text(json.dumps(saved))
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            body = bytes.fromhex(self.activity_request(1307, [42102, 1, 1, 0])["hex"])
+            packets = session.handle(1307, 23500, body)
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1307)
+        experience = next(v for n, w, v in protocol.iter_pb_fields(packets[0][16:]) if (n, w) == (3, 2))
+        self.assertTrue(all(protocol.pb_get_varint(v, 2) == point["xp"] * 3 for n, w, v in protocol.iter_pb_fields(experience) if (n, w) == (4, 2)))
+        self.assertEqual(session.save["role_state"]["stamina"], 0)
+        self.assertEqual(session.save["stamina_clock"]["next_at"], self.now + 360)
+
+    def test_sweep_invalid_requests_and_state_never_partially_consume(self):
+        self.replay(self.requests)
+        baseline = json.loads(self.save_path.read_text())
+        location = bytes.fromhex(self.activity_request(1306, [42102, 1])["hex"])
+        player.record_copy_win(baseline, location, 3, self.role_config, allow_repeat=True)
+        baseline["role_state"].update(vip=2, stamina=100)
+        bad = [[], [42102, 1, 0], [42102, 1, 0, 0, 0], [42102, 1, 2, 0], [42102, 1, 0, 1],
+               [99999, 1, 0, 0], [42102, 0, 0, 0], [42103, 1, 0, 0], [42102, 1, 0, 1 << 31]]
+        requests = [(str(values), bytes.fromhex(self.activity_request(1307, values)["hex"])) for values in bad]
+        valid = bytes.fromhex(self.activity_request(1307, [42102, 1, 1, 0])["hex"])
+        requests += [(kind, valid) for kind in ("stars", "stamina", "limit", "vip", "overflow")]
+        requests.append(("wire", valid + protocol.encode_pb_field(2, 0, 1)))
+        for kind, body in requests:
+            saved = copy.deepcopy(baseline)
+            if kind == "stars":
+                copies = self.entity_records(bytes.fromhex(saved["world_state"]["1300"]), 1, 1)
+                point = self.entity_records(copies[42102], 7, 1)[1]
+                current = player.merge_pb_records(copies[42102], protocol.encode_pb_field(7, 2, protocol.pb_set_varint(point, 3, 2)), {7: 1})
+                saved["world_state"]["1300"] = player.merge_pb_records(bytes.fromhex(saved["world_state"]["1300"]),
+                                                                         protocol.encode_pb_field(1, 2, current), {1: 1}).hex()
+            elif kind == "stamina":
+                saved["role_state"]["stamina"] = 0
+            elif kind == "limit":
+                for _ in range(10):
+                    player.record_copy_win(saved, location, 3, self.role_config, allow_repeat=True)
+            elif kind == "vip":
+                saved["role_state"]["vip"] = 0
+            elif kind == "overflow":
+                saved["role_state"]["coin"] = (1 << 31) - self.role_config["copy"]["42102"]["1"]["coin"] - 1
+            self.save_path.write_text(json.dumps(saved))
+            original = self.save_path.read_bytes()
+            with self.subTest(kind=kind), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory = copy.deepcopy(session.save)
+                packets = session.handle(1307, 23000, body)
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 999999)
+                self.assertEqual(self.save_path.read_bytes(), original)
+                self.assertEqual(session.save, memory)
+
+    def test_sweep_failed_save_and_retry_after_state_change_are_atomic(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        player.record_copy_win(saved, bytes.fromhex(self.activity_request(1306, [42102, 1])["hex"]), 3, self.role_config, allow_repeat=True)
+        saved["role_state"].update(vip=2, stamina=20)
+        self.save_path.write_text(json.dumps(saved))
+        original = self.save_path.read_bytes()
+        body = bytes.fromhex(self.activity_request(1307, [42102, 1, 1, 0])["hex"])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory = copy.deepcopy(session.save)
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1307, 24000, body)
+            self.assertEqual(self.save_path.read_bytes(), original)
+            self.assertEqual(session.save, memory)
+            packets = session.handle(1307, 24000, body)
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1307)
+            self.clock.return_value += 1
+            session.handle(999904, 24001, b"")
+            current = self.save_path.read_bytes()
+            memory = copy.deepcopy(session.save)
+            packets = session.handle(1307, 24000, body)
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 999999)
+            self.assertEqual(self.save_path.read_bytes(), current)
+            self.assertEqual(session.save, memory)
+
     def test_entire_configured_campaign_progress_rewards_and_boxes_survive_reconnect(self):
         self.replay(self.requests)
         saved = json.loads(self.save_path.read_text())

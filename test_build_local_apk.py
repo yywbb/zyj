@@ -296,6 +296,56 @@ class LanBuildTests(unittest.TestCase):
             end
         ''')
 
+    def test_campaign_sweep_uses_settled_attempts_not_stale_client_stamina(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("扫荡回调验证需本机已有 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            print,cclog,printT=function() end,function() end,function() end
+            for _,name in ipairs({'copies_pb','copyattack_pb','copyall3starreward_pb','result_pb','ids_pb','somethings_pb','PickBattleResultReport'}) do
+                package.preload[name]=function() return {} end
+            end
+            package.preload.battleresult_pb=function()
+                return {BattleResult=function() return {ParseFromString=function(self,data)
+                    for key,value in pairs(data) do self[key]=value end
+                end} end}
+            end
+            table.copy=function(t)
+                local result={} for k,v in pairs(t) do result[k]=type(v)=='table' and table.copy(v) or v end return result
+            end
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            gamedata={cache={role={stamina=100},slots={},copy={[42102]={id=42102,pa1=3,pa2=3,pa3=3,
+                      points={[1]={id=1,star=3,kill=1,move=0}}}}},ext={},
+                      config={copy={['42102']={['1']={physical=4,challenge=10,xp=300,coin=100}}},
+                              map={['42102']={section=40001,star1=3,star2=3,star3=3}},section={['40001']={name='test'}}}}
+            function gamedata.config:getConfigByName(name) return self[name] end
+            function gamedata:SomethingProcess() return {} end
+            function gamedata:updateRoleExp() return {oldlevel=12,newlevel=12} end
+            function gamedata:Encounters() return {} end
+            function gamedata:updateRoleStamina(value) self.cache.role.stamina=self.cache.role.stamina+value end
+            function gamedata:Generals() end
+            function gamedata:GeneralsEXP(value) return value end
+        ''')
+        scripts = self.client_scripts()
+        code = scripts.get("assets/scripts/GameCopy.so")
+        if code is None:
+            code = (Path(__file__).parent / "scripts_clean/GameCopy.lua").read_text(encoding="utf-8")
+        lua.execute(code)
+        lua.execute('''
+            for _,row in ipairs({{0,1},{1,3}}) do
+                local method,attempts=row[1],row[2]
+                gamedata.ext.copyattackwipe={map=42102,point=1,method=method,exchange=0}
+                gamedata.cache.role.stamina=100
+                gamedata.cache.copy[42102].points[1].kill=1
+                local result=NetCopyWipe2Callback({rbuf={result=1,star=3,reward={},generals={},encounters={},
+                    exp={generals={{id=1,exp=300*attempts,levelup=false}}}}})
+                assert(gamedata.cache.copy[42102].points[1].kill==1+attempts)
+                assert(gamedata.cache.role.stamina==100-4*attempts and result.coin==100*attempts)
+            end
+        ''')
+
     def test_battle_overlapping_dodges_keep_ghosts_alive_until_their_own_cleanup(self):
         try:
             from lupa.lua51 import LuaRuntime

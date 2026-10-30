@@ -982,6 +982,17 @@ end
     code = code.replace(marker, 'skilljson and (skilljson.damage[tostring(ccbindex)] or skilljson.damage["1"]) or nil')
     patched["assets/scripts/battleReportConvert.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
+    code = read_script("GameCopy").decode("utf-8").replace("\r\n", "\n")
+    marker = '''    local challenge = 1
+    if gamedata.ext.copyattackwipe.method == 1 then
+        challenge = config[tostring(map)][tostring(point)].challenge - copy[map].points[point].kill
+        challenge = math.min(challenge,math.floor(gamedata.cache.role.stamina/config[tostring(map)][tostring(point)].physical))
+    end'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    -- 次数取已结算的将领经验，不能按过期的客户端体力重算。
+    local challenge = math.floor(copyAttackResultPb.exp.generals[1].exp/config[tostring(map)][tostring(point)].xp)''')
+    patched["assets/scripts/GameCopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     code = read_script("battlegeneral").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function general.dodgeAction(self,data)")
     end = code.index("\nfunction general.addOneDamageEffect", start)
