@@ -839,6 +839,177 @@ end
     patched["assets/scripts/GameShop.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched GameShop.so (refresh account purchase limits and replace full lists)")
 
+    code = read_script("GameRank").decode("utf-8").replace("\r\n", "\n")
+    marker = "    table.insert(idsData.ids, uireq.num or 50)"
+    assert code.count(marker) == 2
+    code = code.replace(marker, marker + "\n    if uireq.activityRankId then table.insert(idsData.ids, uireq.activityRankId) end")
+    marker = "        players=gamedata:players(playersData.players)"
+    assert code.count(marker) == 2
+    code = code.replace(marker, marker + '''
+        if gamedata.ext.rankquery.method == 0 then
+            for i,v in ipairs(players) do
+                local a = gamedata:artifactData(v.params)
+                v.rank, v.score = gamedata.ext.rankquery.pos + i - 1, a.score
+                v.server, v.server_name = "本地", "局域网"
+                v.artifact = {id=a.iid,cid=a.cid,builder_name=a.name,level1=a.level1,
+                    attr1_value=a.attr1,attr2_value=a.attr2,attr3_value=a.levelHP,
+                    attr4_value=a.levelAttack,attr5_value=a.levelDef,authenticate=a.isChecked,
+                    skill1_cid=a.skill1,skill2_cid=a.skill2,skill3_cid=a.skill3,
+                    jewel1=a.jewel1,jewel2=a.jewel2,jewel3=a.jewel3,jewel4=a.jewel4,
+                    resonance1_id=a.resonanceActiveId1,resonance2_id=a.resonanceActiveId2,
+                    resonance3_id=a.resonanceActiveId3,redskill_num=a.resonanceSkillNum}
+            end
+        end''')
+    patched["assets/scripts/GameRank.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_rank2").decode("utf-8").replace("\r\n", "\n")
+    assert code.count('local http_artifact_rank = require("http_artifact_rank")') == 1
+    code = code.replace('local http_artifact_rank = require("http_artifact_rank")', "")
+    start = code.index('        if self.selectpage == "artifact" then\n')
+    end = code.index('        config.changed =false', start)
+    assert "http_artifact_rank:getdata(cb)" in code[start:end]
+    code = code[:start] + "        UIRequest({type = 3500, method = config.method, pos = 1, num = 50})\n" + code[end:]
+    marker = '''    if config.changed or not config.data then
+        UIRequest({type = 3500, method = config.method, pos = 1, num = 50})
+        config.changed =false
+    else
+        self:ReloadData()
+    end'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    config.myrank = nil
+    config.mydata = nil
+    UIRequest({type = 3500, method = config.method, pos = 1, num = 50})''')
+    start = code.index("    if GameScene.roleinfo.id < 1000000 then")
+    end = code.index("    if data and next(data) then", start)
+    code = code[:start] + code[end:]
+    code = code.replace("本排行榜为跨服，每小时刷新一次", "本地真实神器积分榜，重新打开刷新")
+    code = code.replace("本排行榜每5分钟刷新一次", "本地已保存成绩，重新打开刷新")
+    patched["assets/scripts/Layer_rank2.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("UIRank").decode("utf-8").replace("\r\n", "\n")
+    marker = '    elseif GameScene.layers["ranklist"].show then\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''        if t.method == 0 then
+            GameScene.layers["ranklist"].module:setMyArtifactData(t.players)
+        end
+''', 1)
+    patched["assets/scripts/UIRank.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    path = "assets/scripts/GameActivityQuery.so"
+    raw = xxtea_decrypt(patched[path], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = '        elseif v.id == 2 then    '
+    assert code.count(marker) == 2
+    code = code.replace(marker, '''        elseif v.id == 5601 then
+            local ids = ids_pb.Ids()
+            ids:ParseFromString(v.data)
+            gamedata.localRankOpenedAt = ids.ids[1]
+''' + marker, 1)
+    marker = "return {type=2000,status=UIActivityQueryReponse(),"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "return {type=2000,localRankOpenedAt=gamedata.localRankOpenedAt,status=UIActivityQueryReponse(),")
+    marker = "return 0,2000,{type=2000,status=UIActivityQueryReponse(),"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "return 0,2000,{type=2000,localRankOpenedAt=gamedata.localRankOpenedAt,status=UIActivityQueryReponse(),")
+    patched[path] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("UIActivity").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UIActivityQuery(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    GameScene.localRankOpenedAt = t.localRankOpenedAt or GameScene.localRankOpenedAt\n")
+    patched["assets/scripts/UIActivity.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name in ("newrank", "powerRank", "sigilPowerRank", "powerGrowthRank", "powerGrowthRank_x1", "powerGrowthRank_x2",
+                 "magicWeaponRank", "copyRank", "shieldRank", "wingRank", "minggeRank", "partnerPowerRank", "artifactRank"):
+        script = "Layer_activity_" + name
+        code = read_script(script).decode("utf-8").replace("\r\n", "\n")
+        assert "GameScene.roleinfo.servertime" in code
+        start = code.index('    if self.coveritems.time and gamedata.config.activity_time[self.panelID]["open_type"]')
+        end = code.index('    self.isEnd = (timediff < 0)', start)
+        code = code[:start] + '''    local opened = GameScene.localRankOpenedAt
+    if opened then
+        local days = gamedata.config.activity_time[self.panelID].continued_time
+        timediff = (math.floor((opened+28800)/86400)+days)*86400-28800-gamedata:time()
+    end
+
+''' + code[end:]
+        assert "self.isEnd = (timediff < 0)" in code
+        code = code.replace("self.isEnd = (timediff < 0)", "self.isEnd = (timediff <= 0)")
+        patched[f"assets/scripts/{script}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("GameRob").decode("utf-8").replace("\r\n", "\n")
+    marker = '    gamedata.sortData(t, "quality","cid")'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''
+    -- 引导固定点击首行，开放更多宝物不能挤走搜神记。
+    for i,v in ipairs(t) do
+        if v.cid == 26102 then
+            table.remove(t,i)
+            table.insert(t,1,v)
+            break
+        end
+    end''')
+    marker = "local  isautoxh = uireq.isautoxh or 0"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "local isautoxh = (uireq.isautoxh and uireq.isautoxh ~= 0) and 1 or 0")
+    marker = "local totalenergy = energy1*20 + energy2*10"
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'local totalenergy = energy1*tonumber(gamedata.config.props["20020"].param1) + energy2*tonumber(gamedata.config.props["20015"].param1)')
+    for old, new in (("gamedata.ext.robrequest.cid and #reward >2", "gamedata.ext.robrequest.cid"),
+                     ("gamedata.ext.robrequest.cid and not get and #v >2", "gamedata.ext.robrequest.cid and not get")):
+        assert code.count(old) == 1
+        code = code.replace(old, new)
+    marker = "    for k,v in ipairs(reward) do\n        for kv,vv in ipairs(v) do"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    for k,v in ipairs(reward) do
+        coin[k], rob[k] = {cid=1000,num=0}, {cid=20255,num=0}
+        for kv,vv in ipairs(v) do''')
+    for old, new in (("table.insert(coin,vv)", "coin[k] = vv"), ("table.insert(rob,vv)", "rob[k] = vv")):
+        assert code.count(old) == 1
+        code = code.replace(old, new)
+    patched["assets/scripts/GameRob.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("window_robresult").decode("utf-8").replace("\r\n", "\n")
+    marker = "table.getTableLength(self.configdata.rob)"
+    assert code.count(marker) == 2
+    code = code.replace(marker, "self.configdata.energy")
+    patched["assets/scripts/window_robresult.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("window_robonekeyresult").decode("utf-8").replace("\r\n", "\n")
+    assert code.count("0.5*(i-1)") == 1 and code.count("您的精力值不足，无法继续挑战") == 1
+    code = code.replace("0.5*(i-1)", "math.min(0.1*(i-1),3)")
+    code = code.replace("您的精力值不足，无法继续挑战", "本批已结束，未集齐可继续挑战（每批最多100次）")
+    patched["assets/scripts/window_robonekeyresult.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("GameMails").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("    if next(gamedata.cache.mails) and not uireq.update then")
+    end = code.index("\nend", start)
+    code = code[:start] + "    return 1, 3100, nil\n" + code[end:]
+    marker = "    gamedata:Mails(mailsData)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    gamedata.cache.mails = {}\n" + marker)
+    patched["assets/scripts/GameMails.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("gamedata").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function gamedata.Props(self,propsdata)")
+    end = code.index("\nend", start) + len("\nend")
+    assert "self.cache.props = {}" in code[start:end]
+    code = code[:start] + '''function gamedata.Props(self,propsdata)
+    local props = {}
+    self.cache.props = {}
+    self.cache.petsfragment = {}
+    for _,v in ipairs(propsdata) do
+        if v.id >= 91001 and v.id <= 92000 then
+            self:updatePetsFragment({cid=v.id,num=v.num})
+        else
+            self.cache.props[v.id] = self:propData(v)
+            table.insert(props,self.cache.props[v.id])
+        end
+    end
+    return props
+end''' + code[end:]
+    patched["assets/scripts/gamedata.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     code = read_script("Layer_activity").decode("utf-8").replace("\r\n", "\n")
     marker = "[57] = { request = 46111,"
     assert code.count(marker) == 1

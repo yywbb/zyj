@@ -89,6 +89,14 @@ def apply_overrides(name, data, overrides):
             row["reward"] = ";".join(e for e in row["reward"].split(";") if e and e.split(",")[0] != "1026") + ";"
     if name == "activity_time":
         data["132"]["icon"] = "activity_continuous"
+        for key in ("11", "104", "105", "106", "114", "115", "123", "124", "125", "126", "127", "128", "129"):
+            data[key].update(open_type=1, begin="", end="", days_later=0, days_later2=0)
+    if name == "build":
+        for key in ("113", "370", "371", "372", "387", "388", "405", "406", "407", "408", "409", "410", "411"):
+            data[key]["level"] = 1
+    if name == "treasure2_fragment":
+        for row in data.values():
+            row["default"] = 1
     for row, changes in overrides.get(name, {}).items():
         if row not in data:
             raise ValueError(f"配置条目不存在: {name}/{row}")
@@ -112,7 +120,7 @@ def iter_config_bytes(config_path):
             if name.startswith("._"):
                 continue
             raw = archive.read(entry)
-            if name in overrides or name in ("continue7_X1", "activity_time"):
+            if name in overrides or name in ("continue7_X1", "activity_time", "build", "treasure2_fragment"):
                 raw = json.dumps(apply_overrides(name, json.loads(raw), overrides), ensure_ascii=False).encode("utf-8")
             yield name + ".json", raw
 

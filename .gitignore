@@ -12,6 +12,7 @@ phone_screen.png
 role_save.json
 credentials.json
 config_overrides.json
+/rankings.json
 /backups/
 /logs/
 

@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, daily_events, development, diagnostics, formation, guide, player, protocol, recharge, recruit, replay, training, welfare
+from zyj_server import accounts, activities, battle, daily_events, development, diagnostics, formation, guide, player, protocol, ranking, recharge, recruit, replay, rob, shop, training, welfare
 from zyj_server.session import Session
 
 
@@ -171,8 +171,10 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [1, 60])
         elif opcode == 2000:
             saved = json.loads(self.save_path.read_text())
-            self.assertEqual(bytes.fromhex(actual), daily_events.rewrite_periods(welfare.rewrite_activities(bytes.fromhex(expected)), saved,
-                                                                               self.role_config, int(self.clock.return_value)))
+            body = daily_events.rewrite_periods(welfare.rewrite_activities(bytes.fromhex(expected)), saved,
+                                               self.role_config, int(self.clock.return_value))
+            state = json.loads(self.save_path.with_name("rankings.json").read_text())
+            self.assertEqual(bytes.fromhex(actual), ranking.rewrite_activities(body, state, self.role_config, int(self.clock.return_value)))
         elif opcode == 3210:
             rows = self.entity_records(bytes.fromhex(actual), 1, 1)
             self.assertEqual(set(rows), set(map(int, self.role_config["gift_bag"])))
@@ -915,6 +917,125 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(path.read_text(), "broken")
         self.assertEqual(self.save_path.read_bytes(), before)
 
+    def test_artifact_rank_uses_highest_owned_score_and_preserves_full_native_details(self):
+        saved = self.seed_shop_account()
+        saved["world_state"]["1002"] += b"".join(protocol.encode_pb_field(16, 2,
+            b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(2, 2, f"铸造者{iid}".encode()) if i == 3
+                      else protocol.encode_pb_field(1, 0, value)) for i, value in enumerate(
+                          [iid, 110001, 0] + [0] * 10 + [7] + [0] * 14 + [score], 1)))
+            for iid, score in ((5000001, 777), (5000002, 999))).hex()
+        self.save_path.write_text(json.dumps(saved))
+        original = self.save_path.read_bytes()
+        rows = self.entity_records(self.query_world_for_values(3500, [0, 1, 50]), 1, 1)
+        self.assertEqual(len(rows), 1)
+        raw = next(iter(rows.values()))
+        params = next(v for n, w, v in protocol.iter_pb_fields(raw) if n == 8)
+        values = [v for n, w, v in protocol.iter_pb_fields(params) if n == 1][4:]
+        self.assertEqual(protocol.pb_get_varint(values[0], 1), 5000002)
+        self.assertEqual(protocol.pb_get_varint(values[13], 1), 7)
+        self.assertEqual(protocol.pb_get_varint(values[28], 1), 999)
+        self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_event_rank_growth_baseline_frozen_history_and_clock_rollback(self):
+        saved = self.seed_shop_account()
+        self.save_path.with_name("rankings.json").unlink()
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        initial = store.observe_rankings()
+        self.assertEqual(store.rank_query(1, bytes.fromhex(self.activity_request(3503, [11, 1, 50, 106])["hex"]), 3503), b"")
+        baseline = saved["role_state"]["power"]
+        saved["role_state"]["power"] += 500
+        self.save_path.write_text(json.dumps(saved))
+        store.observe_rankings()
+        summary = store.rank_query(1, bytes.fromhex(self.activity_request(5601, [11, 1])["hex"]), 5601)
+        groups = dict(protocol.get_comb_messages(summary))
+        self.assertEqual(protocol.parse_ids_pb(groups[2]), [baseline])
+        params = [v for n, w, v in protocol.iter_pb_fields(groups[1]) if n == 1]
+        self.assertEqual(protocol.pb_get_varint(params[-1], 1), 500)
+        self.clock.return_value = ranking.end_at(initial, 11, self.role_config)
+        frozen = store.observe_rankings()["closed"]["11"]
+        saved["role_state"]["power"] += 5000
+        self.save_path.write_text(json.dumps(saved))
+        store.observe_rankings()
+        self.assertEqual(store.observe_rankings()["closed"]["11"], frozen)
+        self.clock.return_value = self.now
+        self.assertEqual(store.observe_rankings()["closed"]["11"], frozen)
+        old = store.rank_query(1, bytes.fromhex(self.activity_request(3503, [11, 1, 50, 106])["hex"]), 3503)
+        self.assertTrue(old)
+        self.assertEqual(self.save_path.read_text(), json.dumps(saved))
+
+    def test_rank_reward_mail_claim_is_persisted_once_and_unclaimed_mail_cannot_be_deleted(self):
+        saved = self.seed_shop_account()
+        self.save_path.with_name("rankings.json").unlink()
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        state = store.observe_rankings()
+        self.assertEqual(self.query_world(3100), b"")
+        self.clock.return_value = ranking.end_at(state, 1, self.role_config)
+        mails = self.entity_records(self.query_world(3100), 2, 1)
+        mail = 700000001
+        self.assertIn(mail, mails)
+        attachment = json.loads(next(v.decode() for n, w, v in protocol.iter_pb_fields(mails[mail]) if n == 7))
+        self.assertEqual(attachment["91008"], 10)
+        before = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(3102, [mail])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), before)
+        request = self.activity_request(3101, [mail])
+        replies = self.replay([request, request])
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual(replies[0]["opcode"], 3101)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], saved["role_state"]["coin"] + 5000000)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[91008], 2), 10)
+        original = self.save_path.read_bytes()
+        self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), original)
+        self.assertEqual(self.replay([self.activity_request(3102, [mail])])[0]["opcode"], 3102)
+        self.assertNotIn(mail, self.entity_records(self.query_world(3100), 2, 1))
+
+    def test_rank_reward_mail_failed_save_does_not_leak_claims_or_costume_bonuses(self):
+        saved = self.seed_shop_account()
+        self.save_path.with_name("rankings.json").unlink()
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        state = store.observe_rankings()
+        self.clock.return_value = ranking.end_at(state, 6, self.role_config)
+        self.query_world(3100)
+        original = self.save_path.read_bytes()
+        with redirect_stdout(io.StringIO()):
+            session = store.open_session(1, LOGIN_PASSWORD, ("test", 0))
+            baseline = copy.deepcopy(session.save)
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(3101, 213, bytes.fromhex(self.activity_request(3101, [700000006])["hex"]))
+        self.assertEqual(session.save, baseline)
+        self.assertEqual(self.save_path.read_bytes(), original)
+        store.close_session(1)
+        reply = self.replay([self.activity_request(3101, [700000006])])
+        self.assertEqual(reply[0]["opcode"], 3101)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["fashion_state"]["levels"]["80007"], 1)
+        self.assertEqual(after["role_state"]["power"], saved["role_state"]["power"] + 882)
+        self.assertTrue(any(f["opcode"] == 1070 for f in reply))
+        self.assertTrue(any(f["opcode"] == 205 for f in reply))
+
+    def test_event_rank_rejects_ambiguous_context_and_corrupt_journal_without_overwrite(self):
+        self.seed_shop_account()
+        for opcode, values in ((5601, [99, 1]), (5601, [1, 3]), (3503, [1, 1, 50]),
+                               (3500, [2, 1, 50, 11]), (5602, [1])):
+            self.assertEqual(self.replay([self.activity_request(opcode, values)])[0]["opcode"], 999999)
+        path = self.save_path.with_name("rankings.json")
+        path.write_text("broken")
+        self.assertEqual(self.replay([self.activity_request(5601, [1, 1])])[0]["opcode"], 999999)
+        self.assertEqual(path.read_text(), "broken")
+
+    def test_event_rank_removes_deleted_roles_before_freezing_standings(self):
+        self.seed_shop_account()
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        state = store.observe_rankings()
+        self.assertIn("1", state["players"])
+        self.save_path.unlink()
+        self.assertEqual(store.observe_rankings()["players"], {})
+        self.clock.return_value = ranking.end_at(state, 1, self.role_config)
+        self.assertEqual(store.observe_rankings()["closed"]["1"], [])
+
     def seed_rob_account(self):
         self.seed_shop_account()
         saved = json.loads(self.save_path.read_text())
@@ -922,6 +1043,141 @@ class ReplayRoutingTests(unittest.TestCase):
         saved["guide"]["sections"]["52"] = {"status": 1, "step": 2, "steps": [1, 2]}
         self.save_path.write_text(json.dumps(saved))
         return saved
+
+    def test_key_boxes_use_configured_weights_and_consume_matching_keys_once(self):
+        self.seed_shop_account()
+        self.give_props({cid: 100 for cid in range(20001, 20009)})
+        for cid in range(20001, 20005):
+            before = json.loads(self.save_path.read_text())
+            request = self.activity_request(1201, [cid, 100])
+            with patch.object(player.random, "getrandbits", return_value=42):
+                replies = self.replay([request, request])
+            self.assertEqual(replies[0], replies[1])
+            self.assertEqual(replies[0]["opcode"], 1201)
+            reward = bytes.fromhex(replies[0]["hex"])
+            self.assertFalse(any(n == 10 and w == 2 and v for n, w, v in protocol.iter_pb_fields(reward)))
+            expected = shop.open_box(before, [cid, 100], self.role_config, 42)
+            self.assertEqual(reward, expected)
+            props = self.entity_records(self.query_world(1200), 1, 1)
+            self.assertNotIn(cid, props)
+            self.assertNotIn(cid + 4, props)
+            fragments = self.entity_records(self.query_world(1107), 1, 1)
+            for raw in self.entity_records(next(v for n, w, v in protocol.iter_pb_fields(reward) if n == 5), 1, 1).values():
+                item = protocol.pb_get_varint(raw, 1)
+                if str(item) in self.role_config["treasure2_fragment"]:
+                    self.assertIn(item, fragments)
+
+    def test_key_box_invalid_keys_quantities_and_failed_save_leave_inventory_untouched(self):
+        self.seed_shop_account()
+        self.give_props({20004: 2, 20008: 1})
+        original = self.save_path.read_bytes()
+        for values in ([20004, 2], [20004, 101], [20004, 1, 1], [20008, 1]):
+            self.assertEqual(self.replay([self.activity_request(1201, values)])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), original)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            baseline = copy.deepcopy(session.save)
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(1201, 234, bytes.fromhex(self.activity_request(1201, [20004, 1])["hex"]))
+        self.assertEqual(session.save, baseline)
+        self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_all_configured_treasure_fragments_have_npcs_and_atomic_compounds(self):
+        saved = self.seed_rob_account()
+        saved["world_state"]["1107"] = ""
+        for cid, row in self.role_config["treasure2_fragment"].items():
+            body = bytes.fromhex(self.activity_request(1110, [int(cid)])["hex"])
+            reply, _, _ = rob.prepare(1110, copy.deepcopy(saved), body, self.role_config, 42)
+            self.assertEqual(len(self.entity_records(reply, 1, 1)), 3)
+        equips = {row["equip"] for row in self.role_config["treasure2_fragment"].values()}
+        for equip in sorted(equips):
+            working = copy.deepcopy(saved)
+            fragments = [row["id"] for row in self.role_config["treasure2_fragment"].values() if row["equip"] == equip]
+            working["world_state"]["1107"] = b"".join(protocol.encode_pb_field(1, 2,
+                protocol.encode_pb_field(1, 0, cid) + protocol.encode_pb_field(2, 0, 1)) for cid in fragments).hex()
+            reply, costs, _ = rob.prepare(1108, working, bytes.fromhex(self.activity_request(1108, [equip])["hex"]), self.role_config, 42)
+            self.assertEqual(costs, [(cid, 1) for cid in sorted(fragments)])
+            if str(equip) in self.role_config["props"]:
+                props = self.entity_records(next(v for n, w, v in protocol.iter_pb_fields(reply) if n == 5), 1, 1)
+                self.assertEqual(protocol.pb_get_varint(props[equip], 2), 1)
+            else:
+                self.assertEqual([protocol.parse_ids_pb(v)[1] for n, w, v in protocol.iter_pb_fields(reply) if n == 6], [equip])
+        saved["guide"]["sections"]["52"] = {"status": 2, "step": 7, "steps": list(range(1, 8))}
+        self.save_path.write_text(json.dumps(saved))
+        self.give_props({28001: 1, 28002: 1, 28003: 1})
+        self.assertEqual(self.replay([self.activity_request(1108, [25101])])[0]["opcode"], 1108)
+        self.assertFalse(any(cid in self.entity_records(self.query_world(1107), 1, 1) for cid in (28001, 28002, 28003)))
+
+    def test_treasure_batches_use_real_results_stop_on_fragment_and_return_actual_costs(self):
+        self.seed_rob_account()
+        before = json.loads(self.save_path.read_text())
+        rid = rob.NPC_BASE + 28001 * 3
+        request = self.activity_request(1114, [rid])
+        with patch.object(player.random, "getrandbits", return_value=42):
+            replies = self.replay([request, request])
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual(replies[0]["opcode"], 1114)
+        messages = protocol.get_comb_messages(bytes.fromhex(replies[0]["hex"]))
+        attempts = protocol.parse_ids_pb(messages[0][1])[0]
+        self.assertTrue(1 <= attempts <= 10)
+        self.assertEqual(len(messages), attempts + 1)
+        saved = json.loads(self.save_path.read_text())
+        self.assertEqual(saved["role_state"]["energy"], before["role_state"]["energy"] - attempts)
+        self.assertEqual(saved["role_state"]["stamina"], before["role_state"]["stamina"])
+        self.assertEqual(saved["last_rob"]["attempts"], attempts)
+        self.assertIn(28001, self.entity_records(self.query_world(1107), 1, 1))
+
+    def test_one_key_restores_energy_only_when_needed_and_rolls_back_bad_batches(self):
+        saved = self.seed_rob_account()
+        saved["role_state"]["energy"] = 0
+        self.save_path.write_text(json.dumps(saved))
+        self.give_props({20015: 2, 20020: 1})
+        original = self.save_path.read_bytes()
+        for values in ([0, 28001, 28002], [1, 28001, 28001], [1, 28001, 28010], [2, 28001], [1, 29999]):
+            self.assertEqual(self.replay([self.activity_request(1125, values)])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), original)
+        with patch.object(player.random, "getrandbits", return_value=42):
+            response = self.replay([self.activity_request(1125, [1, 28001, 28002, 28003])])[0]
+        self.assertEqual(response["opcode"], 1125)
+        messages = protocol.get_comb_messages(bytes.fromhex(response["hex"]))
+        attempts, large, small = protocol.parse_ids_pb(messages[0][1])
+        self.assertGreater(attempts, 0)
+        self.assertEqual((large, small), (0, 1))
+        saved = json.loads(self.save_path.read_text())
+        self.assertEqual(saved["role_state"]["energy"], 10 - attempts)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20015], 2), 1)
+        previous = self.entity_records(bytes.fromhex(json.loads(original)["world_state"]["1200"]), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20020], 2), protocol.pb_get_varint(previous[20020], 2))
+        fragments = self.entity_records(self.query_world(1107), 1, 1)
+        self.assertTrue(all(cid in fragments for cid in (28001, 28002, 28003)))
+
+    def test_treasure_batch_losses_cost_energy_and_failed_save_rolls_back_every_attempt(self):
+        saved = self.seed_rob_account()
+        for raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).values():
+            for field, value in ((6, 1), (7, 0), (8, 1), (9, 1)):
+                raw = protocol.pb_set_varint(raw, field, value)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            player.record_protagonist_general(saved, raw)
+        self.save_path.write_text(json.dumps(saved))
+        request = self.activity_request(1114, [rob.NPC_BASE + 28001 * 3])
+        response = self.replay([request])[0]
+        self.assertEqual(response["opcode"], 1114)
+        groups = protocol.get_comb_messages(bytes.fromhex(response["hex"]))
+        self.assertEqual(protocol.parse_ids_pb(groups[0][1]), [10])
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["energy"], saved["role_state"]["energy"] - 10)
+        self.assertEqual(after["world_state"], saved["world_state"])
+        self.assertEqual(after["last_rob"]["wins"], 0)
+        original = self.save_path.read_bytes()
+        for opcode, values in ((1114, [rob.NPC_BASE + 28001 * 3]), (1125, [1, 28001, 28002, 28003])):
+            with redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                baseline = copy.deepcopy(session.save)
+                with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                    session.handle(opcode, 324, bytes.fromhex(self.activity_request(opcode, values)["hex"]))
+            self.assertEqual(session.save, baseline)
+            self.assertEqual(self.save_path.read_bytes(), original)
 
     def rob_guide_request(self, rid):
         return {"opcode": 999900, "seq": 12345, "hex": b"".join(
@@ -966,7 +1222,7 @@ class ReplayRoutingTests(unittest.TestCase):
         players = list(self.entity_records(self.query_world_for_values(1110, [28010]), 1, 1).values())
         rid = protocol.pb_get_varint(players[0], 1)
         original = self.save_path.read_bytes()
-        for request in (self.activity_request(1107, [1]), self.activity_request(1110, [28011]), self.activity_request(1110, [28014]),
+        for request in (self.activity_request(1107, [1]), self.activity_request(1110, [28011]), self.activity_request(1110, [29999]),
                         self.activity_request(1111, [250, 0]), self.activity_request(1111, [rid, 1]),
                         self.activity_request(1111, [rid, 0, 0]), self.activity_request(1108, [26102])):
             self.assertEqual(self.replay([request])[0]["opcode"], 999999)
@@ -989,6 +1245,8 @@ class ReplayRoutingTests(unittest.TestCase):
         for invalid in (raw + b"\x10\x01", raw + raw[:raw[1] + 2], raw.replace(b"\x08\x34\x10\x03", b"\x08\x34\x10\x04")):
             self.assertEqual(self.replay([dict(request, hex=invalid.hex())])[0]["opcode"], 999999)
             self.assertEqual(self.save_path.read_bytes(), original)
+        self.assertEqual(self.replay([self.rob_guide_request(rob.NPC_BASE + 28001 * 3)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), original)
         conn = ReplayConnection([request], 7)
         send = conn.sendall
         def check_saved(packet):
@@ -2414,9 +2672,11 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_gift_save_failure_keeps_items_rewards_and_guide_atomic(self):
         self.replay_through(138)
+        rankings = self.save_path.with_name("rankings.json").read_bytes()
         with patch.object(player.os, "replace", side_effect=OSError("disk failure")):
             self.assert_rejected(self.by_seq[148], "保存失败")
-        self.assertEqual(sorted(p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')), ["accounts", "role_save.json"])
+        self.assertEqual(sorted(p.name for p in self.save_path.parent.iterdir() if not p.name.startswith('._')), ["accounts", "rankings.json", "role_save.json"])
+        self.assertEqual(self.save_path.with_name("rankings.json").read_bytes(), rankings)
 
     def test_recruit_requires_a_token_and_cannot_reset_owned_generals(self):
         self.replay_through(12)

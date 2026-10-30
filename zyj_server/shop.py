@@ -1,9 +1,10 @@
-"""商城道具、终身限购礼包、周礼包及固定内容礼包。"""
+"""商城、固定礼包与配置权重钥匙箱；消耗由 player 整组保存。"""
 
+import random
 from datetime import datetime, timedelta, timezone
 
 from . import recharge, recruit
-from .protocol import encode_pb_field, iter_pb_fields
+from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
 QUERIES = (3200, 3210, 4890)
@@ -46,15 +47,31 @@ def fixed_box(row):
     return row.get("type") in ("box", "vipbox") and row.get("function") == "box1"
 
 
-def open_box(save, values, config):
+def openable_box(row):
+    return fixed_box(row) or (row.get("type") == "keybox" and row.get("function") == "box99")
+
+
+def open_box(save, values, config, seed):
     if not save.get("has_role"):
         raise ValueError("角色尚未创建")
     if len(values) != 2 or not 1 <= values[1] <= 100:
         raise ValueError("礼包使用数量无效")
     cid, count = values
     row = config["props"][str(cid)]
-    if not fixed_box(row) or row["use_limit"]:
+    if not openable_box(row) or row["use_limit"]:
         raise ValueError("此礼包开启条件暂不支持")
+    inventory = {pb_get_varint(v, 1): pb_get_varint(v, 2) for n, w, v in
+                 iter_pb_fields(bytes.fromhex(save["world_state"]["1200"])) if (n, w) == (1, 2)}
+    if inventory.get(cid, 0) < count:
+        raise ValueError("箱子数量不足")
+    if row["type"] == "keybox":
+        if inventory.get(int(row["param1"]), 0) < count:
+            raise ValueError("对应钥匙数量不足")
+        entries = [tuple(map(int, entry.split(","))) for entry in row["param2"].split(";") if entry]
+        if not entries or any(len(e) != 3 or min(e) <= 0 for e in entries):
+            raise ValueError("箱子奖励权重无效")
+        gets = random.Random(seed).choices(entries, weights=[e[2] for e in entries], k=count)
+        return recruit.build_reward(save, [(cid, num) for cid, num, _ in gets], config)
     vip_box = row["type"] == "vipbox"
     if vip_box and int(row["param1"] or 0) > save["role_state"].get("vip", 0):
         raise ValueError("贵族等级不足")

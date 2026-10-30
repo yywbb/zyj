@@ -11,10 +11,22 @@ from unittest.mock import patch
 import zipfile
 
 import build_local_apk as builder
-from zyj_server import configuration, player
+import build_download_tool as download_builder
+from zyj_server import configuration, player, ranking
 
 
 class LanBuildTests(unittest.TestCase):
+    def test_download_tool_rejects_credentials_and_non_minio_base_urls_before_building(self):
+        self.assertEqual(download_builder.validate_download_base("https://example.com/bucket/"), "https://example.com/bucket/")
+        for value in ("file:///bucket/", "http://user:password@example.com/bucket/", "https://example.com/",
+                      "http://example.com/bucket/?secret=value", "http://example.com/bucket/#fragment", "https://example.com/bucket"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                download_builder.validate_download_base(value)
+        with patch.object(download_builder.subprocess, "run") as run, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                download_builder.main(["--download-base", "file:///bucket/"])
+            run.assert_not_called()
+
     def test_account_list_uses_one_lan_endpoint_and_preserves_extra_fields(self):
         original = json.dumps({"9": {"id": 9, "name": "old", "ip": "old", "port": 1, "extra": True}}).encode()
         with contextlib.redirect_stdout(io.StringIO()):
@@ -103,6 +115,158 @@ class LanBuildTests(unittest.TestCase):
         self.assertNotIn("setStringForKey", form + enter)
         self.assertIn("if t.location == 0 then LoginScene:rememberLocalLogin() end", decrypted("assets/scripts/UILogin.so"))
         self.assertIn("LoginScene:failLocalLogin(t.msg, true)", decrypted("assets/scripts/UIErrorMessage.so"))
+
+    def test_local_rank_callbacks_preserve_ui_handoff_and_native_artifact_details(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("排行榜回调验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        layer = scripts["assets/scripts/Layer_rank2.so"]
+        self.assertNotIn("http_artifact_rank", layer)
+        lua = LuaRuntime()
+        lua.execute('''
+            cclog, printT = function() end, function() end
+            local function message()
+                return {ids={},SerializeToString=function(self) return self.ids end,
+                    ParseFromString=function(self,data) for k,v in pairs(data) do self[k]=v end end}
+            end
+            package.preload.ids_pb=function() return {Ids=message} end
+            package.preload.players_pb=function() return {Players=message} end
+            gamedata={ext={},cache={role={id=25}}}
+            function gamedata:players(data) return data end
+            function gamedata:artifactData(data) return data end
+        ''')
+        lua.execute(scripts["assets/scripts/GameRank.so"])
+        lua.execute('''
+            local remote,opcode,body=UIRankQueryCallBack({method=0})
+            assert(remote==1 and opcode==3500 and #body==3 and body[1]==0)
+            local value={params={iid=5000001,cid=110001,name="铸造者",score=999,level1=7,
+                attr1=15,attr2=1,levelHP=100,levelAttack=10,levelDef=20,
+                resonanceActiveId1=1,resonanceActiveId2=2,resonanceActiveId3=3}}
+            local response=NetRankQueryCallBack({rbuf={players={value}}})
+            assert(response.method==0 and response.players[1].artifact.cid==110001)
+            assert(response.players[1].score==999 and response.players[1].artifact.level1==7)
+            local _,_,current=UIRankQueryCallBack({method=11,activityRankId=106})
+            assert(#current==4 and current[4]==106)
+            local _,_,old=UIOldRankQueryCallBack({method=1,activityRankId=11})
+            assert(#old==4 and old[4]==11)
+            GameScene={layers={ranklist={show=true,module={
+                setMyArtifactData=function(self,p) self.own=p end,
+                ReloadData=function(self,t) self.data=t end}}}}
+        ''')
+        lua.execute(scripts["assets/scripts/UIRank.so"])
+        lua.execute('''
+            UIRankQuery({method=0,players={}})
+            assert(GameScene.layers.ranklist.module.own~=nil)
+            assert(GameScene.layers.ranklist.module.data.method==0)
+        ''')
+
+    def test_rank_periods_and_fragment_batch_scripts_are_packaged_not_reference_only(self):
+        scripts = self.client_scripts()
+        self.assertIn("localRankOpenedAt", scripts["assets/scripts/GameActivityQuery.so"])
+        self.assertIn("v.id == 5601", scripts["assets/scripts/GameActivityQuery.so"])
+        self.assertIn("GameScene.localRankOpenedAt = t.localRankOpenedAt", scripts["assets/scripts/UIActivity.so"])
+        for name in ("newrank", "powerRank", "sigilPowerRank", "powerGrowthRank", "powerGrowthRank_x1", "powerGrowthRank_x2",
+                     "magicWeaponRank", "copyRank", "shieldRank", "wingRank", "minggeRank", "partnerPowerRank", "artifactRank"):
+            self.assertIn("GameScene.localRankOpenedAt", scripts[f"assets/scripts/Layer_activity_{name}.so"])
+        self.assertIn('tonumber(gamedata.config.props["20020"].param1)', scripts["assets/scripts/GameRob.so"])
+        self.assertIn("uireq.isautoxh ~= 0", scripts["assets/scripts/GameRob.so"])
+        self.assertNotIn("next(gamedata.cache.mails) and not uireq.update", scripts["assets/scripts/GameMails.so"])
+        self.assertIn("self.cache.petsfragment = {}", scripts["assets/scripts/gamedata.so"])
+        tables = player.load_role_config(Path(__file__).parent / "configs_sec5.zip")
+        for activity, _ in ranking.EVENTS.values():
+            row = tables["activity_time"][str(activity)]
+            self.assertEqual((row["open_type"], row["begin"], row["days_later"]), (1, "", 0))
+        self.assertTrue(all(row["default"] == 1 for row in tables["treasure2_fragment"].values()))
+
+    def test_all_treasure_lists_keep_tutorial_target_in_first_row_with_real_lua(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("挑战列表行为验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        config = player.load_role_config(Path(__file__).parent / "configs_sec5.zip")
+        lua.globals().gamedata = lua.table_from({"config": config, "cache": {"equipfragments": {
+            28011: {"cid": 28011, "num": 1}, 28012: {"cid": 28012, "num": 1}}}}, recursive=True)
+        code = scripts["assets/scripts/gamedata.so"]
+        lua.execute(code[code.index("function gamedata.sortData("):code.index("function gamedata.sortDataByOrder(")])
+        lua.execute('''
+            table.copy=function(t) local out={} for k,v in pairs(t) do out[k]=v end return out end
+            mekehintext=function() end
+            for _,name in ipairs({"PickBattleResultReport","players_pb","ids_pb","battleresult_pb","somethings_pb","combmessages_pb"}) do
+                package.preload[name]=function() return {} end
+            end
+        ''')
+        lua.execute(scripts["assets/scripts/GameRob.so"])
+        lua.execute('''
+            local treasures,horses=makeTreasureRob()
+            assert(#treasures>20 and #horses>20)
+            assert(treasures[1].cid==26102)
+            assert(treasures[1].fragments[1].cid==28010 and treasures[1].fragments[1].num==0)
+            assert(treasures[1].fragments[2].num==1 and treasures[1].fragments[3].num==1)
+        ''')
+
+    def test_treasure_ten_result_counts_actual_attempts_including_losses_without_rob_tokens(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("十连结算行为验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.execute('''
+            cclog, printT = function() end, function() end
+            local function message() return {ParseFromString=function(self,data)
+                for k,v in pairs(data) do self[k]=v end end} end
+            for _,name in ipairs({"players_pb","ids_pb","somethings_pb","combmessages_pb","battleresult_pb"}) do
+                package.preload[name]=function() return {Ids=message,SomeThings=message,CombMessages=message} end
+            end
+            package.preload.PickBattleResultReport=function() return {} end
+            gamedata={cache={role={energy=10},props={}},ext={robrequest={cid=28002}}}
+            function gamedata:SomethingProcess(data) return data.items end
+            function gamedata:updateRoleEnergy(delta) self.cache.role.energy=self.cache.role.energy+delta end
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+        ''')
+        lua.execute(scripts["assets/scripts/GameRob.so"])
+        lua.execute('''
+            result=NetGameTreasureFragmentRobTenCallBack({rbuf={messages={
+                {data={ids={3}}}, {data={items={}}}, {data={items={{cid=1000,num=220}}}},
+                {data={items={{cid=1000,num=220},{cid=28002,num=1},{cid=20100,num=1}}}}
+            }}})
+            assert(result.energy==3 and gamedata.cache.role.energy==7)
+            assert(#result.coin==3 and result.coin[1].num==0 and result.coin[3].num==220)
+            assert(#result.rob==3 and result.rob[1].num==0 and result.get.cid==28002)
+            -- UI/net handoff converts list keys to strings.
+            for _,key in ipairs({"coin","rob","otherreward"}) do
+                local out={} for i,v in ipairs(result[key]) do out[tostring(i)]=v end result[key]=out
+            end
+            function item() return {setString=function(self,v) self.value=v end,
+                setVisible=function() end,setPosition=function() end,addChild=function() end,
+                setSwallowsTouch=function() end,setTouchPriority=function() end,
+                addHandleOfControlEvent=function() end,getContentSize=function() return {width=920,height=680} end} end
+            ui={setLabelString=function() end,IDconfig=function() return {name="碎片"} end,
+                createLuaTableView=function(data) rowHandler=data.handle return item() end}
+            gameWindows={closeWindowDirect=function() end}
+            LuaEventHandler={create=function(self,fn) return fn end}
+            CCTableViewCell={create=item}
+            CCBReaderLoad=function() return item(),{getCoinTenSprite=item(),lineNumLabel=item(),
+                getCoinNumLabel=item(),getNode=item(),rewardUpName=item()} end
+            setSpriteFrameByName=function() end
+            gameConfig={strings={numci=function(self,n) return tostring(n) end}}
+            CCControlEventTouchUpInside=1
+        ''')
+        window = lua.execute(scripts["assets/scripts/window_robresult.so"])
+        lua.globals().window = window
+        lua.execute('''
+            window.configdata=result
+            window.rootItems={}
+            for _,key in ipairs({"lookRewardBtn_Text","lookRewardBtn","rewardDescNode","successFontNode",
+                "failFontNode","getnum","rewardUpName","rewardDownName","listScroll"}) do window.rootItems[key]=item() end
+            window:tenReload()
+            assert(window.rootItems.getnum.value==3 and rowHandler("numberOfCells")==3)
+            rowHandler("cellAtIndex",{},0,nil)
+        ''')
 
     def test_welfare_refreshes_queries_keeps_vip_local_callback_and_net_rewards(self):
         try:

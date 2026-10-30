@@ -16,7 +16,7 @@ def get_state(save, config):
             or not isinstance(state.get("levels"), dict)):
         raise ValueError("时装存档无效")
     for cid, level in state["levels"].items():
-        if (cid not in config["fashion_gift_bag"] or type(level) is not int
+        if (cid not in config["fashioncoat"] or type(level) is not int
                 or str(level) not in config["fashionintentify"][cid]):
             raise ValueError("时装等级存档无效")
     if state["equipped"] and str(state["equipped"]) not in state["levels"]:
@@ -40,7 +40,7 @@ def attributes(levels, config):
     return result
 
 
-def prepare(opcode, save, body, config, now):
+def prepare(opcode, save, body, config, now, grant=False):
     if opcode == 6911:
         if body:
             raise ValueError("本地伙伴时装暂只支持完整列表查询")
@@ -89,9 +89,10 @@ def prepare(opcode, save, body, config, now):
         key = str(cid)
         if opcode == 1074:
             row = config["fashion_gift_bag"].get(key)
-            if not row or key in levels:
+            if (not row and not grant) or key in levels or key not in config["fashioncoat"]:
                 raise ValueError("时装不存在或已拥有")
-            costs = [(1001, row["price"] if cid == discount else row["gold"])]
+            if not grant:
+                costs = [(1001, row["price"] if cid == discount else row["gold"])]
             levels[key] = 1
         elif key not in levels:
             raise ValueError("尚未拥有此时装")

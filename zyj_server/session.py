@@ -2,10 +2,11 @@
 
 import copy
 import functools
+import struct
 import time
 
-from . import activities, daily_events, development, fashion, guide, online_rewards, player, recharge, recruit, rob, shop, training, welfare
-from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame
+from . import activities, daily_events, development, fashion, guide, online_rewards, player, ranking, recharge, recruit, rob, shop, training, welfare
+from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
 print_flush = functools.partial(print, flush=True)
@@ -19,13 +20,14 @@ def unavailable_response(opcode, seq, body, message):
 
 
 class Session:
-    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None):
+    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None):
         self.replay = Replay(tables)
         self.save_path = save_path
         self.step_counts = step_counts
         self.role_config = role_config
         self.growth_buyers = growth_buyers
         self.rank_query = rank_query
+        self.rank_observer = rank_observer
         self.random_replies = {}
         self.connected_at = int(time.time())
         self.save = player.load_save(save_path, step_counts)
@@ -53,6 +55,35 @@ class Session:
             print_flush("[★] 状态: 全新玩家连入，正常跑完整新手流程 (剧情动画 -> 起名 -> 选将 -> 第一战)！")
 
     def handle(self, opcode, seq, body):
+        before = copy.deepcopy(self.save) if self.rank_observer else None
+        packets = self._handle(opcode, seq, body)
+        if not self.rank_observer or not packets or struct.unpack(">IIII", packets[0][:16])[2] == 999999:
+            return packets
+        state = self.rank_observer(before) if self.save != before else None
+        for i, packet in enumerate(packets):
+            _, _, mid, sequence = struct.unpack(">IIII", packet[:16])
+            if mid not in (2000, 999900):
+                continue
+            raw = packet[16:]
+            if mid == 999900 and 2000 not in get_comb_ids(raw):
+                continue
+            state = state or self.rank_observer()
+            now = int(time.time())
+            if mid == 2000:
+                raw = ranking.rewrite_activities(raw, state, self.role_config, now)
+            else:
+                out = bytearray()
+                for n, w, value in iter_pb_fields(raw):
+                    if (n, w) == (1, 2):
+                        messages = get_comb_messages(encode_pb_field(1, 2, value))
+                        if messages[0][0] == 2000:
+                            value = pb_set_field(value, 2, 2, ranking.rewrite_activities(messages[0][1], state, self.role_config, now))
+                    out.extend(encode_pb_field(n, w, value))
+                raw = bytes(out)
+            packets[i] = pack_frame(mid, sequence, raw)
+        return packets
+
+    def _handle(self, opcode, seq, body):
         """成功响应只在落盘后返回；解析、业务或保存失败时抛错，由收发入口关闭连接。"""
         print_flush(f"[C->S] Opcode: {opcode:6d} (0x{opcode:04x}), Seq: {seq:3d}, Payload: {len(body):3d} B")
         if opcode == 200:
@@ -97,13 +128,46 @@ class Session:
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
 
-        if opcode == 3500:
+        if opcode in (3500, 3503, 5601, 5602, 5603):
             try:
                 if self.rank_query is None:
                     raise ValueError("排行榜需要绑定本地账号库")
-                return [pack_frame(opcode, seq, self.rank_query(body))]
+                return [pack_frame(opcode, seq, self.rank_query(body, opcode))]
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
+
+        if opcode in (3100, 3101, 3102):
+            key = (seq, body)
+            cached = self.random_replies.get(opcode)
+            if cached and cached[0] == key and self.save == cached[2]:
+                return list(cached[1])
+            working = copy.deepcopy(self.save)
+            now = int(time.time())
+            try:
+                if self.rank_query is None or not working.get("has_role"):
+                    raise ValueError("本地排名邮件需要已创建的账号")
+                reply, reward = self.rank_query(body, opcode, working)
+                online_rewards.settle(working, self.role_config, self.connected_at, now)
+                welfare.settle(working, now)
+                player.settle_stamina(working, self.role_config, now)
+                if reward:
+                    player.apply_reward(working, reward, self.role_config, now)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
+            packets = [pack_frame(opcode, seq, reply)]
+            if working.get("fashion_state") != self.save.get("fashion_state"):
+                data, _, _ = fashion.prepare(1070, working, b"", self.role_config, now)
+                packets.append(pack_frame(1070, 0, data))
+                packets.append(pack_frame(1027, 0, bytes.fromhex(working["world_state"]["1002"])))
+                old, new = self.save["role_state"], working["role_state"]
+                power = recharge.ids([new["power"] - old["power"], new["power"], 0, new["g_power"],
+                                      new["power_all"] - old["power_all"], new["power_all"]])
+                packets.append(pack_frame(205, 0, power))
+            packets = player.save_response_group(packets, working, self.save, self.save_path, self.step_counts, self.role_config, now)
+            self.save = working
+            if opcode != 3100:
+                self.random_replies[opcode] = (key, packets, copy.deepcopy(working))
+            return packets
 
         if opcode in (999901, 999989):
             try:
@@ -159,12 +223,12 @@ class Session:
                             + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x34\x10\x03")))
                 rob_comb = normalize_comb_request(body) == expected
 
-        fixed_box = False
+        local_box = False
         if opcode == 1201:
             values = player.parse_prop_use(body)
-            fixed_box = shop.fixed_box(self.role_config["props"].get(str(values[0]), {}))
+            local_box = shop.openable_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or break_comb or rob_comb or fixed_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
                                   *rob.MUTATIONS,
                                   *development.MUTATIONS, *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):

@@ -58,7 +58,10 @@ def load_role_config(config_path):
                              "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake",
                              "month_welfare", "month_growup", "week_growup_1", "week_growup_2_1",
                              "week_growup_money_1", "week_growup_money_2_1", "recharge_gift_1",
-                             "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop", *sign_tables))
+                             "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
+                             "trump", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
+                             "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
+                             "pet3_fragment", *sign_tables))
 
 
 def get_default_save():
@@ -306,7 +309,7 @@ def change_item_count(save, cid, delta, role_config, now=None):
     query = "1012" if fragment else "1107" if equip_fragment else "1200"
     if fragment:
         cid = fragment["general"]
-    elif not equip_fragment and str(cid) not in role_config["props"]:
+    elif not equip_fragment and str(cid) not in role_config["props"] and str(cid) not in role_config["pet3_fragment"]:
         raise ValueError(f"未实现的物品类型: {cid}")
     world = save["world_state"]
     body = bytes.fromhex(world[query])
@@ -406,7 +409,16 @@ def apply_reward(save, body, role_config, now=None):
                     if cid is None or count is None:
                         raise ValueError("道具变更缺少 ID/数量")
                     count = (count & 0xffffffff) - (1 << 32) if count & (1 << 31) else count
-                    change_item_count(save, cid, count if field == 5 else -count, role_config, now)
+                    if str(cid) in role_config["fashioncoat"]:
+                        if field != 5 or count != 1:
+                            raise ValueError("时装奖励数量无效")
+                        if str(cid) not in fashion.get_state(save, role_config)["levels"]:
+                            _, _, general = fashion.prepare(1074, save, encode_pb_field(1, 0, cid), role_config, now, grant=True)
+                            record_protagonist_general(save, general)
+                            record_slot_update(save, encode_pb_field(1, 2, general)
+                                               + encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
+                    else:
+                        change_item_count(save, cid, count if field == 5 else -count, role_config, now)
         elif field == 6 and wire == 2:
             record_slot_update(save, encode_pb_field(2, 2, value))
         elif field == 7 and wire == 2:
@@ -442,6 +454,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             if field == 1 and wire == 2:
                 mid, data = next(messages)
                 updated = prepare_recorded_response(mid, data, save, requests.get(mid, b""), step_counts, role_config, now)
+                if mid == 1111 and save["last_rob"]["fragment"] != 28010:
+                    raise ValueError("挑战引导请选择搜神记碎片一")
                 if mid == 1111 and pb_get_varint(updated, 1) == 0:
                     # 原生引导收到 1111 成功包就进入翻牌；失败整组回滚，避免跳到不存在的奖励窗口。
                     raise ValueError("未战胜本地守卫，请先提升阵容；引导未推进，未消耗精力。")
@@ -526,10 +540,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             record_slot_update(save, encode_pb_field(1, 2, general)
                                + encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode in rob.OPCODES:
-        body, costs, reward = rob.prepare(opcode, save, request_body, role_config, random.getrandbits(64))
+        body, costs, rewards = rob.prepare(opcode, save, request_body, role_config, random.getrandbits(64))
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
-        if reward:
+        for reward in rewards:
             apply_reward(save, reward, role_config, now)
     elif opcode in WORLD_QUERY_IDS:
         body = bytes.fromhex(save["world_state"][str(opcode)])
@@ -662,8 +676,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                     raise ValueError("恢复资源超出范围")
                 # 客户端自行扣除使用数量，usedcidnums 必须为空，避免重复扣道具。
                 body = encode_pb_field(field, 0, delta) + b"".join(encode_pb_field(n, 2, b"") for n in (5, 7, 10))
-            elif shop.fixed_box(config) and not body:
-                body = shop.open_box(save, ids, role_config)
+            elif shop.openable_box(config) and not body:
+                body = shop.open_box(save, ids, role_config, random.getrandbits(64))
             change_item_count(save, ids[0], -ids[1], role_config, now)
             if config["type"] == "keybox":
                 change_item_count(save, int(config["param1"]), -ids[1], role_config, now)

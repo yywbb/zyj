@@ -122,7 +122,8 @@ class AccountStore:
             self.active[account] = {"address": str(address[0]), "connected_at": time.time()}
         try:
             return Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
-                           lambda body: self.rank_query(account, body))
+                           lambda body, opcode=3500, save=None: self.rank_query(account, body, opcode, save),
+                           lambda previous=None: self.observe_rankings({account: previous} if previous else None))
         except Exception as error:
             self.close_session(account)
             raise ValueError(f"载入玩家状态失败: {error}") from error
@@ -143,15 +144,34 @@ class AccountStore:
                 count += 1
         return count
 
-    def rank_query(self, viewer, body):
+    def rank_saves(self):
         saves = {}
         for account in self.account_ids():
             snapshot = self.snapshot(account)
             if snapshot["error"]:
                 raise ValueError("账号存档损坏，无法生成排行榜")
-            if snapshot["save"].get("has_role"):
+            if snapshot["save"].get("has_role") and snapshot["save"].get("role_snapshot"):
                 saves[account] = snapshot["save"]
-        return ranking.query(body, saves, viewer, self.role_config)
+        return saves
+
+    def observe_rankings(self, previous=None):
+        with self.lock:
+            return ranking.observe(self.save_path.with_name("rankings.json"), self.rank_saves(),
+                                   self.role_config, int(time.time()), previous)
+
+    def rank_query(self, viewer, body, opcode=3500, save=None):
+        saves = self.rank_saves()
+        if opcode in (3100, 3101, 3102):
+            return ranking.prepare_mail(opcode, save, body, self.observe_rankings(), viewer, self.role_config)
+        if opcode in (5602, 5603):
+            if body:
+                raise ValueError("成长基线查询不接受参数")
+            state = self.observe_rankings()
+            return welfare.ids([state["players"].get(str(viewer), {}).get("baseline", 0)])
+        if opcode == 5601:
+            return ranking.summary(body, self.observe_rankings(), viewer)
+        state = self.observe_rankings() if opcode == 3503 or len(list(protocol.iter_pb_fields(body))) == 4 else None
+        return ranking.query(body, saves, viewer, self.role_config, state, opcode)
 
     def account_ids(self):
         with self.lock:
