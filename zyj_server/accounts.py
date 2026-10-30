@@ -161,6 +161,8 @@ class AccountStore:
 
     def rank_query(self, viewer, body, opcode=3500, save=None):
         saves = self.rank_saves()
+        if opcode == 3625:
+            return ranking.temple_query(body, saves, viewer, self.role_config)
         if opcode in (3100, 3101, 3102):
             return ranking.prepare_mail(opcode, save, body, self.observe_rankings(), viewer, self.role_config)
         if opcode in (5602, 5603):

@@ -131,7 +131,7 @@ class Session:
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
 
-        if opcode in (3500, 3503, 5601, 5602, 5603):
+        if opcode in (3500, 3503, 5601, 5602, 5603, 3625):
             try:
                 if self.rank_query is None:
                     raise ValueError("排行榜需要绑定本地账号库")
@@ -231,7 +231,7 @@ class Session:
             values = player.parse_prop_use(body)
             local_box = shop.openable_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1307, 1351, *mieshendian.BATTLES, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or local_box or opcode in (1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
                                   *development.MUTATIONS, *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
@@ -269,9 +269,6 @@ class Session:
 
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
-
-        if opcode in mieshendian.UNSUPPORTED:
-            return unavailable_response(opcode, seq, body, "灭神殿扫荡、重置、商店和排行榜尚未接入，未扣除资源。")
 
         if opcode in (204, 300, 4016, 1304, 1350, *mieshendian.QUERIES, 1402, 2037, 2411, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES):

@@ -4,7 +4,7 @@ import copy
 import json
 from pathlib import Path
 
-from . import formation, player, recharge, recruit, storage
+from . import formation, mieshendian, player, recharge, recruit, storage
 from .protocol import encode_pb_field, get_comb_messages, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 
@@ -17,6 +17,27 @@ EVENTS = {1: (11, "toplevel"), 2: (104, "combat_rank"), 5: (126, "wing_rank"),
 
 def parameters(values):
     return b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, value)) for value in values)
+
+
+def temple_query(body, saves, viewer, config):
+    if body:
+        raise ValueError("灭神殿排行榜不接受参数")
+    rows = []
+    for account, snapshot in saves.items():
+        save = copy.deepcopy(snapshot)
+        temple = mieshendian.get_state(save, config)
+        if not temple["maxfloor"]:
+            continue
+        state = player.get_role_state(save, config)
+        role = bytes.fromhex(save["role_snapshot"])
+        rid = pb_get_varint(role, 1) if account == viewer else 1000000 + account
+        if not rid or not 0 < rid < (1 << 31):
+            raise ValueError("灭神殿排行榜角色编号无效")
+        raw = (encode_pb_field(1, 0, rid) + encode_pb_field(2, 2, save["role_name"].encode("utf-8"))
+               + b"".join(encode_pb_field(n, 0, v) for n, v in ((3, state["level"]), (4, state["vip"]), (5, state["profile"]), (7, state["power"])))
+               + encode_pb_field(8, 2, parameters([0, 0, pb_get_varint(role, 23) or 35001, pb_get_varint(role, 24) or 35501, temple["maxfloor"]])))
+        rows.append((-temple["maxfloor"], -temple["maxstar"], account, raw))
+    return b"".join(encode_pb_field(1, 2, row[3]) for row in sorted(rows))
 
 
 def artifact(save, config):

@@ -71,7 +71,7 @@ def build_reward(save, specification, config, quantity=1):
             coin += count
         elif cid == 1001:
             gold += count
-        elif (str(cid) in config["props"] or str(cid) in config["general_fragment"]
+        elif (cid == 1004 or str(cid) in config["props"] or str(cid) in config["general_fragment"]
               or str(cid) in config["treasure2_fragment"] or str(cid) in config["equip_fragment"]
                or str(cid) in config["pet3_fragment"] or str(cid) in config["fashioncoat"]
                or str(cid) in config["trump_gem"]):

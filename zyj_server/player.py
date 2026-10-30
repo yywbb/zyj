@@ -62,7 +62,7 @@ def load_role_config(config_path):
                              "trump", "trump_gem", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
                              "pet3_fragment", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
-                             "mieshendian_award", "mieshendian_reward", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh", *sign_tables))
+                             "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh", *sign_tables))
 
 
 def get_default_save():
@@ -303,6 +303,12 @@ def change_item_count(save, cid, delta, role_config, now=None):
         field = {1000: 1, 1001: 2, 1003: 4}[cid]
         apply_reward(save, encode_pb_field(field, 0, delta & ((1 << 64) - 1)), role_config, now)
         return
+    if cid == 1004:
+        state = mieshendian.get_state(save, role_config)
+        if not 0 <= state["points"] + delta < (1 << 31):
+            raise ValueError("灭神殿积分不足或超出范围")
+        state["points"] += delta
+        return
     if str(cid) in role_config["trump_gem"]:
         roster = bytes.fromhex(save["world_state"]["1002"])
         previous = next((parse_ids_pb(v) for n, w, v in iter_pb_fields(roster)
@@ -503,11 +509,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = daily_events.prepare(opcode, save, request_body, role_config, now)
         if opcode in daily_events.CLAIMS:
             apply_reward(save, body, role_config, now)
-    elif opcode == 3620:
-        body = mieshendian.query(save, request_body, role_config, now)
-    elif opcode in mieshendian.BATTLES:
-        body, reward = mieshendian.fight(save, opcode, request_body, role_config, now, random.getrandbits(64))
-        apply_reward(save, reward, role_config, now)
+    elif opcode in mieshendian.OPCODES:
+        body, costs, reward = mieshendian.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode == 1350:
         body = star_copy.query(save, request_body, role_config, now)
     elif opcode == 1351:
@@ -745,12 +752,23 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     online_rewards.settle(save, role_config, connected_at, now)
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
+    automatic_reward = b""
+    if responses and responses[0]["opcode"] in mieshendian.QUERIES:
+        automatic_reward = mieshendian.finish_sweep(save, role_config, now)
+        if automatic_reward:
+            apply_reward(save, automatic_reward, role_config, now)
     packets = []
     for response in responses:
         opcode = response["opcode"]
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
+    if automatic_reward:
+        for mid in WORLD_QUERY_IDS:
+            if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
+                packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
+    if automatic_reward or responses and responses[0]["opcode"] in (3624, 3626, 3628):
+        packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS,
                                                          *development.MUTATIONS) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))

@@ -212,7 +212,10 @@ def _prepare_teams(teams, config):
                 raise ValueError("尚不支持该武将的技能效果")
             ids = {general.get(f"break{i}", 0) for i in range(1, unit["advance"] + 1)} - {0}
             rows = [config["breakskill"][str(pid)] for pid in sorted(ids)]
-            unit.update(pos=pos, direct=direct, ap=2, dizzy=False, dot=None, firing=None, buffs={},
+            initial_ap = unit.get("initial_ap", 2)
+            if type(initial_ap) is not int or not 0 <= initial_ap <= 10:
+                raise ValueError("初始怒气无效")
+            unit.update(pos=pos, direct=direct, ap=initial_ap, dizzy=False, dot=None, firing=None, buffs={},
                         emergency=False, strikes=0, guard=0, effects={}, passive_rows=rows,
                         flat_out=0, flat_in=0, cover_d=unit.get("cover_d", 0))
             unit["cover_d2"] = unit["cover_d"]

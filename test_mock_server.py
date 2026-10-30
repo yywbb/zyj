@@ -4221,7 +4221,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assert_battle_report(report)
         self.assertLessEqual(report["round"], 30)
 
-    def assert_battle_report(self, report):
+    def assert_battle_report(self, report, condition=True):
         units = {}
         for side, direct in (("attack", True), ("defense", False)):
             for pos, unit in report["b"]["init"][side].items():
@@ -4251,8 +4251,8 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.assertEqual((unit["h"], unit["ap"]), (units[direct, int(pos)]["hp"], units[direct, int(pos)]["ap"]))
                 self.assertEqual(unit.get("cover_d", 0), units[direct, int(pos)]["cover"])
         won = all(v["h"] == 0 for v in report["endmeta"]["defense"].values()) and any(v["h"] > 0 for v in report["endmeta"]["attack"].values())
-        self.assertEqual(report["result"], won)
-        self.assertEqual(bool(report["star"]), won)
+        self.assertEqual(report["result"], won and condition)
+        self.assertEqual(bool(report["star"]), won and condition)
 
     def test_live_battle_saves_rewards_growth_and_repeat_before_reply(self):
         self.replay(self.requests)
@@ -4718,6 +4718,46 @@ class ReplayRoutingTests(unittest.TestCase):
         for key in ("role_state", "world_state", "guide", "last_battle", "last_star_battle"):
             self.assertEqual(after.get(key), before.get(key))
 
+    def test_mieshendian_sixth_floor_is_playable_and_legacy_progress_is_preserved(self):
+        saved = self.prepare_mieshendian()
+        saved["mieshendian_state"] = {"floor": 6, "failcount": 0, "star": 4, "earned": 10,
+                                      "day": (self.now + 28800) // 86400, "todaymaxfloor": 5}
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [5, 5, 0, 0, 6, 4, 0, 0, 1000, 10, 5])
+        result = self.replay([self.activity_request(3621, [3])])[0]
+        self.assertEqual(result["opcode"], 3621)
+        self.assertEqual(protocol.pb_get_varint(bytes.fromhex(result["hex"]), 1), 1)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual((after["mieshendian_state"]["floor"], after["mieshendian_state"]["points"]), (7, 1300))
+
+    def test_mieshendian_reset_keeps_historical_max_and_charges_configured_ordinal(self):
+        self.prepare_mieshendian()
+        self.replay([self.activity_request(3621, [3])])
+        before = json.loads(self.save_path.read_text())
+        result = self.replay([self.activity_request(3626)])[0]
+        self.assertEqual(result["opcode"], 3626)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], before["role_state"]["gold"])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [1, 1, 1, 0, 1, 0, 0, 0, 300, 3, 0])
+        self.replay([self.activity_request(3621, [1])])
+        self.replay([self.activity_request(3626)])
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], before["role_state"]["gold"] - self.role_config["buycount_price"]["2"]["mieshendian"])
+        self.assertEqual(after["mieshendian_state"]["maxfloor"], 1)
+
+    def test_mieshendian_all_condition_types_use_final_hp_positions_rounds_and_deaths(self):
+        report = {"result": True, "round": 3, "endmeta": {"attack": {str(p): {"h": 40, "j": 100}
+                                                                  for p in battle.POSITIONS}}}
+        for kind, value in ((1, 0), (2, 3), (3, .4), (4, 0), (5, 3), (6, 4), (7, 0), (8, 0)):
+            with self.subTest(kind=kind):
+                self.assertTrue(mieshendian.condition_met(report, {"condition": kind, "condition_param": value}))
+        report["endmeta"]["attack"]["6"]["h"] = 0
+        for kind, value in ((3, .1), (4, 0), (5, 3), (7, 0), (2, 2)):
+            self.assertFalse(mieshendian.condition_met(report, {"condition": kind, "condition_param": value}))
+        self.assertTrue(mieshendian.condition_met(report, {"condition": 4, "condition_param": 1}))
+        del report["endmeta"]["attack"]["14"]
+        self.assertFalse(mieshendian.condition_met(report, {"condition": 6, "condition_param": 4}))
+
     def test_mieshendian_three_star_battle_saves_real_rewards_and_next_floor_once(self):
         before = self.prepare_mieshendian()
         body = bytes.fromhex(self.activity_request(3621, [3])["hex"])
@@ -4741,7 +4781,7 @@ class ReplayRoutingTests(unittest.TestCase):
         for key in ("guide", "last_battle", "last_star_battle"):
             self.assertEqual(after.get(key), before.get(key))
         self.assertEqual(after["world_state"]["1300"], before["world_state"]["1300"])
-        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [1, 1, 0, 0, 2, 3, 0, 0, 0, 3, 0])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [1, 1, 0, 0, 2, 3, 0, 0, 300, 3, 0])
 
     def test_temporary_hit_and_critical_damage_reductions_survive_battle_preparation(self):
         attack = {2: self.combat_unit(10201, iid=1, speed=200, hit=-20, criticaldmg=-10)}
@@ -4769,7 +4809,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(protocol.pb_get_varint(bytes.fromhex(result["hex"]), 1), 1)
         self.assert_battle_report(json.loads(next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(result["hex"])) if (n, w) == (5, 2))))
         after = json.loads(self.save_path.read_text())
-        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [5, 5, 0, 0, 6, 1, 0, 0, 0, 13, 0])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [5, 5, 0, 0, 6, 1, 0, 0, 1300, 13, 5])
         old = self.entity_records(bytes.fromhex(before["world_state"]["1200"]), 1, 1)
         new = self.entity_records(bytes.fromhex(after["world_state"]["1200"]), 1, 1)
         for cid, gained in ((20222, 7), (91001, 10), (20002, 25), (20257, 1)):
@@ -4779,13 +4819,14 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(after["world_state"]["1300"], before["world_state"]["1300"])
         self.assertEqual(after["last_mieshendian_battle"]["star_cost"], 12)
         snapshot = self.save_path.read_bytes()
-        result = self.replay([self.activity_request(3621, [3])])
-        self.assert_unavailable_response(result, 3621, 20000, "仅开放前5层")
+        result = self.replay([self.activity_request(3622, [1, 1, 1, 1, 2, 3, 4, 5, 6, 7])])
+        self.assert_unavailable_response(result, 3622, 20000, "挑战方式")
         self.assertEqual(self.save_path.read_bytes(), snapshot)
 
     def test_mieshendian_boss_bonuses_and_arrangement_are_temporary_and_charge_on_loss(self):
         before = self.prepare_mieshendian(strong=False)
-        before["mieshendian_state"].update(floor=5, star=12, earned=12, todaymaxfloor=4)
+        before["mieshendian_state"].update(floor=5, star=12, earned=12, todaymaxfloor=4, maxfloor=4, maxstar=12,
+                                            best={str(i): 3 for i in range(1, 5)})
         self.save_path.write_text(json.dumps(before))
         row = self.role_config["mieshendian_monster_param"]["5"]["1"]
         attack, defense = battle.rosters(before, {**row, "level": row["monster_level"]}, self.role_config)
@@ -4838,7 +4879,7 @@ class ReplayRoutingTests(unittest.TestCase):
         baseline = self.prepare_mieshendian()
         cases = [(3620, [1]), (3621, []), (3621, [0]), (3621, [4]), (3621, [3, 1]),
                  (3622, [0, 0, 0, 1, 2, 3, 4, 5, 6, 7])]
-        cases += [(opcode, []) for opcode in mieshendian.UNSUPPORTED]
+        cases += [(opcode, [1, 1]) for opcode in (3623, 3624, 3625, 3626, 3627, 3628)]
         bodies = [(opcode, bytes.fromhex(self.activity_request(opcode, values)["hex"]), "normal") for opcode, values in cases]
         bodies += [(3621, b"\x08", "truncated"), (3621, b"\x08\x03\x10\x01", "wire"),
                    (3621, b"\x08\x03", "level"), (3621, b"\x08\x03", "boss-phase")]
@@ -4850,7 +4891,8 @@ class ReplayRoutingTests(unittest.TestCase):
             if kind == "level":
                 saved["role_state"]["level"] = 14
             elif kind in ("boss", "boss-phase"):
-                saved["mieshendian_state"].update(floor=5, earned=1, star=1)
+                saved["mieshendian_state"].update(floor=5, earned=1, star=1, maxfloor=4, maxstar=1,
+                                                  best={str(i): 1 for i in range(1, 5)})
             self.save_path.write_text(json.dumps(saved))
             disk = self.save_path.read_bytes()
             with self.subTest(opcode=opcode, body=body, kind=kind), redirect_stdout(io.StringIO()):
@@ -4872,12 +4914,14 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(session.save, memory)
             self.assertEqual(self.save_path.read_bytes(), disk)
             self.assertEqual(session.random_replies, {})
-        for kind in ("coin", "star"):
+        for kind in ("coin", "star", "points"):
             saved = copy.deepcopy(baseline)
             if kind == "coin":
                 saved["role_state"]["coin"] = (1 << 31) - 100
+            elif kind == "star":
+                saved["mieshendian_state"].update(star=(1 << 31) - 1, earned=(1 << 31) - 1, maxstar=(1 << 31) - 1)
             else:
-                saved["mieshendian_state"].update(star=(1 << 31) - 1, earned=(1 << 31) - 1)
+                saved["mieshendian_state"]["points"] = (1 << 31) - 1
             self.save_path.write_text(json.dumps(saved))
             with self.subTest(kind=kind), redirect_stdout(io.StringIO()):
                 session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
@@ -4890,29 +4934,320 @@ class ReplayRoutingTests(unittest.TestCase):
         self.prepare_mieshendian()
         self.replay([self.activity_request(3621, [3])])
         self.clock.return_value += 86400
-        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [1, 0, 0, 0, 2, 3, 0, 0, 0, 3, 0])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [1, 0, 0, 0, 2, 3, 0, 0, 300, 3, 0])
         self.replay([self.activity_request(3621, [2])])
         self.clock.return_value -= 86400
-        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [2, 2, 0, 0, 3, 5, 0, 0, 0, 5, 0])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620)), [2, 2, 0, 0, 3, 5, 0, 0, 500, 5, 0])
 
     def test_mieshendian_all_supported_difficulties_generate_consistent_battles(self):
         baseline = self.prepare_mieshendian()
         checked = 0
-        for floor in range(1, 6):
+        for floor in range(1, max(map(int, self.role_config["mieshendian_monster_param"])) + 1):
             for difficulty in self.role_config["mieshendian_monster_param"][str(floor)]:
                 self.save_path.write_text(json.dumps(baseline))
                 with redirect_stdout(io.StringIO()):
                     session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
-                    session.save["mieshendian_state"].update(floor=floor, star=12, earned=12)
-                    opcode = 3622 if floor == 5 else 3621
-                    values = [0, 0, 0, 1, 2, 3, 4, 5, 6, 7] if floor == 5 else [int(difficulty)]
+                    session.save["mieshendian_state"].update(floor=floor, star=12, earned=12, maxfloor=floor - 1,
+                                                              maxstar=12, best={str(i): 1 for i in range(1, floor)})
+                    opcode = 3622 if floor % 5 == 0 else 3621
+                    values = [0, 0, 0, 1, 2, 3, 4, 5, 6, 7] if floor % 5 == 0 else [int(difficulty)]
                     with self.subTest(floor=floor, difficulty=difficulty):
                         packets = session.handle(opcode, 26400, bytes.fromhex(self.activity_request(opcode, values)["hex"]))
                         self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], opcode)
                         report = next(v for n, w, v in protocol.iter_pb_fields(packets[0][16:]) if (n, w) == (5, 2))
-                        self.assert_battle_report(json.loads(report))
+                        report = json.loads(report)
+                        killed = all(unit["h"] == 0 for unit in report["endmeta"]["defense"].values())
+                        alive = any(unit["h"] > 0 for unit in report["endmeta"]["attack"].values())
+                        condition = mieshendian.condition_met({**report, "result": killed and alive}, self.role_config["mieshendian_condition"][str(floor)])
+                        self.assert_battle_report(report, condition)
                         checked += 1
-        self.assertEqual(checked, 13)
+        self.assertEqual(checked, 780)
+
+    def seed_mieshendian_history(self, cleared=5):
+        saved = self.prepare_mieshendian()
+        saved["role_state"].update(vip=3, gold=10000)
+        saved["mieshendian_state"] = {"floor": cleared + 1, "failcount": 0, "star": cleared, "earned": cleared,
+                                      "day": (self.now + 28800) // 86400, "todaymaxfloor": cleared}
+        mieshendian.get_state(saved, self.role_config)
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_mieshendian_natural_sweep_finishes_after_reconnect_once_and_syncs_assets(self):
+        before = self.seed_mieshendian_history()
+        self.replay([self.activity_request(3626)])
+        start = self.replay([self.activity_request(3623)])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(start["hex"]))[6], 225)
+        self.assertEqual(json.loads(self.save_path.read_text())["mieshendian_state"]["floor"], 1)
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3621, [3])]), 3621, 20000, "正在扫荡")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.clock.return_value += 224
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620))[6], 1)
+        self.clock.return_value += 1
+        frames = self.replay([self.activity_request(3620)])
+        self.assertEqual(frames[0]["opcode"], 3620)
+        self.assertIn(1200, [frame["opcode"] for frame in frames])
+        self.assertIn(1001, [frame["opcode"] for frame in frames])
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual((after["mieshendian_state"]["floor"], after["mieshendian_state"]["maxfloor"],
+                          after["mieshendian_state"]["points"], after["mieshendian_state"]["star"]), (6, 5, 1000, 5))
+        old = self.entity_records(bytes.fromhex(before["world_state"]["1200"]), 1, 1)
+        new = self.entity_records(bytes.fromhex(after["world_state"]["1200"]), 1, 1)
+        self.assertEqual(new.get(20257), old.get(20257))
+        self.assertEqual(after["world_state"]["1002"], before["world_state"]["1002"])
+        for key in ("guide", "last_battle", "last_star_battle", "last_mieshendian_battle"):
+            self.assertEqual(after.get(key), before.get(key))
+        self.query_world(3620)
+        self.assertEqual(json.loads(self.save_path.read_text())["world_state"], after["world_state"])
+
+    def test_mieshendian_force_finish_charges_actual_minutes_and_caches_once(self):
+        self.seed_mieshendian_history()
+        self.replay([self.activity_request(3626), dict(self.activity_request(3623), seq=20001)])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            gold = session.save["role_state"]["gold"]
+            packets = session.handle(3624, 28000, b"")
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 3624)
+            self.assertEqual(session.save["role_state"]["gold"], gold - 4)
+            self.assertEqual(session.save["mieshendian_state"]["floor"], 6)
+            self.assertIsNone(session.save["mieshendian_state"]["sweep"])
+            self.assertEqual(session.handle(3624, 28000, b""), packets)
+            self.assertEqual(struct.unpack(">IIII", packets[-1][:16])[2], 1001)
+
+    def test_mieshendian_daily_and_lifetime_shop_limits_use_actual_points(self):
+        before = self.seed_mieshendian_history(300)
+        before["mieshendian_state"].update(points=200000, maxstar=780)
+        self.save_path.write_text(json.dumps(before))
+        for iid in sorted(map(int, self.role_config["mieshendian_shop"])):
+            with self.subTest(iid=iid):
+                result = self.replay([self.activity_request(3628, [iid])])[0]
+                self.assertEqual(result["opcode"], 3628)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["mieshendian_state"]["points"], 140000)
+        self.assertEqual(after["role_state"]["gold"], before["role_state"]["gold"])
+        self.assertEqual(after["world_state"]["1300"], before["world_state"]["1300"])
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3628, [101])]), 3628, 20000, "次数已用完")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.clock.return_value += 86400
+        self.assertEqual(self.replay([self.activity_request(3628, [1])])[0]["opcode"], 3628)
+        self.assertEqual(self.replay([self.activity_request(3628, [101])])[0]["opcode"], 999999)
+        self.clock.return_value -= 86400
+        state = json.loads(self.save_path.read_text())["mieshendian_state"]
+        self.query_world(3627)
+        self.assertEqual(json.loads(self.save_path.read_text())["mieshendian_state"]["daily_bought"], state["daily_bought"])
+
+    def test_mieshendian_all_boss_bonuses_and_initial_ap_are_temporary(self):
+        for floor, row in self.role_config["mieshendian_attr"].items():
+            teams = [{pos: self.combat_unit(10201, iid=pos + i * 100, initial_ap=2) for pos in battle.POSITIONS}
+                     for i in range(2)]
+            with self.subTest(floor=floor):
+                mieshendian.apply_bonuses(*teams, row, [1, 1, 1], self.role_config)
+                battle._prepare_teams({True: teams[0], False: teams[1]}, self.role_config)
+        attack = {2: self.combat_unit(10201), 8: self.combat_unit(10201, iid=2)}
+        defense = {2: self.combat_unit(10201, iid=3, initial_ap=9)}
+        mieshendian.apply_bonuses(attack, defense, self.role_config["mieshendian_attr"]["10"], [1, 1, 1], self.role_config)
+        battle._prepare_teams({True: attack, False: defense}, self.role_config)
+        self.assertEqual((attack[2]["atk"], attack[2]["ap"], defense[2]["ap"]), (140, 3, 9))
+        for value in (-1, 11, True, 2.5):
+            with self.subTest(initial_ap=value), self.assertRaisesRegex(ValueError, "初始怒气"):
+                battle._prepare_teams({True: {2: self.combat_unit(10201, initial_ap=value)}}, self.role_config)
+
+    def test_mieshendian_expired_sweep_is_free_and_only_queries_settle_it(self):
+        baseline = self.seed_mieshendian_history()
+        for opcode in (3620, 3627, 3624):
+            saved = copy.deepcopy(baseline)
+            saved["mieshendian_state"].update(floor=1, star=0, earned=0,
+                                              sweep={"target": 5, "end_at": self.now})
+            self.save_path.write_text(json.dumps(saved))
+            with self.subTest(opcode=opcode):
+                disk = self.save_path.read_bytes()
+                self.assert_unavailable_response(self.replay([self.activity_request(3626)]), 3626, 20000, "正在扫荡")
+                self.assertEqual(self.save_path.read_bytes(), disk)
+                frames = self.replay([self.activity_request(opcode)])
+                self.assertEqual(frames[0]["opcode"], opcode)
+                after = json.loads(self.save_path.read_text())
+                self.assertEqual(after["role_state"]["gold"], saved["role_state"]["gold"])
+                self.assertEqual(after["mieshendian_state"]["floor"], 6)
+                self.assertIsNone(after["mieshendian_state"]["sweep"])
+                self.assertIn(1001, [frame["opcode"] for frame in frames])
+                if opcode == 3624:
+                    disk = self.save_path.read_bytes()
+                    self.assertEqual(self.replay([self.activity_request(3624)])[0]["opcode"], 999999)
+                    self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_mieshendian_paid_finish_insufficient_gold_rolls_back_all_sweep_rewards(self):
+        saved = self.seed_mieshendian_history()
+        saved["role_state"]["gold"] = 3
+        saved["mieshendian_state"].update(floor=1, star=0, earned=0,
+                                          sweep={"target": 5, "end_at": self.now + 225})
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3624)]), 3624, 20000, "gold 不足")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_mieshendian_condition_failure_never_grants_rewards_or_progress(self):
+        before = self.prepare_mieshendian()
+        config = copy.deepcopy(self.role_config)
+        config["mieshendian_condition"]["1"] = {"condition": 2, "condition_param": 0}
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, config)
+            packet = session.handle(3621, 28001, recharge.ids([3]))[0]
+        self.assertEqual(protocol.pb_get_varint(packet[16:], 1), 0)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["world_state"], before["world_state"])
+        self.assertEqual(after["role_state"], before["role_state"])
+        self.assertEqual(after["mieshendian_state"]["floor"], 1)
+        self.assertEqual(after["mieshendian_state"]["failcount"], 1)
+        self.assertEqual(after["mieshendian_state"]["points"], 0)
+
+    def test_mieshendian_reset_daily_cap_and_clock_rollback(self):
+        self.seed_mieshendian_history()
+        for _ in range(2):
+            self.assertEqual(self.replay([self.activity_request(3626)])[0]["opcode"], 3626)
+            self.replay([self.activity_request(3621, [1])])
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(3626)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.clock.return_value += 86400
+        self.assertEqual(self.replay([self.activity_request(3626)])[0]["opcode"], 3626)
+        self.clock.return_value -= 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620))[2], 1)
+
+    def test_mieshendian_new_mutations_save_failure_and_insufficient_cost_roll_back(self):
+        saved = self.seed_mieshendian_history(5)
+        saved["mieshendian_state"]["points"] = 4000
+        self.save_path.write_text(json.dumps(saved))
+        for opcode, body in ((3626, b""), (3628, recharge.ids([1]))):
+            with self.subTest(opcode=opcode), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(opcode, 28002, body)
+                self.assertEqual(session.save, memory)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["mieshendian_state"]["points"] = 2999
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(3628, [1])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_mieshendian_sweep_start_finish_and_natural_settlement_save_failure_are_atomic(self):
+        baseline = self.seed_mieshendian_history()
+        for opcode in (3623, 3624, 3620):
+            saved = copy.deepcopy(baseline)
+            saved["mieshendian_state"].update(floor=1, star=0, earned=0)
+            if opcode != 3623:
+                saved["mieshendian_state"]["sweep"] = {"target": 5, "end_at": self.now + (225 if opcode == 3624 else 0)}
+            self.save_path.write_text(json.dumps(saved))
+            with self.subTest(opcode=opcode), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(opcode, 28003, b"")
+                self.assertEqual(session.save, memory)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+                self.assertEqual(session.random_replies, {})
+
+    def test_mieshendian_sweep_eligibility_and_clock_rollback(self):
+        saved = self.seed_mieshendian_history()
+        saved["role_state"].update(vip=0)
+        saved["mieshendian_state"].update(floor=1, star=0, earned=0)
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3623)]), 3623, 20000, "等级或VIP不足")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["role_state"]["level"] = 40
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(3623)])[0]["opcode"], 3623)
+        self.clock.return_value += 100
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620))[6], 125)
+        self.clock.return_value -= 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620))[6], 125)
+
+    def test_mieshendian_ranking_uses_atomic_local_saves_and_never_settles_other_accounts(self):
+        saved = self.seed_mieshendian_history(5)
+        store = accounts.AccountStore(self.save_path, self.tables, self.step_counts, self.role_config)
+        for account, cleared, stars in ((1, 5, 5), (2, 10, 10), (3, 5, 6)):
+            role = copy.deepcopy(saved)
+            role["role_name"] = f"灭神角色{account}"
+            role["mieshendian_state"] = {"floor": cleared + 1, "failcount": 0, "star": stars, "earned": stars,
+                                        "day": 0, "todaymaxfloor": 0}
+            path = store.path(account)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(role))
+        files = {path: path.read_bytes() for path in self.save_path.parent.glob("**/*.json")}
+        raw = self.query_world(3625)
+        rows = list(self.entity_records(raw, 1, 1).values())
+        names = [next(v.decode() for n, w, v in protocol.iter_pb_fields(row) if n == 2) for row in rows]
+        self.assertEqual(names, ["灭神角色2", "灭神角色3", "灭神角色1"])
+        self.assertEqual(len({protocol.pb_get_varint(row, 1) for row in rows}), 3)
+        for row, expected in zip(rows, (10, 5, 5)):
+            params = next(v for n, w, v in protocol.iter_pb_fields(row) if n == 8)
+            values = [protocol.pb_get_varint(v, 1) for n, w, v in protocol.iter_pb_fields(params)]
+            self.assertEqual(values[4:], [expected])
+        for path, data in files.items():
+            self.assertEqual(path.read_bytes(), data)
+        store.path(2).write_text("broken")
+        self.assertEqual(self.replay([self.activity_request(3625)])[0]["opcode"], 999999)
+
+    def test_mieshendian_completed_final_floor_rejects_battle_without_repeating_reward(self):
+        self.seed_mieshendian_history(300)
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(3621, [3])]), 3621, 20000, "全部层数")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3620))[0:2], [300, 300])
+
+    def test_mieshendian_corrupt_new_fields_fail_closed_without_migration_credit(self):
+        baseline = self.seed_mieshendian_history()
+        for changes in ({"maxfloor": 4}, {"points": -1}, {"maxstar": 0}, {"resets": True},
+                        {"best": {}}, {"bought": {"101": 2}}, {"daily_bought": {"1": 6}},
+                        {"sweep": {"target": 6, "end_at": self.now + 45}},
+                        {"floor": 1, "sweep": {"target": 4, "end_at": self.now + 45}}):
+            saved = copy.deepcopy(baseline)
+            saved["mieshendian_state"].update(changes)
+            self.save_path.write_text(json.dumps(saved))
+            disk = self.save_path.read_bytes()
+            with self.subTest(changes=changes), redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "灭神殿"):
+                Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_mieshendian_all_reward_configurations_can_be_applied_without_discarding_items(self):
+        baseline = self.prepare_mieshendian()
+        for floor, rows in self.role_config["mieshendian_monster_param"].items():
+            for difficulty, row in rows.items():
+                specifications = [row["star1reward"]]
+                if floor in self.role_config["mieshendian_reward"]:
+                    specifications.append(self.role_config["mieshendian_reward"][floor]["rewards"])
+                specifications.extend(item["reward"] for item in self.role_config["mieshendian_award"].values()
+                                      if item["number"] == int(floor))
+                with self.subTest(floor=floor, difficulty=difficulty):
+                    save = copy.deepcopy(baseline)
+                    reward = activities.build_reward(save, ";".join(specifications), self.role_config)
+                    player.apply_reward(save, reward, self.role_config, self.now)
+
+    def test_mieshendian_sequential_300_floor_victory_settlement_preserves_history(self):
+        saved = self.prepare_mieshendian()
+        before = self.save_path.read_bytes()
+        for floor in range(1, 301):
+            difficulty = 1 if floor % 5 == 0 else 3
+            with self.subTest(floor=floor):
+                specifications = mieshendian.victory(saved["mieshendian_state"], floor, difficulty, self.role_config)
+                reward = activities.build_reward(saved, ";".join(specifications), self.role_config)
+                player.apply_reward(saved, reward, self.role_config, self.now)
+                self.assertEqual(saved["mieshendian_state"]["floor"], floor + 1)
+        self.assertEqual((saved["mieshendian_state"]["maxfloor"], saved["mieshendian_state"]["maxstar"],
+                          saved["mieshendian_state"]["points"]), (300, 780, 78000))
+        state = saved["mieshendian_state"]
+        state.update(floor=1, star=0, earned=0, sweep={"target": 300, "end_at": self.now})
+        reward = mieshendian.finish_sweep(saved, self.role_config, self.now)
+        old = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+        player.apply_reward(saved, reward, self.role_config, self.now)
+        new = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+        self.assertEqual(new.get(20257), old.get(20257))
+        self.assertEqual((state["floor"], state["maxstar"], state["points"]), (301, 780, 156000))
+        self.assertIsNone(state["sweep"])
+        self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_mieshendian_corrupt_progress_fails_closed_without_overwriting(self):
         baseline = self.prepare_mieshendian()
