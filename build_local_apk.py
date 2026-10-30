@@ -982,6 +982,21 @@ end
     code = code.replace(marker, 'skilljson and (skilljson.damage[tostring(ccbindex)] or skilljson.damage["1"]) or nil')
     patched["assets/scripts/battleReportConvert.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
+    code = read_script("battlegeneral").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function general.dodgeAction(self,data)")
+    end = code.index("\nfunction general.addOneDamageEffect", start)
+    dodge = code[start:end]
+    assert dodge.count("self.SkeletonNode2 = CCNode:create()") == 1
+    assert dodge.count("self.skeleton2 = CCSkeletonAnimation:create(") == 1
+    dodge = dodge.replace("self.SkeletonNode2", "ghostNode").replace("self.skeleton2", "ghost")
+    dodge = dodge.replace("    ghostNode = CCNode:create()", "    -- 残影与回调按次持有，旧闪避不能删除新残影。\n    local ghostNode = CCNode:create()")
+    dodge = dodge.replace("    ghost = CCSkeletonAnimation:create(", "    local ghost = CCSkeletonAnimation:create(")
+    marker = "self.SkeletonNode:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(0.15)"
+    assert dodge.count(marker) == 1
+    dodge = dodge.replace(marker, "ghostNode:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(0.15)")
+    code = code[:start] + dodge + code[end:]
+    patched["assets/scripts/battlegeneral.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     code = read_script("window_robonekeyresult").decode("utf-8").replace("\r\n", "\n")
     assert code.count("0.5*(i-1)") == 1 and code.count("您的精力值不足，无法继续挑战") == 1
     code = code.replace("0.5*(i-1)", "math.min(0.1*(i-1),3)")

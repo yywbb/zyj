@@ -296,6 +296,83 @@ class LanBuildTests(unittest.TestCase):
             end
         ''')
 
+    def test_battle_overlapping_dodges_keep_ghosts_alive_until_their_own_cleanup(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("闪避残影回调验证需本机已有 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            gameConfig={strings={damageConfig={}}}
+            ccc3=function() return {} end
+            local now,queue,order=0,{},0
+            function advance(until_time)
+                while #queue>0 do
+                    table.sort(queue,function(a,b) return a.at<b.at or a.at==b.at and a.order<b.order end)
+                    if queue[1].at>until_time then break end
+                    local event=table.remove(queue,1)
+                    now=event.at
+                    if event.owner.alive and event.generation==event.owner.generation then event.callback() end
+                end
+                now=until_time
+            end
+            local function node()
+                local n={alive=true,generation=0,children={}}
+                function n:stopAllActions() self.generation=self.generation+1 end
+                function n:addChild(child) child.parent=self table.insert(self.children,child) end
+                function n:removeFromParentAndCleanup()
+                    assert(self.alive,'removed node reused')
+                    self.alive=false
+                    while #self.children>0 do self.children[1]:removeFromParentAndCleanup() end
+                    for i,child in ipairs(self.parent.children) do
+                        if child==self then table.remove(self.parent.children,i) break end
+                    end
+                end
+                function n:runAction(action)
+                    assert(self.alive,'removed skeleton reused')
+                    if not action then return end
+                    order=order+1
+                    table.insert(queue,{at=now+action[1],callback=action[2],owner=self,
+                                        generation=self.generation,order=order})
+                end
+                function n:setAnimation() assert(self.alive,'removed skeleton reused') end
+                function n:setPosition() end
+                function n:setScale() end
+                function n:setScaleX(value) self.scale_x=value end
+                return n
+            end
+            CCNode={create=node}
+            CCSkeletonAnimation={create=node}
+            CCDelayTime={create=function(_,delay) return delay end}
+            CCFadeTo=CCDelayTime
+            CCTintTo={create=function() return 0 end}
+            CCSpawn={createWithTwoActions=function() return nil end}
+            CCCallFunc={create=function(_,callback) return callback end}
+            CCSequence={createWithTwoActions=function(_,delay,callback) return {delay,callback} end}
+            function check_dodges(general,interval,direct)
+                now,queue,order=0,{},0
+                local parent,main=node(),node()
+                parent:addChild(main)
+                local unit={SkeletonNode=parent,skeleton=main,direct=direct,data={animation={name='stub'}},
+                            findStandStatus=function() return 'stand' end}
+                general.dodgeAction(unit,{actiondelay=0.5})
+                advance(interval)
+                general.dodgeAction(unit,{actiondelay=0.5})
+                advance(1.5)
+                assert(main.alive and #parent.children==1 and parent.children[1]==main,
+                       'canceled parent callback leaked a dodge ghost')
+            end
+        ''')
+        scripts = self.client_scripts()
+        code = scripts.get("assets/scripts/battlegeneral.so")
+        if code is None:
+            code = (Path(__file__).parent / "scripts_clean/battlegeneral.lua").read_text(encoding="utf-8")
+        lua.globals().general = lua.execute(code)
+        for interval in (0.25, 0.05, 0.4):
+            for direct in ("atk", "def"):
+                with self.subTest(interval=interval, direct=direct):
+                    lua.globals().check_dodges(lua.globals().general, interval, direct)
+
     def test_welfare_refreshes_queries_keeps_vip_local_callback_and_net_rewards(self):
         try:
             from lupa.lua51 import LuaRuntime
