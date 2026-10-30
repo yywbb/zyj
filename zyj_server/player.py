@@ -50,7 +50,7 @@ def load_role_config(config_path):
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
-                             "combskillprobability", "breakskill", "worlddrop", "recruit_deck", "recruit_tenlottery",
+                             "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
                              "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
@@ -373,7 +373,7 @@ def record_copy_box(save, request_body, role_config):
         raise ValueError("无效的副本宝箱请求")
     if not save.get("has_role"):
         raise ValueError("角色尚未创建")
-    if map_id not in (42101, *battle.MAPS):
+    if str(map_id) not in role_config["copy"] or str(map_id) not in role_config["map"]:
         raise ValueError("暂不支持此地图的副本宝箱")
     index = method // 3 + 1
     config = role_config["map"][str(map_id)]

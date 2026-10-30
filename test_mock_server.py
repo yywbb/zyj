@@ -1523,7 +1523,7 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_out_of_scope_standalone_battle_does_not_spend_or_start_empty_battle(self):
         self.replay(self.requests)
         before = self.save_path.read_bytes()
-        request = dict(self.activity_request(1306, [42106, 1]), seq=36)
+        request = dict(self.activity_request(1306, [99999, 1]), seq=36)
         responses = self.replay([request, dict(request, seq=37), self.activity_request(1300)], chunk_size=7)
         self.assert_unavailable_response(responses[:2], 1306, 36, "关卡")
         self.assert_unavailable_response(responses[2:4], 1306, 37, "关卡")
@@ -4221,7 +4221,8 @@ class ReplayRoutingTests(unittest.TestCase):
         for side, direct in (("attack", True), ("defense", False)):
             for pos, unit in report["b"]["init"][side].items():
                 meta = report["meta"][side]["g"][str(unit["i"])]
-                units[direct, int(pos)] = {"hp": meta["h"], "maxhp": meta["j"], "ap": meta["ap"], "dizzy": False}
+                units[direct, int(pos)] = {"hp": meta["h"], "maxhp": meta["j"], "ap": meta["ap"], "dizzy": False,
+                                           "cover": meta.get("cover_d", 0)}
         for action in report["b"]["a"]:
             if action["s"]:
                 for pos in action["s"]["p"]:
@@ -4231,7 +4232,9 @@ class ReplayRoutingTests(unittest.TestCase):
                 unit = units[dest["r"], dest["p"]]
                 if isinstance(dest.get("m"), dict):
                     unit["hp"] -= dest["m"]["m"]
+                    unit["cover"] -= dest["m"].get("M", 0)
                     self.assertGreaterEqual(unit["hp"], 0)
+                    self.assertGreaterEqual(unit["cover"], 0)
                     self.assertLessEqual(unit["hp"], unit["maxhp"])
                 if "ap" in dest:
                     self.assertGreaterEqual(dest["ap"], 0)
@@ -4241,6 +4244,7 @@ class ReplayRoutingTests(unittest.TestCase):
         for side, direct in (("attack", True), ("defense", False)):
             for pos, unit in report["endmeta"][side].items():
                 self.assertEqual((unit["h"], unit["ap"]), (units[direct, int(pos)]["hp"], units[direct, int(pos)]["ap"]))
+                self.assertEqual(unit.get("cover_d", 0), units[direct, int(pos)]["cover"])
         won = all(v["h"] == 0 for v in report["endmeta"]["defense"].values()) and any(v["h"] > 0 for v in report["endmeta"]["attack"].values())
         self.assertEqual(report["result"], won)
         self.assertEqual(bool(report["star"]), won)
@@ -4330,6 +4334,102 @@ class ReplayRoutingTests(unittest.TestCase):
                 "atk": 100, "def": 0, "hp": 10000, "speed": 100,
                 "skill": self.role_config["general"][str(cid)]["skillid"], **values}
 
+    def passive_config(self, cid, *ids):
+        row = dict(self.role_config["general"][str(cid)])
+        row.update({f"break{i}": pid for i, pid in enumerate(ids, 1)})
+        return {**self.role_config, "general": {**self.role_config["general"], str(cid): row}}
+
+    def test_campaign_static_passives_do_not_double_player_snapshot_stats(self):
+        config = self.passive_config(10201, 9000139, 9000094)
+        teams = {True: {2: self.combat_unit(10201, advance=2, npc=True, **{"def": 100})},
+                 False: {2: self.combat_unit(10201, advance=2, **{"def": 100})}}
+        battle._prepare_teams(teams, config)
+        self.assertEqual((teams[True][2]["atk"], teams[True][2]["def"]), (300, 110))
+        self.assertEqual((teams[False][2]["atk"], teams[False][2]["def"]), (100, 100))
+
+    def test_campaign_initial_ap_aura_does_not_stack_duplicate_providers(self):
+        config = self.passive_config(10201, 9000288)
+        report = battle.simulate({2: self.combat_unit(10201, advance=1), 8: self.combat_unit(10201, iid=2, advance=1)},
+                                 {2: self.combat_unit(10201, iid=3)}, config, 7)
+        self.assert_battle_report(report)
+        self.assertEqual([v["ap"] for v in report["meta"]["attack"]["g"].values()], [4, 4])
+
+    def test_campaign_clan_aura_keeps_each_providers_conditional_self_bonus(self):
+        config = self.passive_config(10201, 9000656)
+        config["general"]["10201"]["region"] = "14"
+        teams = {True: {pos: self.combat_unit(10201, iid=pos, advance=1, npc=True) for pos in (2, 8)},
+                 False: {2: self.combat_unit(10213)}}
+        battle._prepare_teams(teams, config)
+        self.assertEqual([u["atk"] for u in teams[True].values()], [126, 126])
+
+    def test_campaign_ap_and_damage_modifiers_multiply_in_the_same_pipeline(self):
+        config = self.passive_config(10201, 9000009)
+        report = battle.simulate({2: self.combat_unit(10201, advance=1, speed=200, adddmgpct=0.5)},
+                                 {2: self.combat_unit(10201, iid=1, atk=1, subdmgpct=1)}, config, 7)
+        self.assert_battle_report(report)
+        hit = report["b"]["a"][0]["e"][0]["m"]["m"]
+        self.assertEqual(hit, 165)  # 100 × 技能2 × 增伤1.5 ÷ 减伤2 × 多怒1.1。
+
+    def test_campaign_role_level_cap_banks_exp_without_inventing_level_151(self):
+        maximum = max(map(int, self.role_config["role_exp"]))
+        state = {"level": maximum, "exp": self.role_config["role_exp"][str(maximum)]["nextexp"] - 1}
+        point = self.role_config["copy"]["42410"]["10"]
+        reward = battle.victory_role_reward(state, point, 3, 3, self.role_config)
+        self.assertEqual((reward["level"], reward["exp"]), (maximum, state["exp"] + reward["gained"]))
+        self.assertEqual(reward["coin"], point["coin"])
+        state["exp"] = (1 << 31) - 1
+        with self.assertRaisesRegex(ValueError, "经验超出范围"):
+            battle.victory_role_reward(state, point, 3, 3, self.role_config)
+
+    def test_campaign_first_hit_bonus_and_death_revenge_have_real_damage(self):
+        config = self.passive_config(10201, 9000029)
+        report = battle.simulate({2: self.combat_unit(10201, advance=1, speed=200)},
+                                 {2: self.combat_unit(10201, iid=1, atk=1)}, config, 7)
+        self.assert_battle_report(report)
+        self.assertEqual(report["b"]["a"][0]["e"][0]["m"]["m"], 160)
+        config = self.passive_config(10201, 9000263)
+        for cid, advance, expected in ((10201, 0, 250), (10224, 1, 100)):
+            report = battle.simulate({2: self.combat_unit(10201, advance=1, hp=50)},
+                                     {2: self.combat_unit(cid, iid=1, advance=advance, atk=1000, speed=200)}, config, 7)
+            self.assert_battle_report(report)
+            revenge = report["b"]["a"][1]
+            self.assertEqual(revenge["s"], {})
+            self.assertEqual(revenge["e"][0]["m"]["m"], expected)
+
+    def test_campaign_kill_recovery_heals_without_reviving_dead_units(self):
+        config = self.passive_config(10201, 9000255)
+        report = battle.simulate({2: self.combat_unit(10201, advance=1, hp=200, speed=200)},
+                                 {2: self.combat_unit(10201, iid=1, hp=50, atk=30, speed=300),
+                                  8: self.combat_unit(10201, iid=2, atk=1)}, config, 7)
+        self.assert_battle_report(report)
+        heals = [d["m"]["m"] for a in report["b"]["a"] for d in a["e"]
+                 if isinstance(d.get("m"), dict) and d["m"]["m"] < 0]
+        self.assertEqual(heals[0], -20)
+
+    def test_campaign_cleanse_removes_poison_before_healing(self):
+        config = self.passive_config(10305, 9000337)
+        config["skill"] = {**config["skill"], "12302": {**config["skill"]["12302"], "effect-trigger": 1}}
+        report = battle.simulate({2: self.combat_unit(10201, atk=1, speed=50),
+                                  8: self.combat_unit(10305, advance=1, speed=200)},
+                                 {2: self.combat_unit(10302, atk=100, speed=300)}, config, 7)
+        self.assert_battle_report(report)
+        heal = next(a for a in report["b"]["a"] if a["s"].get("S") == 12305)
+        self.assertEqual(heal["e"][0].get("u"), {"u": "dot", "w": False})
+        self.assertLess(heal["e"][1]["m"]["m"], 0)
+
+    def test_campaign_firing_ticks_and_duration_reduction_are_not_ignored(self):
+        cid = next(int(cid) for cid, row in self.role_config["general"].items() if row["skillid"] == 12476)
+        config = self.passive_config(10201, 9000662)
+        config["skill"] = {**config["skill"], "12476": {**config["skill"]["12476"], "effect-trigger": 1}}
+        report = battle.simulate({2: self.combat_unit(cid, speed=200)},
+                                 {2: self.combat_unit(10201, iid=1, advance=1, atk=1)}, config, 7)
+        self.assert_battle_report(report)
+        ticks = [d["m"]["m"] for a in report["b"]["a"] for d in a["e"]
+                 if isinstance(d.get("m"), dict) and d["m"]["u"] == "firing"]
+        self.assertTrue(ticks)
+        self.assertEqual(set(ticks), {6})
+        self.assertTrue(any(d.get("u") == {"u": "firing", "w": False} for a in report["b"]["a"] for d in a["e"]))
+
     def test_live_combo_uses_each_initiator_and_zero_ap_partner(self):
         config = copy.deepcopy(self.role_config)
         config["combskillprobability"]["12622"] = dict.fromkeys((f"bout{i}" for i in range(1, 11)), 1)
@@ -4393,8 +4493,8 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_live_battle_all_supported_points_generate_consistent_reports(self):
         self.replay(self.requests)
         saved = json.loads(self.save_path.read_text())
-        for mid in battle.MAPS:
-            for pid, point in self.role_config["copy"][str(mid)].items():
+        for mid, points in self.role_config["copy"].items():
+            for pid, point in points.items():
                 with self.subTest(map=mid, point=pid):
                     attack, defense = battle.rosters(saved, point, self.role_config)
                     self.assert_battle_report(battle.simulate(attack, defense, self.role_config, 7))
@@ -4415,6 +4515,85 @@ class ReplayRoutingTests(unittest.TestCase):
                 report = battle.simulate(attack, defense, self.role_config, 7)
                 self.assert_battle_report(report)
                 self.assertEqual(report["rules"], "zyj-v2")
+
+    def test_entire_configured_campaign_progress_rewards_and_boxes_survive_reconnect(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        maximum = max(map(int, self.role_config["role_exp"]))
+        saved["role_state"].update(level=maximum, exp=0, stamina=100000,
+                                   nextexp=self.role_config["role_exp"][str(maximum)]["nextexp"])
+        # 强阵仅传给纯计算器；不写入玩家属性，更不接触真实存档。
+        attack = {2: self.combat_unit(10112, atk=10**15, hp=10**15, speed=10**8)}
+        count = 0
+        for mid, points in sorted(self.role_config["copy"].items(), key=lambda row: int(row[0])):
+            for pid, point in sorted(points.items(), key=lambda row: int(row[0])):
+                body = bytes.fromhex(self.activity_request(1306, [int(mid), int(pid)])["hex"])
+                row, old_star = battle.challenge(saved, body, self.role_config)
+                self.assertIs(row, point)
+                _, defense = battle.rosters(saved, point, self.role_config)
+                report = battle.simulate(attack, defense, self.role_config, 7)
+                self.assertTrue(report["result"], (mid, pid))
+                self.assertEqual(report["star"], 3, (mid, pid))
+                self.assert_battle_report(report)
+                reward = battle.victory_role_reward(saved["role_state"], point, old_star, report["star"], self.role_config)
+                self.assertEqual(reward["level"], maximum)
+                saved["role_state"]["exp"] = reward["exp"]
+                rewards = battle.drops(point, old_star == 0, self.role_config, 7 ^ 0xD09)
+                rewards[1000] = rewards.get(1000, 0) + reward["coin"]
+                player.apply_reward(saved, activities.build_reward(saved, ";".join(f"{cid},{n}" for cid, n in rewards.items()), self.role_config), self.role_config)
+                saved["role_state"]["stamina"] -= point["physical"]
+                player.record_copy_win(saved, body, report["star"], self.role_config, allow_repeat=True)
+                count += 1
+            for method in (0, 3, 6):
+                copies = self.entity_records(bytes.fromhex(saved["world_state"]["1300"]), 1, 1)
+                if protocol.pb_get_varint(copies[int(mid)], 4 + method // 3) == 3:
+                    continue
+                body = bytes.fromhex(self.activity_request(1304, [int(mid), method])["hex"])
+                specification = player.record_copy_box(saved, body, self.role_config)
+                player.apply_reward(saved, activities.build_reward(saved, specification, self.role_config), self.role_config)
+                with self.assertRaisesRegex(ValueError, "已领取"):
+                    player.record_copy_box(saved, body, self.role_config)
+        self.assertEqual(count, sum(map(len, self.role_config["copy"].values())))
+        self.assertEqual(count, 3061)
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(player.save_role(saved, self.save_path, self.step_counts))
+        copies = self.entity_records(self.query_world(1300), 1, 1)
+        self.assertEqual(set(copies), set(map(int, self.role_config["copy"])))
+        for mid, raw in copies.items():
+            self.assertEqual([protocol.pb_get_varint(raw, n) for n in (2, 4, 5, 6)], [3, 3, 3, 3])
+            self.assertEqual(len(self.entity_records(raw, 7, 1)), len(self.role_config["copy"][str(mid)]))
+
+    def test_campaign_shields_damage_corrections_and_hp_above_int32(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        point = self.role_config["copy"]["42410"]["10"]
+        _, defense = battle.rosters(saved, point, self.role_config)
+        self.assertGreater(max(u["hp"] for u in defense.values()), (1 << 31) - 1)
+        self.assertTrue(all(u["cover_d"] > 0 and u["subdmgpct"] > 0 for u in defense.values()))
+        report = battle.simulate({2: self.combat_unit(10201, atk=1000, speed=1000)},
+                                 {2: self.combat_unit(10201, iid=1, atk=1, cover_d=300, cover_l=1, cover_p=50,
+                                                      adddmgpct=0, subdmgpct=1)}, self.role_config, 7)
+        self.assert_battle_report(report)
+        hit = next(d["m"] for a in report["b"]["a"] if a["s"].get("r") for d in a["e"] if isinstance(d.get("m"), dict))
+        self.assertEqual((hit["m"], hit["M"]), (250, 250))
+
+    def test_campaign_passive_families_generate_consistent_reports(self):
+        config = {**self.role_config, "general": {**self.role_config["general"]}}
+        general = self.role_config["general"]["10201"]
+        ids = set()
+        for points in self.role_config["copy"].values():
+            for point in points.values():
+                for i in range(1, 8):
+                    if not point[f"p{i}"]:
+                        continue
+                    row = self.role_config["general"][str(self.role_config["copy_monster"][str(point[f"p{i}"])]["generalid"])]
+                    ids.update(row.get(f"break{j}", 0) for j in range(1, point[f"break{i}-correct"] + 1))
+        for pid in sorted(ids - {0}):
+            with self.subTest(passive=pid):
+                config["general"]["10201"] = {**general, "break1": pid}
+                report = battle.simulate({2: self.combat_unit(10201, advance=1, npc=True, atk=1000, hp=4000, speed=200)},
+                                         {2: self.combat_unit(10201, iid=1, atk=1100, hp=5000)}, config, 7)
+                self.assert_battle_report(report)
 
     def test_healing_selects_lowest_hp_ally_and_caps_at_maximum(self):
         for enemy_atk, expected in ((400, -150), (1, -3)):

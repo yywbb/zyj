@@ -268,6 +268,34 @@ class LanBuildTests(unittest.TestCase):
             rowHandler("cellAtIndex",{},0,nil)
         ''')
 
+    def test_battle_seventh_target_uses_existing_timing_and_updates_hp_and_shield(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("战报转换验证需本机已有 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            print,printT=function() end,function() end
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            CCFileUtils={sharedFileUtils=function(self) return self end,fullPathForFilename=function(self,p) return p end}
+            LoadJsonFileToTable=function() return {injured={delay=0,actiondelay=0}} end
+            gamedata={config={}}
+        ''')
+        code = self.client_scripts()["assets/scripts/battleReportConvert.so"]
+        lua.globals().make = lua.execute(code + "\nreturn makeDestGeneralEffective")
+        lua.execute('''
+            for _,explicit in ipairs({false,true}) do
+                injuredAudioTimes={}
+                local unit={hp=100,hp2=100,cover_d=25,cover_d2=25,animation={name="stub"}}
+                local templates={damage={['1']={damagedelay={['1']='0'}}},ccbtype=''}
+                if explicit then templates.damage['7']={damagedelay={['1']='0',['2']='0.1'}} end
+                local action={pos=14,direct=false,damage={damage=11,damage2=5,status='normal',num=0}}
+                local animation=make(action,unit,templates,'7')
+                assert(unit.hp==89 and unit.cover_d==20)
+                assert(#animation.animation.damage==(explicit and 2 or 1))
+            end
+        ''')
+
     def test_welfare_refreshes_queries_keeps_vip_local_callback_and_net_rewards(self):
         try:
             from lupa.lua51 import LuaRuntime

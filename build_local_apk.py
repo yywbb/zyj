@@ -975,6 +975,13 @@ end
     code = code.replace(marker, "self.configdata.energy")
     patched["assets/scripts/window_robresult.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
+    code = read_script("battleReportConvert").decode("utf-8").replace("\r\n", "\n")
+    marker = "skilljson and skilljson.damage[tostring(ccbindex)] or nil"
+    assert code.count(marker) == 1
+    # 部分群攻只有六份目标时序，第七阵位仍须处理实际伤害和魔罩。
+    code = code.replace(marker, 'skilljson and (skilljson.damage[tostring(ccbindex)] or skilljson.damage["1"]) or nil')
+    patched["assets/scripts/battleReportConvert.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     code = read_script("window_robonekeyresult").decode("utf-8").replace("\r\n", "\n")
     assert code.count("0.5*(i-1)") == 1 and code.count("您的精力值不足，无法继续挑战") == 1
     code = code.replace("0.5*(i-1)", "math.min(0.1*(i-1),3)")
