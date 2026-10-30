@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, configuration, daily_events, development, fashion, formation, online_rewards, recharge, recruit, rob, shop, star_copy, training, welfare
+from . import activities, battle, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, recharge, recruit, rob, shop, star_copy, training, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -61,7 +61,8 @@ def load_role_config(config_path):
                              "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
                              "trump", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
-                             "pet3_fragment", *sign_tables))
+                             "pet3_fragment", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
+                             "mieshendian_award", "mieshendian_reward", *sign_tables))
 
 
 def get_default_save():
@@ -493,6 +494,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = daily_events.prepare(opcode, save, request_body, role_config, now)
         if opcode in daily_events.CLAIMS:
             apply_reward(save, body, role_config, now)
+    elif opcode == 3620:
+        body = mieshendian.query(save, request_body, role_config, now)
+    elif opcode in mieshendian.BATTLES:
+        body, reward = mieshendian.fight(save, opcode, request_body, role_config, now, random.getrandbits(64))
+        apply_reward(save, reward, role_config, now)
     elif opcode == 1350:
         body = star_copy.query(save, request_body, role_config, now)
     elif opcode == 1351:

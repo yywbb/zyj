@@ -301,8 +301,11 @@ def _prepare_teams(teams, config):
                     add(provider, "dmg", value)
     for team in teams.values():
         for unit in team.values():
+            # 命中/额外暴伤可被临时减至负值，不能吞掉零基础属性上的Boss减益。
             for name in stats:
-                unit[name] = max(0, int(unit.get(name, 0)))
+                unit[name] = int(unit.get(name, 0))
+                if name not in ("hit", "criticaldmg"):
+                    unit[name] = max(0, unit[name])
             unit["ap"] = max(0, min(10, unit["ap"]))
             unit["maxhp"] = unit["hp"]
             if min(unit["hp"], unit["atk"], unit["speed"]) <= 0:
