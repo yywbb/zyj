@@ -134,17 +134,20 @@ def get_hints(save, config, now):
     return hints
 
 
-def rewrite_vip(body, save):
+def rewrite_vip(body, save, purchases):
     state = get_state(save)
     out, index = bytearray(), 0
     for n, w, value in iter_pb_fields(body):
         if (n, w) == (1, 0):
             index += 1
-            if index in (25, 26):
+            if index in (2, 3):
+                value = purchases["physical" if index == 2 else "energy"]
+            elif index in (25, 26):
                 value = int(state["vip_free" if index == 25 else "vip_buy"])
         out.extend(encode_pb_field(n, w, value))
     for index in range(index + 1, 27):
-        out.extend(ids([int(state["vip_free"]) if index == 25 else int(state["vip_buy"]) if index == 26 else 0]))
+        out.extend(ids([purchases["physical"] if index == 2 else purchases["energy"] if index == 3
+                        else int(state["vip_free"]) if index == 25 else int(state["vip_buy"]) if index == 26 else 0]))
     return bytes(out)
 
 

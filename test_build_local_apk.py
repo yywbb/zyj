@@ -383,11 +383,25 @@ class LanBuildTests(unittest.TestCase):
             CCDelayTime={create=function(_,delay) return delay end}
             CCCallFunc={create=function(_,callback) return callback end}
             CCSequence={createWithTwoActions=function(_,delay,callback) return {delay=delay,callback=callback} end}
-            CCControlStateNormal=0
-            ui={createControlButton1=function(args) return {callback=args.callback,
-                setTouchPriority=function() end,setSwallowsTouch=function() end} end,
-                createLabel=function() return {setString=function(self,value) self.value=value end} end}
-            setControlButtonTitle=function(button,title) button.title=title end
+            CCControlStateNormal=0; CCControlStateHighlighted=1; CCControlStateDisabled=2; CCControlEventTouchUpInside=1
+            CCString={create=function(_,text) return text end}
+            CCSizeMake=function(w,h) return {width=w,height=h} end
+            ccp=function(x,y) return {x=x,y=y} end
+            CCControlButton={create=function()
+                return {setPreferredSize=function() end,setAnchorPoint=function() end,setPosition=function() end,
+                    setTouchPriority=function() end,setSwallowsTouch=function() end,
+                    setBackgroundSpriteFrameForState=function(_,frame) assert(frame=='button-frame') end,
+                    setTitleForState=function(self,title) self.title=title end,
+                    addHandleOfControlEvent=function(self,callback) self.callback=callback end}
+            end}
+            local frames={}
+            CCSpriteFrameCache={sharedSpriteFrameCache=function() return {
+                spriteFrameByName=function(_,name) return frames[name] end,
+                addSpriteFrame=function(_,frame,name) frames[name]=frame end} end}
+            CCSprite={create=function(_,path)
+                if path=='public/publicsprite/b_n_button5.png' then return {displayFrame=function() return 'button-frame' end} end
+            end}
+            ui={createLabel=function() return {setString=function(self,value) self.value=value end} end}
             gameWindows={windows={},openWindow=function(self,name,args,cb) confirmed=cb end}
             gameConfig={originSize={width=1080}}
             GameScene={presentLayer='copy_map',roleinfo={stamina=20},layers={
@@ -406,6 +420,7 @@ class LanBuildTests(unittest.TestCase):
                         [tostring(nextmap-42100)]={id=nextmap,points={[tostring(nextpoint)]={id=nextpoint,star=0,kill=0}}}}}}}
             end
         ''')
+        lua.execute((Path(__file__).parent / "scripts_clean/setSpriteFrame.lua").read_text())
         lua.execute(scripts["assets/scripts/UICopy.so"])
         lua.execute('''
             layer=makeLayer();AutoCopyAttach(layer,1500)
@@ -607,6 +622,112 @@ class LanBuildTests(unittest.TestCase):
             assert(remote==1 and opcode==2066 and body==nil)
             reply=NetWatchStarRewardCallBack({rbuf='reward'})
             assert(reply.reward=='reward')
+        ''')
+
+    def test_resource_purchase_client_quotes_price_and_refreshes_status(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("购买体力客户端回调验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        window = scripts["assets/scripts/window_buyPowerPop.so"]
+        self.assertIn("self.localVipPending = true", window)
+        self.assertIn("UIRequest({type = 300, update = true})", window)
+        self.assertIn("if self.localVipPending then", window)
+        self.assertIn("self.localVipPending = false", window)
+        lua = LuaRuntime()
+        lua.execute('''
+            print,cclog,printT=function() end,function() end,function() end
+            package.preload.ids_pb=function() return {Ids=function() return {ids={},
+                SerializeToString=function(self) return self.ids end} end} end
+            package.preload.result_pb=function() return {Result=function() return {
+                ParseFromString=function() end} end} end
+            package.preload.somethings_pb=function() return {} end
+            package.preload.params_pb=function() return {} end
+            gamedata={ext={},cache={role={gold=100,stamina=3,energy=4},vipstatus={b_physical=0,b_energy=0}},
+                config={global_kv={basic_buy_stamina={value='50'},basic_buy_energy={value='10'}}}}
+            function gamedata:updateRoleStamina(n) self.cache.role.stamina=self.cache.role.stamina+n end
+            function gamedata:updateRoleEnergy(n) self.cache.role.energy=self.cache.role.energy+n end
+            function gamedata:updateRoleGold(n) self.cache.role.gold=self.cache.role.gold+n end
+        ''')
+        lua.execute(scripts["assets/scripts/GameRecharge.so"])
+        lua.execute('''
+            local remote,opcode,body=UIUserBuyCallBack({cid=2,count=2,gold=100})
+            assert(remote==1 and opcode==301 and #body==3 and body[1]==2 and body[2]==2 and body[3]==100)
+            local reply=NetUserBuyCallBack({rbuf=''})
+            assert(reply.order==2 and gamedata.cache.role.stamina==103 and gamedata.cache.role.gold==0)
+            assert(gamedata.cache.vipstatus.b_physical==2)
+            remote,opcode,body=UIUserBuyCallBack({cid=1,count=1,gold=50})
+            assert(#body==2 and body[1]==1 and body[2]==1)
+        ''')
+        lua.execute('''
+            CCControlEventTouchUpInside=1
+            local function button() return {addHandleOfControlEvent=function(self,cb) self.callback=cb end,
+                setSwallowsTouch=function() end,setTouchPriority=function() end} end
+            CCBReaderLoad=function() return {},{closeButton=button(),add1=button(),sub1=button(),doButton2=button()} end
+            ui={creatInputEditBoxForNum=function() end,setLabelString=function() end}
+            gameConfig={checkBuildOpen=function() return true end,strings={string_common=function() return '' end}}
+            GameScene={roleinfo={gold=100}}
+            gameTouch={clickprofbytime=function() end}
+            requests={}
+            UIRequest=function(req) table.insert(requests,req) end
+            runGamePrompt=function() prompted=true end
+        ''')
+        lua.globals().buy = lua.execute(window)
+        lua.execute('''
+            function buy:reload(data) self.data=data end
+            function buy:setbuydata() end
+            function buy:setShowData() end
+            buy:open(-1,{id=2})
+            assert(#requests==1 and requests[1].type==300 and requests[1].update)
+            buy.buynum=1;buy.totalprice=50
+            buy.rootItems.doButton2.callback()
+            assert(prompted and #requests==1 and buy.localVipPending)
+            buy:reloadShowData()
+            buy.buynum=1;buy.totalprice=50
+            buy.rootItems.doButton2.callback()
+            assert(not buy.localVipPending and #requests==2)
+            assert(requests[2].type==301 and requests[2].cid==2 and requests[2].gold==50)
+        ''')
+
+    def test_qiankun_client_identifies_consumed_general_by_iid(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("乾坤炉客户端回调验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.execute('''
+            print,printT,cclog=function() end,function() end,function() end
+            package.preload.ids_pb=function() return {} end
+            package.preload.somethings_pb=function() return {SomeThings=function() return {
+                ParseFromString=function(self,data) self.data=data end} end} end
+            package.preload.idnums_pb=function() return {IdNums=function()
+                local values={}
+                function values:add() local item={} table.insert(self,item) return item end
+                return {idnums=values,SerializeToString=function(self) return self.idnums end}
+            end} end
+            gamedata={ext={},config={general={['10402']={}}},cache={generals={[2000001]={cid=10402}}}}
+            function gamedata:updategeneralfragmentbynum(value) self.lastFragment=value end
+            function gamedata:SomethingProcess(value) return value.data end
+        ''')
+        lua.execute(scripts["assets/scripts/GameQiankunlu.so"])
+        lua.execute('''
+            local remote,opcode,body=UIGeneralResolveCallBack2({ids={2000001},cid={},
+                fragments={{cid=10402,num=1},{cid=11402,num=2}}})
+            assert(remote==1 and opcode==1039 and #body==2)
+            assert(body[1].id==11402 and body[1].num==2)
+            assert(body[2].id==2000001 and body[2].num==-1)
+            local reply=NetGeneralResolveCallBack2({rbuf='reward'})
+            assert(gamedata.cache.generals[2000001]==nil)
+            assert(gamedata.lastFragment.cid==11402 and gamedata.lastFragment.num==-2)
+            assert(reply.reward=='reward')
+        ''')
+        lua.execute(scripts["assets/scripts/GameActivitySecretShop.so"])
+        lua.execute('''
+            gamedata.cache.activitySecretShop={itemsdata={}}
+            local remote,opcode,body=UIActivitySecretShopQueryCallBack({})
+            assert(remote==1 and opcode==3650 and body==nil)
         ''')
 
     def test_battle_overlapping_dodges_keep_ghosts_alive_until_their_own_cleanup(self):

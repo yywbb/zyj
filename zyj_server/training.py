@@ -3,7 +3,7 @@
 import random
 from fractions import Fraction
 
-from . import battle, formation
+from . import battle, formation, qiankun
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -119,7 +119,7 @@ def strengthen(save, opcode, body, config, seed):
     vip = config["vip"][str(save["role_state"].get("vip", 0))]
     deck = [entry.split(",") for i in (1, 2, 3) for entry in vip[f"p_equipex_{i}"].split(";") if entry]
     rng = random.Random(seed)
-    coin, spent, critical = save["role_state"]["coin"], 0, {}
+    coin, spent, critical, actual_costs = save["role_state"]["coin"], 0, {}, {}
     while True:
         available = [i for i in items if items[i][2] < targets[i]
                      and config["equip_strengthen"][str(items[i][2])][prices[i]] <= coin - spent]
@@ -136,6 +136,7 @@ def strengthen(save, opcode, body, config, seed):
             raise ValueError("强化暴击配置无效")
         items[iid][2] += increase
         spent += cost
+        actual_costs[iid] = actual_costs.get(iid, 0) + cost
         critical[iid] = critical.get(iid, 0) + increase - 1
         if steps == 1:
             break
@@ -146,6 +147,8 @@ def strengthen(save, opcode, body, config, seed):
     for iid in sorted(critical):
         updated[iid] = b"".join(encode_pb_field(1, 0, v) for v in items[iid])
         reward += encode_pb_field(6, 2, updated[iid])
+        old = parse_ids_pb(equips[iid])
+        qiankun.record_training(save, "equip", equips[iid], updated[iid], [(1000, actual_costs[iid])], old[2] == 1)
     reward += encode_pb_field(12, 2, b"".join(encode_pb_field(1, 0, critical[i]) for i in sorted(critical)))
     members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
     power_delta = 0

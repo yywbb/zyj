@@ -753,11 +753,75 @@ end
             assert code.count(marker) == 1
             code = code.replace(marker, "    gamedata.cache.mammon = {}\n" + marker)
         if name == "GameRecharge":
+            start = code.index("function UIUserBuyCallBack(uireq)\n")
+            end = code.index("\nfunction NetUserBuyCallBack(fd)", start)
+            buy = code[start:end]
+            marker = '''    if uireq.count then
+        table.insert(UserBuyData.ids, uireq.count)
+    end'''
+            assert buy.count(marker) == 1
+            buy = buy.replace(marker, '''    if uireq.cid == 2 or uireq.cid == 3 then
+        table.insert(UserBuyData.ids, uireq.count or 1)
+        table.insert(UserBuyData.ids, uireq.gold or 0)
+    elseif uireq.count then
+        table.insert(UserBuyData.ids, uireq.count)
+    end''')
+            code = code[:start] + buy + code[end:]
             marker = "    local reward = gamedata:SomethingProcess(SomeThings)\n"
             start = code.index("function NetRechargeResultCallBack(fd)\n")
             pos = code.index(marker, start) + len(marker)
             code = code[:pos] + "    gamedata.ext.isrechare = false\n" + code[pos:]
         patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("window_buyPowerPop").decode("utf-8").replace("\r\n", "\n")
+    marker = "function buy.open(self,touchPriority,data,callback)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localVipPending = true\n")
+    marker = "        if self.buynum >0 then\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''        if self.localVipPending then
+            runGamePrompt({msg = "正在刷新购买次数，请稍候"})
+            return
+        end
+''' + marker)
+    marker = "    self:reload(data,callback)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    UIRequest({type = 300, update = true})\n")
+    marker = "function buy.reloadShowData(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localVipPending = false\n")
+    patched["assets/scripts/window_buyPowerPop.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("GameQiankunlu").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function UIGeneralResolveCallBack2(uireq)\n")
+    end = code.index("function  NetGeneralResolveCallBack2(fd)\n", start)
+    marker = '''    for k,v in pairs(uireq.fragments) do
+        local fragment = GeneralFragmentDataTotal.idnums:add()
+        fragment.id = v.cid
+        fragment.num = v.num
+    end'''
+    assert code[start:end].count(marker) == 1
+    replacement = '''    for k,v in pairs(uireq.fragments) do
+        if not gamedata.config.general[tostring(v.cid)] then
+            local fragment = GeneralFragmentDataTotal.idnums:add()
+            fragment.id = v.cid
+            fragment.num = v.num
+        end
+    end
+    for _,iid in pairs(uireq.ids) do
+        local general = GeneralFragmentDataTotal.idnums:add()
+        general.id = iid
+        general.num = -1
+    end'''
+    code = code[:start] + code[start:end].replace(marker, replacement) + code[end:]
+    patched["assets/scripts/GameQiankunlu.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("GameActivitySecretShop").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function UIActivitySecretShopQueryCallBack(uireq)\n")
+    end = code.index("function NetActivitySecretShopQueryCallBack(fd)\n", start)
+    assert "return 1, 3650, nil" in code[start:end]
+    code = code[:start] + "function UIActivitySecretShopQueryCallBack(uireq)\n    return 1, 3650, nil\nend\n\n" + code[end:]
+    patched["assets/scripts/GameActivitySecretShop.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("GameActivityQuery").decode("utf-8").replace("\r\n", "\n")
     marker = "    gamedata.ext.activityPageId = uireq.pageId\n"

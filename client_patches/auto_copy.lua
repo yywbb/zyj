@@ -153,8 +153,12 @@ function AutoCopyAttach(layer, toppos)
     layer.rootNode:addChild(layer.autoCopyTimer)
     layer.autoCopyLabel = ui.createLabel({text = "", fontsize = 22, x = gameConfig.originSize.width - 120, y = toppos - 150})
     layer.rootNode:addChild(layer.autoCopyLabel)
-    layer.autoCopyButton = ui.createControlButton1({text = "自动推图", fontsize = 26, w = 190, h = 70,
-        x = gameConfig.originSize.width - 120, y = toppos - 100, callback = function()
+    layer.autoCopyButton = CCControlButton:create("自动推图", "Helvetica-Bold", 26)
+    layer.autoCopyButton:setPreferredSize(CCSizeMake(190, 70))
+    layer.autoCopyButton:setAnchorPoint(ccp(0.5, 0.5))
+    layer.autoCopyButton:setPosition(ccp(gameConfig.originSize.width - 120, toppos - 100))
+    setControlButtonFrame(layer.autoCopyButton, "b_n_button5")
+    layer.autoCopyButton:addHandleOfControlEvent(function()
             if autoCopy.active then AutoCopyStop("自动推图已停止，本场结果仍会正常结算"); return end
             if AutoCopyBlockManual() then return end
             if layer.datatype ~= "normal" or not layer.data or not layer.data.points then
@@ -179,7 +183,7 @@ function AutoCopyAttach(layer, toppos)
                 autoCopyLabel("准备挑战")
                 autoCopySchedule(autoCopyInterval, function() autoCopyRequest(map, point, GameScene.roleinfo and GameScene.roleinfo.stamina, first) end)
             end)
-        end})
+        end, CCControlEventTouchUpInside)
     layer.autoCopyButton:setTouchPriority(-102)
     layer.autoCopyButton:setSwallowsTouch(true)
     layer.rootNode:addChild(layer.autoCopyButton)

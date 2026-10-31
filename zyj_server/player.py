@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, recharge, recruit, rob, shop, star_copy, training, watchstar, welfare
+from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, training, watchstar, welfare
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -63,7 +63,8 @@ def load_role_config(config_path):
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
                              "pet3_fragment", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
-                             "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", *sign_tables))
+                             "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
+                             "mystery_shop", "renascence", "redl_awake_item", *sign_tables))
 
 
 def get_default_save():
@@ -310,6 +311,13 @@ def change_item_count(save, cid, delta, role_config, now=None):
             raise ValueError("灭神殿积分不足或超出范围")
         state["points"] += delta
         return
+    if str(cid) in role_config["redl_awake_item"]:
+        fragments = qiankun.get_state(save)["red_fragments"]
+        value = fragments.get(str(cid), 0) + delta
+        if not 0 <= value < (1 << 31):
+            raise ValueError("伙伴精华数量不足或超出范围")
+        fragments[str(cid)] = value
+        return
     if str(cid) in role_config["trump_gem"]:
         roster = bytes.fromhex(save["world_state"]["1002"])
         previous = next((parse_ids_pb(v) for n, w, v in iter_pb_fields(roster)
@@ -505,6 +513,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
         if update:
+            if opcode == 1017:
+                raw = next(v for n, w, v in iter_pb_fields(update) if (n, w) == (1, 2))
+                before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
+                qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config))
             record_slot_update(save, update)
     elif opcode in (*daily_events.QUERIES, *daily_events.CLAIMS):
         body = daily_events.prepare(opcode, save, request_body, role_config, now)
@@ -524,7 +536,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     elif opcode == 300:
         if request_body:
             raise ValueError("贵族状态查询不接受参数")
-        body = welfare.rewrite_vip(body, save)
+        body = welfare.rewrite_vip(body, save, resource_purchase.settle(save, now))
+    elif opcode == 301:
+        price = resource_purchase.prepare(save, request_body, role_config, now)
+        change_item_count(save, 1001, -price, role_config, now)
+        body = b"\x08\x01"
     elif opcode == 2000:
         body = welfare.rewrite_activities(body)
         body = daily_events.rewrite_periods(body, save, role_config, now)
@@ -555,6 +571,20 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             apply_reward(save, body, role_config, now)
     elif opcode in blackmarket.OPCODES:
         body, costs, reward = blackmarket.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
+    elif opcode in secret_shop.OPCODES:
+        body, costs, reward = secret_shop.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
+    elif opcode == 3780:
+        body = qiankun.red_query(save, request_body, body)
+    elif opcode in qiankun.OPCODES:
+        body, costs, reward = qiankun.prepare(opcode, save, request_body, role_config)
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
         if reward:
@@ -686,6 +716,9 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 body, costs, power_delta = training.use_exp(save, request_body, role_config)
                 for cid, count in costs:
                     change_item_count(save, cid, -count, role_config, now)
+                raw = next(v for n, w, v in iter_pb_fields(body) if (n, w) == (8, 2))
+                before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
+                qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config))
             else:
                 body, power_delta = training.strengthen(save, opcode, request_body, role_config, random.getrandbits(64))
             state = get_role_state(save, role_config)
@@ -775,9 +808,9 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         for mid in WORLD_QUERY_IDS:
             if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
-    if automatic_reward or responses and responses[0]["opcode"] in (3624, 3626, 3628):
+    if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
-    local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS,
+    local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
                                                          *development.MUTATIONS) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb:

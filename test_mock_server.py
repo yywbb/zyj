@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, formation, guide, mieshendian, player, protocol, ranking, recharge, recruit, replay, rob, shop, star_copy, training, welfare
+from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, formation, guide, mieshendian, player, protocol, qiankun, ranking, recharge, recruit, replay, rob, secret_shop, shop, star_copy, training, welfare
 from zyj_server.session import Session
 
 
@@ -4539,6 +4539,324 @@ class ReplayRoutingTests(unittest.TestCase):
         saved["role_state"].update(level=17, nextexp=self.role_config["role_exp"]["17"]["nextexp"])
         self.save_path.write_text(json.dumps(saved))
         return saved
+
+    def test_resource_purchase_uses_quoted_config_price_and_survives_reconnect(self):
+        self.prepare_watchstar()
+        # 非周三，前两次每次50元宝。
+        while ((self.clock.return_value + 28800) // 86400 + 3) % 7 + 1 == 3:
+            self.clock.return_value += 86400
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            before = copy.deepcopy(session.save["role_state"])
+            body = recharge.ids([2, 2, 100])
+            packets = session.handle(301, 32001, body)
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 301)
+            self.assertEqual(protocol.pb_get_varint(packets[0][16:], 1), 1)
+            self.assertEqual(session.save["role_state"]["gold"], before["gold"] - 100)
+            self.assertEqual(session.save["role_state"]["stamina"], before["stamina"] + 100)
+            self.assertEqual(session.handle(301, 32001, body), packets)
+            self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+        status = protocol.parse_ids_pb(self.query_world(300))
+        self.assertEqual(status[1:3], [2, 0])
+        initialization = self.replay([dict(self.by_seq[12], seq=32003)])[0]
+        modules = dict(protocol.get_comb_messages(bytes.fromhex(initialization["hex"])))
+        self.assertEqual(protocol.parse_ids_pb(modules[300])[1:3], [2, 0])
+        self.assertEqual(self.replay([self.activity_request(301, [3, 1, 50])])[0]["opcode"], 301)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(300))[1:3], [2, 1])
+
+    def test_resource_purchase_discounts_limits_rollback_and_stale_price(self):
+        self.prepare_watchstar()
+        while ((self.clock.return_value + 28800) // 86400 + 3) % 7 + 1 != 3:
+            self.clock.return_value += 86400
+        self.assertEqual(self.replay([self.activity_request(301, [2, 1, 25])])[0]["opcode"], 301)
+        for values in ([2], [2, 1], [2, 1, 50], [3, 0, 0], [1, 1, 25], [2, 1, 25, 0]):
+            disk = self.save_path.read_bytes()
+            with self.subTest(values=values):
+                self.assertEqual(self.replay([self.activity_request(301, values)])[0]["opcode"], 999999)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["gold"] = 0
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(301, [3, 1, 25])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["role_state"].update(gold=100000, vip=0)
+        saved["resource_purchase_state"]["physical"] = self.role_config["vip"]["0"]["b_physical"]
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(301, [2, 1, 50])])[0]["opcode"], 999999)
+        self.clock.return_value += 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(300))[1:3], [0, 0])
+        fresh = json.loads(self.save_path.read_text())["resource_purchase_state"]
+        self.clock.return_value -= 86400
+        self.query_world(300)
+        self.assertEqual(json.loads(self.save_path.read_text())["resource_purchase_state"], fresh)
+
+    def test_resource_purchase_save_failure_keeps_balances_and_counts(self):
+        self.prepare_watchstar()
+        while ((self.clock.return_value + 28800) // 86400 + 3) % 7 + 1 == 3:
+            self.clock.return_value += 86400
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(301, 32002, recharge.ids([2, 1, 50]))
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_resource_purchase_overflow_and_corrupt_counts_fail_closed(self):
+        saved = self.prepare_watchstar()
+        saved["role_state"]["stamina"] = (1 << 31) - 1
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(301, [2, 1, 50])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["resource_purchase_state"] = {"day": 0, "physical": True, "energy": 0}
+        self.save_path.write_text(json.dumps(saved))
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "购买存档"):
+            Session(self.tables, self.save_path, self.step_counts, self.role_config)
+
+    def prepare_qiankun(self):
+        saved = self.prepare_watchstar()
+        saved["role_state"].update(level=18, vip=4, nextexp=self.role_config["role_exp"]["18"]["nextexp"])
+        raw = recruit.new_general(10213, 2000001, self.role_config)
+        gear = recharge.ids([1000100, 21301, 1] + [0] * 10)
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw) + protocol.encode_pb_field(2, 2, gear))
+        player.change_item_count(saved, 11402, 10, self.role_config, self.now)
+        player.change_item_count(saved, 27001, 10, self.role_config, self.now)
+        player.change_item_count(saved, 20196, 10, self.role_config, self.now)
+        player.change_item_count(saved, 20200, 100000, self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def furnace_request(self, opcode, pairs):
+        body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, iid)
+                        + protocol.encode_pb_field(2, 0, count & ((1 << 64) - 1))) for iid, count in pairs)
+        return {"opcode": opcode, "seq": 33000, "hex": body.hex()}
+
+    def test_qiankun_queries_use_actual_roster_and_preserve_guide(self):
+        saved = self.prepare_qiankun()
+        protected = protocol.parse_ids_pb(self.query_world(3704))
+        self.assertIn(7059, protected)
+        self.assertNotIn(2000001, protected)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(7030)), [0] * 24)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3850)), [4])
+        self.replay([self.activity_request(3850, [3])])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3850)), [3])
+        self.assertEqual(json.loads(self.save_path.read_text())["guide"], saved["guide"])
+
+    def test_qiankun_red_query_keeps_zero_baseline_rows_and_unknown_fields(self):
+        saved = self.prepare_qiankun()
+        player.change_item_count(saved, 18801, 3, self.role_config, self.now)
+        baseline = recharge.ids([18801, 0, 18802, 0]) + protocol.encode_pb_field(9, 2, b"unknown")
+        expected = recharge.ids([18801, 3, 18802, 0]) + protocol.encode_pb_field(9, 2, b"unknown")
+        self.assertEqual(qiankun.red_query(saved, b"", baseline), expected)
+
+    def test_qiankun_fragment_and_idle_general_refining_deduct_once(self):
+        self.prepare_qiankun()
+        request = self.furnace_request(1039, [(11402, 2), (2000001, -1)])
+        replies = self.replay([request, request])
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual(replies[0]["opcode"], 1039)
+        saved = json.loads(self.save_path.read_text())
+        props = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+        fragment = self.role_config["general_fragment"]["11213"]
+        self.assertEqual(protocol.pb_get_varint(props[20200], 2), 100000 + 300 + fragment["stovestone"] * fragment["num"])
+        self.assertNotIn(2000001, self.entity_records(self.query_world(1002), 1, 2))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_qiankun_equipment_refine_and_atomic_invalid_batch(self):
+        saved = self.prepare_qiankun()
+        invalid = self.furnace_request(1104, [(27001, 1), (10726, -1)])
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([invalid])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        request = self.furnace_request(1104, [(27001, 2), (1000100, -1)])
+        self.assertEqual(self.replay([request])[0]["opcode"], 1104)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"] - saved["role_state"]["coin"], 1400)
+        self.assertNotIn(1000100, self.entity_records(self.query_world(1002), 2, 1))
+
+    def test_qiankun_new_equipment_receipt_refunds_actual_critical_cost(self):
+        self.prepare_qiankun()
+        with patch.object(player.random, "getrandbits", return_value=0):
+            reply = self.replay([self.training_request(1101, 1000100, (1,))])[0]
+        spent = (1 << 64) - protocol.pb_get_varint(bytes.fromhex(reply["hex"]), 1)
+        before = json.loads(self.save_path.read_text())
+        request = self.activity_request(1117, [1000100])
+        self.assertEqual(self.replay([request])[0]["opcode"], 1117)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] + spent)
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(self.query_world(1002), 2, 1)[1000100])[2], 1)
+        self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+
+    def test_qiankun_general_receipt_refunds_pills_and_blocks_unproven_old_growth(self):
+        before = self.prepare_qiankun()
+        original = self.entity_records(bytes.fromhex(before["world_state"]["1200"]), 1, 1)
+        self.replay([self.training_request(1038, 2000001, (2, 0, 0, 0))])
+        request = self.activity_request(1035, [2000001])
+        self.assertEqual(self.replay([request])[0]["opcode"], 1035)
+        raw = self.entity_records(self.query_world(1002), 1, 2)[2000001]
+        self.assertTrue(qiankun.pristine_general(raw, self.role_config))
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20196], 2), protocol.pb_get_varint(original[20196], 2))
+        saved = json.loads(self.save_path.read_text())
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, protocol.pb_set_varint(raw, 3, 2)))
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([request]), 1035, 20000, "安全保护")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_qiankun_rejects_ambiguous_cid_duplicate_foreign_and_active_objects(self):
+        self.prepare_qiankun()
+        cases = [self.furnace_request(1039, [(10213, 1)]), self.furnace_request(1039, [(2000001, -1)] * 2),
+                 self.furnace_request(1039, [(7059, -1)]), self.furnace_request(1104, [(9999999, -1)]),
+                 self.furnace_request(1036, [(11402, 9999)]), self.activity_request(1117, [10726]),
+                 self.activity_request(3704, [1]), self.activity_request(3850, [9])]
+        for req in cases:
+            disk = self.save_path.read_bytes()
+            with self.subTest(opcode=req["opcode"], body=req["hex"]):
+                self.assertEqual(self.replay([req])[0]["opcode"], 999999)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_qiankun_save_failure_does_not_delete_items(self):
+        self.prepare_qiankun()
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+            body = bytes.fromhex(self.furnace_request(1039, [(2000001, -1)])["hex"])
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1039, 33001, body)
+            self.assertEqual(session.save, memory)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_qiankun_fashion_rebirth_preserves_ownership_and_base_bonus(self):
+        self.prepare_qiankun()
+        self.replay([self.activity_request(1074, [80001])])
+        saved = json.loads(self.save_path.read_text())
+        player.change_item_count(saved, 20281, 100, self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        original = json.loads(self.save_path.read_text())
+        self.replay([self.activity_request(1072, [80001, 5])])
+        trained = json.loads(self.save_path.read_text())
+        self.assertGreater(trained["fashion_state"]["levels"]["80001"], 1)
+        replies = self.replay([self.activity_request(1077, [80001])])
+        self.assertEqual(replies[0]["opcode"], 1077)
+        self.assertTrue(any(f["opcode"] == 205 for f in replies))
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["fashion_state"]["levels"], {"80001": 1})
+        self.assertEqual(after["role_state"]["coin"], original["role_state"]["coin"])
+        self.assertEqual(after["role_state"]["power"], original["role_state"]["power"])
+        self.assertEqual(self.replay([self.activity_request(1077, [80001])])[0]["opcode"], 999999)
+
+    def test_qiankun_general_receipt_mismatch_is_not_estimated(self):
+        self.prepare_qiankun()
+        self.replay([self.training_request(1038, 2000001, (2, 0, 0, 0))])
+        saved = json.loads(self.save_path.read_text())
+        raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[2000001]
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, protocol.pb_set_varint(raw, 5, 123)))
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1035, [2000001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_qiankun_red_essence_uses_native_query_and_claims_once(self):
+        saved = self.prepare_qiankun()
+        player.change_item_count(saved, 18801, 3, self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3780)), [18801, 3])
+        request = self.furnace_request(6901, [(18801, 3)])
+        self.assertEqual(self.replay([request])[0]["opcode"], 6901)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3780)), [18801, 0])
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20778], 2), 15)
+        self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+
+    def test_secret_shop_query_purchase_refresh_and_reconnect(self):
+        before = self.prepare_qiankun()
+        values = protocol.parse_ids_pb(self.query_world(3650))
+        self.assertEqual(len(values), 13)
+        self.assertEqual(values[0], self.role_config["vip"]["4"]["mystery_shop_times"])
+        self.assertEqual(len(set(values[1::2])), 6)
+        self.assertEqual(self.query_world(3650), recharge.ids(values))
+        row = self.role_config["mystery_shop"][str(values[1])]
+        cost = int(row["consume"].strip(";").split(",")[1])
+        self.assertEqual(self.replay([self.activity_request(3651, [1, 1])])[0]["opcode"], 3651)
+        after = json.loads(self.save_path.read_text())
+        props = self.entity_records(bytes.fromhex(after["world_state"]["1200"]), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20200], 2), 100000 - cost)
+        self.assertEqual(self.replay([self.activity_request(3651, [1, 1])])[0]["opcode"], 999999)
+        self.assertEqual(self.replay([self.activity_request(3652)])[0]["opcode"], 3652)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], before["role_state"]["gold"])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(3650))[0], values[0] - 1)
+
+    def test_secret_shop_scheduled_refresh_and_daily_clock_rollback(self):
+        self.prepare_qiankun()
+        self.query_world(3650)
+        self.replay([self.activity_request(3652)])
+        self.clock.return_value += 7200
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(3651, [1, 1])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.query_world(3650)
+        state = json.loads(self.save_path.read_text())["secret_shop_state"]
+        self.assertEqual(state["refreshes"], 1)
+        self.clock.return_value += 86400
+        self.query_world(3650)
+        state = json.loads(self.save_path.read_text())["secret_shop_state"]
+        self.assertEqual(state["refreshes"], 0)
+        self.clock.return_value -= 86400
+        self.query_world(3650)
+        self.assertEqual(json.loads(self.save_path.read_text())["secret_shop_state"], state)
+
+    def test_secret_shop_token_then_gold_refresh_and_insufficient_currency(self):
+        self.prepare_qiankun()
+        self.query_world(3650)
+        saved = json.loads(self.save_path.read_text())
+        saved["secret_shop_state"]["refreshes"] = self.role_config["vip"]["4"]["mystery_shop_times"]
+        props = self.entity_records(bytes.fromhex(saved["world_state"]["1200"]), 1, 1)
+        current = protocol.pb_get_varint(props.get(20221, b""), 2) or 0
+        player.change_item_count(saved, 20221, 1 - current, self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(3652)])
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], saved["role_state"]["gold"])
+        self.assertNotIn(20221, self.entity_records(self.query_world(1200), 1, 1))
+        self.replay([self.activity_request(3652)])
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], saved["role_state"]["gold"] - 50)
+        after["role_state"]["gold"] = 0
+        self.save_path.write_text(json.dumps(after))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(3652)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_secret_shop_save_failure_preserves_prices_offers_and_inventory(self):
+        self.prepare_qiankun()
+        self.query_world(3650)
+        for opcode, body in ((3651, recharge.ids([1, 1])), (3652, b"")):
+            with self.subTest(opcode=opcode), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(opcode, 33500, body)
+                self.assertEqual(session.save, memory)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_secret_shop_all_reward_types_and_levels_are_supported(self):
+        saved = self.prepare_qiankun()
+        for row in self.role_config["mystery_shop"].values():
+            with self.subTest(item=row["id"]):
+                gets = [tuple(map(int, entry.split(","))) for entry in row["good"].split(";") if entry]
+                working = copy.deepcopy(saved)
+                reward = recruit.build_reward(working, gets, self.role_config)
+                player.apply_reward(working, reward, self.role_config, self.now)
+        for level in (18, 50, 75, 100, 150):
+            saved["role_state"]["level"] = level
+            secret_shop.refresh(saved, secret_shop.get_state(saved, self.role_config), self.role_config, self.now, 42)
+            self.assertEqual(len(saved["secret_shop_state"]["slots"]), 6)
 
     def test_watchstar_query_and_exact_guide_comb_commit_once(self):
         baseline = self.prepare_watchstar()
