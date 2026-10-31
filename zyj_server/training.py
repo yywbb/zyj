@@ -1,4 +1,4 @@
-"""经验丹与普通装备强化；只准备变化，扣费和落盘由 player 统一提交。"""
+"""经验丹、普通装备与宝物强化；扣费和落盘由 player 统一提交。"""
 
 import random
 from fractions import Fraction
@@ -7,8 +7,9 @@ from . import battle, formation, qiankun
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
-OPCODES = (1038, 1101, 1109)
+OPCODES = (1038, 1101, 1109, 1118, 1210)
 EXP_PROPS = (20196, 20197, 20198, 20199)
+TREASURE_PROPS = {"horse": (26407, 26408, 26409, 26413), "treasure": (26410, 26411, 26412, 26414)}
 
 
 def grow_general(raw, gained, slot, members, equips, config, maximum=None):
@@ -142,7 +143,7 @@ def strengthen(save, opcode, body, config, seed):
             break
     if not spent:
         raise ValueError("装备已到等级上限或银币不足")
-    updated = dict(equips)
+    updated = {}
     reward = encode_pb_field(1, 0, (-spent) & ((1 << 64) - 1))
     for iid in sorted(critical):
         updated[iid] = b"".join(encode_pb_field(1, 0, v) for v in items[iid])
@@ -150,10 +151,20 @@ def strengthen(save, opcode, body, config, seed):
         old = parse_ids_pb(equips[iid])
         qiankun.record_training(save, "equip", equips[iid], updated[iid], [(1000, actual_costs[iid])], old[2] == 1)
     reward += encode_pb_field(12, 2, b"".join(encode_pb_field(1, 0, critical[i]) for i in sorted(critical)))
+    generals_update, power_delta = equip_differences(save, equips, updated, config)
+    return reward + generals_update, power_delta
+
+
+def equip_differences(save, equips, changes, config):
+    world = bytes.fromhex(save["world_state"]["1002"])
+    generals, slots = formation.records(world, 1, 2), formation.records(world, 4, 2)
+    updated = dict(equips)
+    updated.update(changes)
     members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
+    reward = b""
     power_delta = 0
     for iid, slot in slots.items():
-        if not iid or not any(pb_get_varint(slot, n) in critical for n in range(4, 10)):
+        if not iid or not any(pb_get_varint(slot, n) in changes for n in range(4, 10)):
             continue
         raw = generals[iid]
         previous, _ = formation.bonuses(raw, slot, members, equips, config)
@@ -172,3 +183,102 @@ def strengthen(save, opcode, body, config, seed):
         reward += encode_pb_field(8, 2, pb_set_varint(raw, 20, power))
         power_delta += increase
     return reward, power_delta
+
+
+def strengthen_treasure(save, opcode, body, config):
+    fields = list(iter_pb_fields(body))
+    if any(w != 0 or not 0 < v < (1 << 31) for n, w, v in fields):
+        raise ValueError("宝物强化参数无效")
+    if not save.get("has_role") or save["role_state"]["level"] < config["build"]["142"]["level"]:
+        raise ValueError("宝物强化尚未解锁")
+    if opcode == 1118:
+        targets = [v for n, w, v in fields if n == 1]
+        foods = [v for n, w, v in fields if n == 2]
+        if (len(targets) != 1 or not 1 <= len(foods) <= 5 or len(set(foods)) != len(foods)
+                or any(n not in (1, 2) for n, w, v in fields)):
+            raise ValueError("吞噬需要一个宝物IID和1–5个不同材料IID")
+        target = targets[0]
+    else:
+        values = [v for n, w, v in fields]
+        if any(n != 1 for n, w, v in fields) or len(values) not in (3, 5, 7, 9):
+            raise ValueError("经验材料需要宝物IID及CID/数量对")
+        target, foods = values[0], []
+        pairs = list(zip(values[1::2], values[2::2]))
+        if len({cid for cid, count in pairs}) != len(pairs):
+            raise ValueError("宝物经验材料重复")
+    world = bytes.fromhex(save["world_state"]["1002"])
+    equips = formation.records(world, 2, 1)
+    slots, cheers = formation.records(world, 4, 1), formation.records(world, 5, 1)
+    occupied = {pb_get_varint(slot, n) for slot in (*slots.values(), *cheers.values()) for n in range(4, 10)}
+
+    def item(iid):
+        if iid not in equips:
+            raise ValueError("宝物不存在或不属于当前账号")
+        raw = equips[iid]
+        records = list(iter_pb_fields(raw))
+        if any(n == 1 and (w != 0 or not 0 <= v < (1 << 31)) for n, w, v in records):
+            raise ValueError("宝物存档无效")
+        values = parse_ids_pb(raw)
+        if len(values) < 3 or not values[2]:
+            raise ValueError("宝物等级存档无效")
+        row = config["equip"].get(str(values[1]), {})
+        if row.get("type") not in TREASURE_PROPS or row.get("quality") not in range(2, 7):
+            raise ValueError("此物品不是可强化的普通宝物/坐骑")
+        if (values[2] > min(row["maxlevel"], len(config["treasure2_strengthen"]))
+                or any(values[3:4]) or any(values[5:])):
+            raise ValueError("精炼/升星等高级宝物尚不支持强化或吞噬")
+        return values + [0] * max(0, 5 - len(values)), row
+
+    values, row = item(target)
+    if not row["adorn"] or any(pb_get_varint(slot, n) == target for slot in cheers.values() for n in range(4, 10)):
+        raise ValueError("经验材料或助阵宝物不能作为强化目标")
+    level, experience = values[2], values[4]
+    maximum = min(save["role_state"]["level"], row["maxlevel"], len(config["treasure2_strengthen"]))
+    if level >= maximum:
+        raise ValueError("宝物已到当前等级上限")
+    amounts, coin, costs = [], 0, []
+    if opcode == 1118:
+        for iid in foods:
+            if iid == target or iid in occupied:
+                raise ValueError("不能吞噬目标自身或已穿戴的宝物")
+            food, food_row = item(iid)
+            if food_row["type"] != row["type"]:
+                raise ValueError("只能吞噬同类宝物或坐骑")
+            # 与原生预览一致：基础经验加已完成等级经验，不额外计入材料的剩余经验。
+            amounts.append(food_row["exp"] + sum(config["treasure2_strengthen"][str(lv)][f'quality{food_row["quality"]}']
+                                                for lv in range(1, food[2] + 1)))
+            coin += int(config["global_kv"][f'treasure_strengthen_coin{food_row["quality"]}']["value"])
+    else:
+        for cid, count in pairs:
+            if cid not in TREASURE_PROPS[row["type"]]:
+                raise ValueError("宝物经验材料类型不匹配")
+            prop = config["equip"][str(cid)]
+            amounts.append(prop["exp"])
+            coin += count * int(config["global_kv"][f'treasure_strengthen_coin{prop["quality"]}']["value"])
+            costs.append((cid, count))
+    gained = sum(amounts) if opcode == 1118 else sum(amount * count for amount, (cid, count) in zip(amounts, pairs))
+    needed = sum(config["treasure2_strengthen"][str(lv)][f'quality{row["quality"]}'] for lv in range(level + 1, maximum + 1)) - experience
+    if min(amounts) <= 0 or gained - max(amounts) >= max(1, needed):
+        raise ValueError("宝物材料数量超过当前等级上限所需")
+    if not 0 < coin < (1 << 31) or experience + gained >= (1 << 31):
+        raise ValueError("宝物强化费用或经验超出范围")
+    experience += gained
+    while level < maximum:
+        required = config["treasure2_strengthen"][str(level + 1)][f'quality{row["quality"]}']
+        if experience < required:
+            break
+        experience -= required
+        level += 1
+    values[2], values[4] = level, experience
+    replacement = iter(values)
+    changed = b"".join(encode_pb_field(n, w, next(replacement) if (n, w) == (1, 0) else v)
+                       for n, w, v in iter_pb_fields(equips[target]))
+    changed += b"".join(encode_pb_field(1, 0, v) for v in replacement)
+    generals, power = equip_differences(save, equips, {target: changed}, config)
+    save["world_state"]["1002"] = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world)
+        if not ((n, w) == (2, 2) and pb_get_varint(v, 1) in foods)).hex()
+    # 吞噬实例不能按普通强化收据返还，避免重生退回不存在的材料。
+    receipts = qiankun.get_state(save)["receipts"]
+    for iid in (target, *foods):
+        receipts.pop(f"equip:{iid}", None)
+    return encode_pb_field(6, 2, changed) + generals, [(1000, coin), *costs], power

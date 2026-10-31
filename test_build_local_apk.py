@@ -612,6 +612,78 @@ class LanBuildTests(unittest.TestCase):
             assert(login.type==9997 and login.local_login_failed)
         ''')
 
+    def test_treasure_training_original_client_parses_equipment_and_deducts_cost_once(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("宝物强化客户端回调验证需本机已有 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            print,cclog,printT=function() end,function() end,function() end
+            local function message()
+                return {ids={},SerializeToString=function(self) return self end,
+                    ParseFromString=function(self,data) for k,v in pairs(data) do self[k]=v end end}
+            end
+            package.preload.equiprefine_pb=function() return {} end
+            package.preload.treasurerefine_pb=function() return {TreasureRefine=message} end
+            package.preload.ids_pb=function() return {Ids=message} end
+            package.preload.somethings_pb=function() return {SomeThings=message} end
+            gamedata={ext={},cache={equips={[1000100]={},[1000101]={},[1000102]={}},
+                role={coin=100000},props={[26410]={num=3},[26411]={num=0}}},
+                config={equip={['26201']={quality=3,type='treasure',adorn=1}}}}
+            function gamedata:updateRoleCoin(n) self.cache.role.coin=self.cache.role.coin+n end
+            function gamedata:updateprops(item) self.cache.props[item.cid].num=self.cache.props[item.cid].num+item.num end
+            function gamedata:SomethingProcess(reward)
+                assert(reward.coin==nil and reward.usedcidnums==nil)
+                for _,raw in ipairs(reward.equips) do self.cache.equips[raw.ids[1]]=self:equipData(raw) end
+            end
+        ''')
+        data = builder.read_script("gamedata").decode("utf-8")
+        start = data.index("function gamedata.equipData(self,data)")
+        end = data.index("function gamedata.artifactData(self,data)", start)
+        lua.execute(data[start:end])
+        lua.execute(builder.read_script("GameTreasureUp").decode("utf-8"))
+        lua.execute('''
+            local remote,opcode,body=UITreasureStrengthenCallBack({iid=1000100,ids={1000101,1000102},xcoin=20000})
+            assert(remote==1 and opcode==1118 and body.iid==1000100 and #body.ids==2)
+            local reply=NetTreasureStrengthenCallBack({rbuf={equips={{ids={1000100,26201,4,0,100}}}}})
+            assert(reply.type==1118 and reply.equip.level1==4 and reply.equip.exp==100)
+            assert(gamedata.cache.equips[1000101]==nil and gamedata.cache.equips[1000102]==nil)
+            assert(gamedata.cache.role.coin==80000)
+            remote,opcode,body=UITreasureStrengthenByPropCallBack({iid=1000100,xcoin=6000,cids={{cid=26410,num=2},{cid=26411,num=0}}})
+            assert(remote==1 and opcode==1210 and #body.ids==3 and body.ids[1]==1000100 and body.ids[2]==26410 and body.ids[3]==2)
+            reply=NetTreasureStrengthenByPropCallBack({rbuf={equips={{ids={1000100,26201,7,0,300}}}}})
+            assert(reply.type==1210 and reply.equip.level1==7 and reply.equip.exp==300)
+            assert(gamedata.cache.props[26410].num==1 and gamedata.cache.role.coin==74000)
+        ''')
+        with zipfile.ZipFile(Path(__file__).parent / "configs_sec5.zip") as archive:
+            config = {name: json.loads(archive.read(f"5/{name}.json"))
+                      for name in ("equip", "treasure2_strengthen", "global_kv")}
+        lua.globals().gamedata.config = lua.table_from(config, recursive=True)
+        lua.execute('''
+            treasureup={}
+            ui={setSpriteTextureRect2=function() end,setLabelString=function() end}
+            labels=setmetatable({},{__index=function(t,key)
+                local label={setString=function() end};rawset(t,key,label);return label
+            end})
+        ''')
+        code = builder.read_script("Layer_treasureup").decode("utf-8")
+        start = code.index("function treasureup.setexp_up(self)")
+        end = code.index("function treasureup.setData_up(", start)
+        lua.execute(code[start:end])
+        lua.execute('''
+            local page={data={cid=26201,quality=3,level1=1,exp=0,maxlv1=8},rootItems=labels,
+                selectData={{cid=26302,quality=4,level1=2,exp=30}}}
+            treasureup.setexp_up(page)
+            assert(page.uplevel1==4 and page.upexp==0 and page.xcoin==10000)
+            page.data.maxlv1=2;page.selectData[1].level1=1
+            treasureup.setexp_up(page)
+            assert(page.uplevel1==2 and page.upexp==300)
+            page.data.maxlv1=8;page.selectData[2]={cid=26302,quality=4,level1=1}
+            treasureup.setexp_up(page)
+            assert(page.uplevel1==4 and page.upexp==100 and page.xcoin==20000)
+        ''')
+
     def test_protagonist_advance_original_client_parses_slots_and_deducts_cost_once(self):
         try:
             from lupa.lua51 import LuaRuntime

@@ -22,9 +22,14 @@ def bonuses(raw, slot, members, equips, config):
         if iid not in equips:
             raise ValueError("阵位装备不存在")
         item = parse_ids_pb(equips[iid])
-        if len(item) < 3 or any(item[3:]):
+        if len(item) < 3:
             raise ValueError("此装备的进阶属性暂不支持换阵")
         gear = config["equip"][str(item[1])]
+        extra = item[3:]
+        if gear["type"] in ("horse", "treasure") and len(extra) > 1 and 0 <= extra[1] < (1 << 31):
+            extra[1] = 0
+        if any(extra):
+            raise ValueError("此装备的进阶属性暂不支持换阵")
         equipped.add(item[1])
         for index in (1, 2):
             name = gear[f"attr{index}"]

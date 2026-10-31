@@ -2290,6 +2290,230 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(protocol.pb_get_varint(after, 3), 16)
         self.assertGreater(protocol.pb_get_varint(after, 5), protocol.pb_get_varint(raw, 5))
 
+    def seed_treasure_training(self, kind="treasure", level=8):
+        saved = self.seed_training_account(coin=1000000)
+        saved["role_state"]["level"] = level
+        target_cid, food_cid = (26201, 26302) if kind == "treasure" else (25203, 25305)
+        for iid, cid in ((1000100, target_cid), (1000101, food_cid), (1000102, food_cid)):
+            raw = recharge.ids([iid, cid, 1] + [0] * 10)
+            player.record_slot_update(saved, protocol.encode_pb_field(2, 2, raw))
+        self.save_path.write_text(json.dumps(saved))
+        self.give_props({cid: 10 for cid in range(26407, 26415)})
+        gear = [1, 1, 0, 0, 0, 0, 1000100 if kind == "treasure" else 0, 1000100 if kind == "horse" else 0]
+        self.assertEqual(self.replay([self.activity_request(1007, gear)])[0]["opcode"], 1007)
+        return json.loads(self.save_path.read_text())
+
+    def treasure_feed_request(self, target, foods, seq=32000):
+        body = protocol.encode_pb_field(1, 0, target)
+        body += b"".join(protocol.encode_pb_field(2, 0, iid) for iid in foods)
+        return {"opcode": 1118, "seq": seq, "hex": body.hex()}
+
+    def test_treasure_training_props_save_once_and_restore_equipment_exp(self):
+        before = self.seed_treasure_training()
+        previous = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)[7059]
+        request = self.activity_request(1210, [1000100, 26410, 1])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(1210, 32000, bytes.fromhex(request["hex"]))
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [1210, 205])
+            self.assertEqual(session.handle(1210, 32000, bytes.fromhex(request["hex"])), packets)
+            self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+        fields = list(protocol.iter_pb_fields(packets[0][16:]))
+        self.assertFalse(any(n in (1, 2, 10) for n, w, v in fields))
+        changed = self.entity_records(packets[0][16:], 6, 1)[1000100]
+        self.assertEqual(protocol.parse_ids_pb(changed), [1000100, 26201, 4, 0, 100] + [0] * 8)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] - 3000)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[26410], 2), 9)
+        general = self.entity_records(self.query_world(1002), 1, 2)[7059]
+        self.assertEqual(protocol.pb_get_varint(general, 8), protocol.pb_get_varint(previous, 8) + 480)
+        self.assertEqual(protocol.pb_get_varint(general, 6), protocol.pb_get_varint(previous, 6))
+        self.assertEqual(after["role_state"]["power"], before["role_state"]["power"] + 48)
+        self.assertEqual(after["guide"], before["guide"])
+        snapshot = bytes.fromhex(after["protagonist_snapshot"])
+        self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(snapshot) if (n, w) == (10, 2)), general)
+        initial = self.replay([dict(self.by_seq[12], seq=32001)])[0]
+        roster = dict(protocol.get_comb_messages(bytes.fromhex(initial["hex"])))[1002]
+        self.assertEqual(self.entity_records(roster, 2, 1)[1000100], changed)
+
+    def test_treasure_training_consumes_only_selected_idle_items_and_reconnects(self):
+        before = self.seed_treasure_training()
+        request = self.treasure_feed_request(1000100, [1000101, 1000102])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(1118, 32002, bytes.fromhex(request["hex"]))
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1118)
+            self.assertEqual(session.handle(1118, 32002, bytes.fromhex(request["hex"])), packets)
+        food = self.role_config["equip"]["26302"]
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] - 2 * int(self.role_config["global_kv"][f'treasure_strengthen_coin{food["quality"]}']["value"]))
+        equips = self.entity_records(self.query_world(1002), 2, 1)
+        old_equips = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 2, 1)
+        self.assertEqual(set(equips), set(old_equips) - {1000101, 1000102})
+        self.assertEqual(protocol.parse_ids_pb(equips[1000100])[2:5], [4, 0, 100])
+        self.assertEqual(after["world_state"]["1200"], before["world_state"]["1200"])
+        self.assertFalse(any(n in (1, 2, 10) for n, w, v in protocol.iter_pb_fields(packets[0][16:])))
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([request]), 1118, 32000, "不存在")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        initial = self.replay([dict(self.by_seq[12], seq=32003)])[0]
+        roster = dict(protocol.get_comb_messages(bytes.fromhex(initial["hex"])))[1002]
+        self.assertFalse({1000101, 1000102} & set(self.entity_records(roster, 2, 1)))
+
+    def test_treasure_training_horse_and_unworn_targets_keep_power_accurate(self):
+        before = self.seed_treasure_training("horse")
+        previous = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)[7059]
+        reply = self.replay([self.activity_request(1210, [1000100, 26407, 1])])
+        self.assertEqual(reply[0]["opcode"], 1210)
+        current = self.entity_records(self.query_world(1002), 1, 2)[7059]
+        gain = int(self.role_config["equip"]["25203"]["grow_1"]) * 3
+        self.assertEqual(protocol.pb_get_varint(current, 6), protocol.pb_get_varint(previous, 6) + gain)
+        self.assertEqual(protocol.pb_get_varint(current, 8), protocol.pb_get_varint(previous, 8))
+        self.assertEqual(json.loads(self.save_path.read_text())["role_state"]["power"], before["role_state"]["power"] + gain)
+        power = self.query_role()[14]
+        reply = self.replay([self.activity_request(1210, [1000101, 26407, 1])])
+        self.assertEqual([f["opcode"] for f in reply], [1210])
+        self.assertFalse(any(n == 8 for n, w, v in protocol.iter_pb_fields(bytes.fromhex(reply[0]["hex"]))))
+        self.assertEqual(self.query_role()[14], power)
+
+    def test_treasure_training_exp_survives_other_training_and_round_trip_equipping(self):
+        self.seed_treasure_training()
+        self.replay([self.activity_request(1210, [1000100, 26410, 1])])
+        before = self.entity_records(self.query_world(1002), 1, 2)[7059]
+        self.replay([self.activity_request(1007, [1, 1, 0, 0, 0, 0, 1000101, 0])])
+        self.replay([self.activity_request(1007, [1, 1, 0, 0, 0, 0, 1000100, 0])])
+        self.assertEqual(self.entity_records(self.query_world(1002), 1, 2)[7059], before)
+        self.assertEqual(self.replay([self.training_request(1038, 7059, (1, 0, 0, 0))])[0]["opcode"], 1038)
+        world = self.query_world(1002)
+        weapon = protocol.pb_get_varint(self.entity_records(world, 4, 1)[1], 4)
+        self.assertEqual(self.replay([self.training_request(1101, weapon, (0,))])[0]["opcode"], 1101)
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(self.query_world(1002), 2, 1)[1000100])[2:5], [4, 0, 100])
+
+    def test_treasure_training_retains_last_material_overflow_but_rejects_excess(self):
+        self.seed_treasure_training(level=2)
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(1210, [1000100, 26410, 2])]), 1210, 20000, "超过")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.assertEqual(self.replay([self.activity_request(1210, [1000100, 26410, 1])])[0]["opcode"], 1210)
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(self.query_world(1002), 2, 1)[1000100])[2:5], [2, 0, 800])
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(1210, [1000100, 26410, 1])]), 1210, 20000, "上限")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["level"] = 3
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(1210, [1000100, 26410, 1])])[0]["opcode"], 1210)
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(self.query_world(1002), 2, 1)[1000100])[2:5], [3, 0, 1500])
+
+    def test_treasure_training_mixed_props_charge_each_quality_and_keep_overflow(self):
+        before = self.seed_treasure_training()
+        request = self.activity_request(1210, [1000100, 26410, 1, 26411, 1, 26412, 1])
+        self.assertEqual(self.replay([request])[0]["opcode"], 1210)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] - 33000)
+        self.assertEqual(protocol.parse_ids_pb(self.entity_records(self.query_world(1002), 2, 1)[1000100])[2:5], [8, 0, 2000])
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        for cid in (26410, 26411, 26412):
+            self.assertEqual(protocol.pb_get_varint(props[cid], 2), 9)
+
+    def test_treasure_training_rejects_malformed_requests_without_mutation(self):
+        self.seed_treasure_training()
+        requests = [self.activity_request(1210, values) for values in
+                    ([], [1000100], [1000100, 26410], [1000100, 26410, 0], [1000100, 26407, 1],
+                     [1000100, 20196, 1], [1000100, 26410, 1, 26410, 1], [9999999, 26410, 1],
+                     [1000100, 26410, 11], [1000100, 26410, (1 << 31)])]
+        requests += [self.treasure_feed_request(1000100, foods) for foods in
+                     ([], [1000100], [1000101, 1000101], [9999999], list(range(1, 7)))]
+        requests += [{"opcode": 1118, "seq": 32000, "hex": "0894b43d0894b43d1095b43d"},
+                     {"opcode": 1118, "seq": 32000, "hex": "0894b43d1095b43d1801"},
+                     {"opcode": 1210, "seq": 32000, "hex": "0894b43d08aace0108011801"},
+                     {"opcode": 1210, "seq": 32000, "hex": "0880"}]
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            for request in requests:
+                with self.subTest(request=request):
+                    packets = session.handle(request["opcode"], request["seq"], bytes.fromhex(request["hex"]))
+                    self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999999, 1999])
+                    self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_treasure_training_protects_worn_advanced_and_foreign_materials(self):
+        baseline = self.seed_treasure_training()
+        for problem in ("worn", "cheer", "target_cheer", "refined_food", "refined_target", "starred_target",
+                        "wrong_type", "coin", "props", "power", "experience"):
+            saved = copy.deepcopy(baseline)
+            equips = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 2, 1)
+            foods = [1000101]
+            if problem == "worn":
+                slot = protocol.encode_pb_field(1, 0, 2) + protocol.encode_pb_field(2, 0, 7060) + protocol.encode_pb_field(8, 0, 1000101)
+                player.record_slot_update(saved, protocol.encode_pb_field(4, 2, slot))
+            elif problem in ("cheer", "target_cheer"):
+                slot = (protocol.encode_pb_field(1, 0, 1) + protocol.encode_pb_field(2, 0, 0)
+                        + protocol.encode_pb_field(8, 0, 1000100 if problem == "target_cheer" else 1000101))
+                player.record_slot_update(saved, protocol.encode_pb_field(5, 2, slot))
+            elif problem in ("refined_food", "refined_target", "starred_target", "wrong_type", "experience"):
+                iid = 1000101 if problem in ("refined_food", "wrong_type") else 1000100
+                item = protocol.parse_ids_pb(equips[iid])
+                item[{"refined_food": 3, "refined_target": 3, "starred_target": 11, "wrong_type": 1, "experience": 4}[problem]] = (
+                    25203 if problem == "wrong_type" else (1 << 31) - 1 if problem == "experience" else 1)
+                player.record_slot_update(saved, protocol.encode_pb_field(2, 2, recharge.ids(item)))
+            elif problem == "coin":
+                saved["role_state"]["coin"] = 0
+            elif problem == "props":
+                player.change_item_count(saved, 26410, -10, self.role_config, self.now)
+            else:
+                saved["role_state"]["power_all"] = (1 << 31) - 1
+            self.save_path.write_text(json.dumps(saved))
+            disk = self.save_path.read_bytes()
+            with self.subTest(problem=problem):
+                request = self.activity_request(1210, [1000100, 26410, 1]) if problem == "props" else self.treasure_feed_request(1000100, foods)
+                self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_treasure_training_food_exp_matches_native_preview_and_invalidates_receipts(self):
+        saved = self.seed_treasure_training()
+        raw = recharge.ids([1000101, 26302, 2, 0, 30] + [0] * 8)
+        player.record_slot_update(saved, protocol.encode_pb_field(2, 2, raw))
+        saved["qiankun_state"]["receipts"]["equip:1000101"] = {"before": "", "after": raw.hex(), "costs": [[1000, 10000]]}
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.treasure_feed_request(1000100, [1000101])])[0]["opcode"], 1118)
+        equips = self.entity_records(self.query_world(1002), 2, 1)
+        # 紫书500基础经验+升到2级的400经验，与客户端setexp_up预览一致。
+        self.assertEqual(protocol.parse_ids_pb(equips[1000100])[2:5], [4, 0, 0])
+        self.assertNotIn("equip:1000101", json.loads(self.save_path.read_text())["qiankun_state"]["receipts"])
+        self.assertIn(1000102, equips)
+
+    def test_treasure_training_save_failure_keeps_materials_currency_and_memory(self):
+        self.seed_treasure_training()
+        for request in (self.treasure_feed_request(1000100, [1000101]), self.activity_request(1210, [1000100, 26410, 1])):
+            with self.subTest(opcode=request["opcode"]), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(request["opcode"], 32004, bytes.fromhex(request["hex"]))
+                self.assertEqual((session.save, self.save_path.read_bytes(), session.random_replies), (memory, disk, {}))
+
+    def test_treasure_training_all_configured_plain_targets_and_unknown_fields(self):
+        unknown = protocol.encode_pb_field(50, 2, b"keep")
+        for cid, row in self.role_config["equip"].items():
+            if row["type"] not in training.TREASURE_PROPS or not row["adorn"]:
+                continue
+            for prop in training.TREASURE_PROPS[row["type"]]:
+                with self.subTest(cid=cid, prop=prop):
+                    raw = recharge.ids([1000100, int(cid), 1, 0, 0]) + unknown
+                    saved = {"has_role": True, "role_state": {"level": 150},
+                             "world_state": {"1002": protocol.encode_pb_field(2, 2, raw).hex()}}
+                    reply, costs, power = training.strengthen_treasure(saved, 1210, recharge.ids([1000100, prop, 1]), self.role_config)
+                    changed = self.entity_records(reply, 6, 1)[1000100]
+                    self.assertIn((50, 2, b"keep"), list(protocol.iter_pb_fields(changed)))
+                    values = protocol.parse_ids_pb(changed)
+                    total = values[4] + sum(self.role_config["treasure2_strengthen"][str(lv)][f'quality{row["quality"]}'] for lv in range(2, values[2] + 1))
+                    self.assertEqual(total, self.role_config["equip"][str(prop)]["exp"])
+                    quality = self.role_config["equip"][str(prop)]["quality"]
+                    coin = int(self.role_config["global_kv"][f"treasure_strengthen_coin{quality}"]["value"])
+                    self.assertEqual((costs, power), ([(1000, coin), (prop, 1)], 0))
+
     def test_strengthening_charges_once_updates_protagonist_and_reconnects(self):
         saved = self.seed_training_account(coin=560)
         raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[7059]

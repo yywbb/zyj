@@ -51,7 +51,7 @@ def load_role_config(config_path):
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
-                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "build",
+                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
@@ -719,6 +719,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 raw = next(v for n, w, v in iter_pb_fields(body) if (n, w) == (8, 2))
                 before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
                 qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config))
+            elif opcode in (1118, 1210):
+                body, costs, power_delta = training.strengthen_treasure(save, opcode, request_body, role_config)
+                for cid, count in costs:
+                    change_item_count(save, cid, -count, role_config, now)
             else:
                 body, power_delta = training.strengthen(save, opcode, request_body, role_config, random.getrandbits(64))
             state = get_role_state(save, role_config)
