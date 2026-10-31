@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, blackmarket, daily_events, development, fashion, guide, mieshendian, online_rewards, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, training, watchstar, welfare
+from . import activities, blackmarket, daily_events, development, fashion, guide, guild, mieshendian, online_rewards, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, training, watchstar, welfare
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -20,7 +20,7 @@ def unavailable_response(opcode, seq, body, message):
 
 
 class Session:
-    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None):
+    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None, guild_request=None):
         self.replay = Replay(tables)
         self.save_path = save_path
         self.step_counts = step_counts
@@ -28,6 +28,7 @@ class Session:
         self.growth_buyers = growth_buyers
         self.rank_query = rank_query
         self.rank_observer = rank_observer
+        self.guild_request = guild_request
         self.random_replies = {}
         self.connected_at = int(time.time())
         self.save = player.load_save(save_path, step_counts)
@@ -137,6 +138,14 @@ class Session:
 
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
+
+        if opcode in guild.OPCODES:
+            try:
+                if self.guild_request is None:
+                    raise ValueError("公会需要绑定本地账号库")
+                return self.guild_request(self, opcode, seq, body)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
 
         if opcode in (3500, 3503, 5601, 5602, 5603, 3625):
             try:
@@ -340,6 +349,19 @@ class Session:
             return unavailable_response(opcode, seq, body, "此操作尚未实现或参数不受支持，未更改存档。")
         if not any(r["opcode"] == opcode and r["seq"] != 0 for r in responses):
             return unavailable_response(opcode, seq, body, "此操作缺少完整应答，未更改存档。")
+        if self.guild_request and opcode == 999900 and 2230 in get_comb_ids(body):
+            try:
+                membership = self.guild_request(self, 2230, seq, b"")[0][16:]
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
+            responses = [dict(r) for r in responses]
+            for response in responses:
+                if response["opcode"] == 999900:
+                    response["hex"] = b"".join(
+                        encode_pb_field(n, w, pb_set_field(value, 2, 2, membership)
+                                        if (n, w) == (1, 2) and get_comb_ids(encode_pb_field(n, w, value)) == (2230,) else value)
+                        for n, w, value in iter_pb_fields(bytes.fromhex(response["hex"]))
+                    ).hex()
         if (opcode == 999900 and any(mid in (1007, 1109) for mid in get_comb_ids(body))
                 and self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2):
             return unavailable_response(opcode, seq, body, "教程装备录制已过期，请使用当前阵容单独装备或强化。")

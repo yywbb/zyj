@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import player, protocol, ranking, storage, welfare
+from . import guild, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -123,7 +123,8 @@ class AccountStore:
         try:
             return Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
                            lambda body, opcode=3500, save=None: self.rank_query(account, body, opcode, save),
-                           lambda previous=None: self.observe_rankings({account: previous} if previous else None))
+                           lambda previous=None: self.observe_rankings({account: previous} if previous else None),
+                           lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body))
         except Exception as error:
             self.close_session(account)
             raise ValueError(f"载入玩家状态失败: {error}") from error
@@ -131,6 +132,49 @@ class AccountStore:
     def close_session(self, account):
         with self.lock:
             self.active.pop(account, None)
+
+    def guild_request(self, account, session, opcode, seq, body):
+        with self.lock:
+            saves = {}
+            for member in self.account_ids():
+                snapshot = self.snapshot(member)
+                data = snapshot["save"]
+                if snapshot["error"] or snapshot["has_save"] and type(data.get("has_role")) is not bool:
+                    raise ValueError("账号存档损坏，无法读取公会")
+                if data.get("has_role"):
+                    guild.validate_role(data)
+                    saves[member] = data
+            path = self.save_path.with_name("guilds.json")
+            state = guild.load(path, saves)
+            before = copy.deepcopy(state)
+            guild.recover(state, saves)
+            if session.save.get("has_role"):
+                guild.validate_role(session.save)
+                saves[account] = session.save
+            now = max(int(time.time()), state["checked_at"])
+            reply, cost = guild.prepare(opcode, body, state, saves, account, self.role_config, now, self.active)
+            packets = [protocol.pack_frame(opcode, seq, reply)]
+            if opcode == 2231:
+                working = copy.deepcopy(session.save)
+                online_rewards.settle(working, self.role_config, session.connected_at, now)
+                welfare.settle(working, now)
+                player.settle_stamina(working, self.role_config, now)
+                player.change_item_count(working, 1001, -cost, self.role_config, now)
+                _, created = guild.membership(state, account)
+                working.setdefault("guild_creations", []).append(created["pending"]["token"])
+                packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
+                state["checked_at"] = now
+                # 草稿先落盘，扣款与收据同存档提交；中断后按收据发布或丢弃草稿。
+                guild.write(path, state)
+                packets = player.save_response_group(packets, working, session.save, session.save_path,
+                                                     self.step_counts, self.role_config, now)
+                session.save = working
+                saves[account] = working
+                guild.recover(state, saves)
+            if state != before:
+                state["checked_at"] = now
+                guild.write(path, state)
+            return packets
 
     def growth_buyers(self):
         """只统计已原子落盘的本地购买账号；损坏存档不能虚增全服人数。"""

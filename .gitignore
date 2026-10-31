@@ -13,6 +13,7 @@ role_save.json
 credentials.json
 config_overrides.json
 /rankings.json
+/guilds.json
 /backups/
 /logs/
 

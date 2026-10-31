@@ -157,6 +157,26 @@ def build_routing_tables(frames):
     if refresh_groups:
         comb_routes.setdefault((get_comb_ids(refresh_request), refresh_request), refresh_groups)
 
+    # 页面缓存省去2880/5511后的完整十项公会预加载；2230由绑定账号回填。
+    if refresh_groups and 2230 in baseline:
+        short_guild = b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid))
+                               for mid in (*page_ids[:3], 3210, 7002, 2230, *page_ids[4:]))
+        groups = []
+        for group in refresh_groups:
+            responses = []
+            for response in group:
+                if response["opcode"] == 999900:
+                    raw = bytearray()
+                    for n, w, value in iter_pb_fields(bytes.fromhex(response["hex"])):
+                        raw.extend(encode_pb_field(n, w, value))
+                        if (n, w) == (1, 2) and pb_get_varint(value, 1) == 7002:
+                            raw.extend(encode_pb_field(1, 2, encode_pb_field(1, 0, 2230)
+                                                       + encode_pb_field(2, 2, baseline[2230])))
+                    response = dict(response, hex=raw.hex())
+                responses.append(response)
+            groups.append(responses)
+        comb_routes.setdefault((get_comb_ids(short_guild), short_guild), groups)
+
     print_flush(f"[*] 带请求校验的录制路由就绪: {sum(len(groups) for groups in verified.values())} 个请求")
     print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个普通请求参数组合, {len(comb_routes)} 个 Comb 请求参数组合, {len(master_comb_packets)} 个主城初始化子帧")
     return opcode_routes, comb_routes, master_comb_packets, verified

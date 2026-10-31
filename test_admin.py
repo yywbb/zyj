@@ -6,12 +6,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
-from zyj_server import accounts, configuration, guide, player, replay, storage
+from zyj_server import accounts, configuration, guide, player, protocol, replay, storage
 from zyj_server.admin import views
 from zyj_server.admin.http import start_admin
 from zyj_server.session import Session
@@ -55,6 +56,368 @@ class AdminFixture(unittest.TestCase):
 
     def maintain(self, action, account=1, backup_id=None):
         return self.store.maintain(account, action, self.store.snapshot(account)["revision"], backup_id)
+
+
+class GuildTests(AdminFixture):
+    def setUp(self):
+        super().setUp()
+        self.now = 1793430000
+        self.clock = patch("time.time", return_value=self.now).start()
+        self.addCleanup(patch.stopall)
+        patch.object(self.store, "authenticate", return_value=None).start()
+        self.sessions = {}
+        self.seq = 30000
+        for account in (1, 2, 3):
+            self.add_account(account)
+
+    def add_account(self, account):
+        data = json.loads(self.save(account))
+        data["created_at"] = self.now - 3600 + account
+        data["role_state"].update(level=19, gold=10000, nextexp=CONFIG["role_exp"]["19"]["nextexp"])
+        self.assertTrue(player.save_role(data, self.store.path(account), COUNTS))
+        self.sessions[account] = self.store.open_session(account, PASSWORD, ("phone", account))
+        self.addCleanup(self.store.close_session, account)
+
+    def request(self, account, opcode, values=None, text=None, raw=None):
+        if raw is None:
+            raw = (protocol.encode_pb_field(1, 2, protocol.encode_pb_field(2, 2, text.encode())) if text is not None
+                   else b"".join(protocol.encode_pb_field(1, 0, v) for v in (values or [])))
+        self.seq += 1
+        packets = self.sessions[account].handle(opcode, self.seq, raw)
+        return [(struct.unpack(">IIII", p[:16])[2], p[16:]) for p in packets]
+
+    def success(self, account, opcode, **kwargs):
+        packets = self.request(account, opcode, **kwargs)
+        self.assertEqual(packets[0][0], opcode, packets)
+        return packets[0][1]
+
+    def guild_id(self, account):
+        rows = self.business_rows(self.success(account, 2230))
+        if 1 not in rows:
+            return 0
+        first = next(v for n, w, v in protocol.iter_pb_fields(rows[1]) if (n, w) == (1, 2))
+        return protocol.pb_get_varint(first, 1)
+
+    def business_rows(self, body):
+        rows = {}
+        for n, w, value in protocol.iter_pb_fields(body):
+            self.assertEqual((n, w), (1, 2))
+            fields = list(protocol.iter_pb_fields(value))
+            self.assertEqual([f[:2] for f in fields], [(1, 0), (2, 2)])
+            rows[fields[0][2]] = fields[1][2]
+        return rows
+
+    def create(self, account=1, name="测试公会"):
+        self.assertEqual(protocol.parse_ids_pb(self.success(account, 2231, text=name)), [0])
+        return self.guild_id(account)
+
+    def test_entry_create_search_and_reconnect_use_real_membership(self):
+        self.assertEqual(self.guild_id(1), 0)
+        self.assertEqual(self.success(1, 2232), b"")
+        gid = self.create()
+        self.assertGreater(gid, 0)
+        self.assertEqual(self.store.snapshot(1)["save"]["role_state"]["gold"], 9000)
+        self.assertTrue(self.success(2, 2232))
+        self.assertTrue(self.success(2, 2243, text="测试公会"))
+        self.assertFalse(self.success(2, 2243, text="不存在"))
+        self.assertEqual(self.request(1, 2231, text="重复创建")[0][0], 999999)
+        self.store.close_session(1)
+        self.sessions[1] = self.store.open_session(1, PASSWORD, ("reconnect", 1))
+        self.assertEqual(self.guild_id(1), gid)
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"], 9000)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2265)), [0, 19])
+
+    def test_native_application_approval_cancel_and_rejection(self):
+        gid = self.create()
+        self.assertEqual(protocol.parse_ids_pb(self.success(2, 2233, values=[gid])), [0])
+        self.assertTrue(self.success(1, 2234))
+        self.success(2, 2267, values=[gid])
+        self.assertFalse(self.success(1, 2234))
+        self.success(2, 2233, values=[0])
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2235, values=[1000002, 1])), [2005])
+        self.assertEqual(self.guild_id(2), 0)
+        self.success(2, 2233, values=[gid])
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2235, values=[1000002, 0])), [0])
+        self.assertEqual(self.guild_id(2), gid)
+        self.assertFalse(self.success(1, 2234))
+        self.assertEqual(self.request(1, 2235, values=[1000002, 0])[0][0], 999999)
+        self.assertEqual(self.store.snapshot(2)["save"]["role_state"]["gold"], 10000)
+
+    def test_member_permissions_promotion_transfer_kick_and_disband(self):
+        gid = self.create()
+        self.success(1, 2265, values=[1, 19])
+        for account in (2, 3):
+            self.assertEqual(protocol.parse_ids_pb(self.success(account, 2233, values=[gid])), [1])
+        for op, args in ((2237, {"text": "越权"}), (2239, {"values": [0, 1000003]}),
+                         (2240, {"values": [1000003]}), (2241, {"values": [1000003]}), (2266, {})):
+            self.assertEqual(self.request(2, op, **args)[0][0], 999999)
+        self.success(1, 2239, values=[0, 1000002])
+        self.success(2, 2237, text="新公告")
+        self.assertEqual(self.request(2, 2240, values=[1000001])[0][0], 999999)
+        self.success(2, 2240, values=[1000003])
+        self.assertEqual(self.guild_id(3), 0)
+        self.assertEqual(self.request(1, 2266)[0][0], 999999)
+        self.success(1, 2241, values=[1000002])
+        members = self.business_rows(self.success(2, 2236))
+        own_rid = protocol.pb_get_varint(bytes.fromhex(self.sessions[2].save["role_snapshot"]), 1)
+        self.assertEqual(protocol.parse_ids_pb(members[0])[0], own_rid)
+        self.success(1, 2242)
+        self.success(2, 2266)
+        self.assertEqual(self.guild_id(2), 0)
+        self.assertEqual(self.success(3, 2232), b"")
+
+    def test_limits_cooldown_and_identity_survive_restart_and_rollback(self):
+        gid = self.create()
+        self.success(1, 2265, values=[1, 20])
+        self.assertEqual(self.request(2, 2233, values=[gid])[0][0], 999999)
+        self.success(1, 2265, values=[1, 19])
+        with patch.dict(CONFIG["gang2_level"]["1"], people=1):
+            self.assertEqual(self.request(2, 2233, values=[gid])[0][0], 999999)
+        self.success(2, 2233, values=[gid])
+        self.success(2, 2242)
+        self.assertEqual(self.request(2, 2233, values=[gid])[0][0], 999999)
+        self.clock.return_value += int(CONFIG["global_kv"]["gang_quit_limit"]["value"])
+        self.success(2, 2233, values=[gid])
+        self.clock.return_value -= 100
+        self.success(2, 2242)
+        self.assertEqual(self.request(2, 2233, values=[gid])[0][0], 999999)
+        self.sessions[1].save["created_at"] += 1000
+        player.save_role(self.sessions[1].save, self.store.path(1), COUNTS)
+        self.assertEqual(self.guild_id(1), 0)
+
+    def test_untrusted_parameters_names_and_foreign_targets_never_spend(self):
+        for body in (b"", b"\x08\x01", b"\x0a\x00", b"\x0a\x02\x12\xff"):
+            self.assertEqual(self.request(1, 2231, raw=body)[0][0], 999999)
+        for name in ("", " ", "x" * 13, "bad\nname"):
+            self.assertEqual(self.request(1, 2231, text=name)[0][0], 999999)
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"], 10000)
+        self.create()
+        for opcode, raw in ((2230, b"\x08\x00"), (2232, b"\x08\x01"), (2239, b"\x08\x00"),
+                            (2240, b"\x08\x01"), (2265, b"\x08\x02\x08\x13")):
+            before = (self.root / "guilds.json").read_bytes()
+            self.assertEqual(self.request(1, opcode, raw=raw)[0][0], 999999)
+            self.assertEqual((self.root / "guilds.json").read_bytes(), before)
+
+    def test_exact_ten_query_preload_and_initialization_refresh_membership(self):
+        gid = self.create()
+        ids = (2313, 4800, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810)
+        body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid)) for mid in ids)
+        rows = protocol.get_comb_messages(self.success(1, 999900, raw=body))
+        self.assertEqual([mid for mid, _ in rows], list(ids))
+        self.assertEqual(dict(rows)[2230], self.success(1, 2230))
+        initial = next(f for f in replay.load_recordings(ROOT / "recorded_frames.json")
+                       if f["c2s"] and f["opcode"] == 999900 and 1001 in protocol.get_comb_ids(bytes.fromhex(f["hex"])))
+        rows = dict(protocol.get_comb_messages(self.success(1, 999900, raw=bytes.fromhex(initial["hex"]))))
+        self.assertEqual(rows[2230], self.success(1, 2230))
+        self.assertEqual(self.guild_id(1), gid)
+        for invalid in (body + b"\x10\x01", body + body[:5], body.replace(b"\x0a\x03\x08\xb6\x11", b"\x0a\x05\x08\xb6\x11\x18\x01")):
+            self.assertEqual(self.request(1, 999900, raw=invalid)[0][0], 999999)
+
+    def test_failed_creation_save_and_publish_recover_without_free_guild_or_double_charge(self):
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 2231, text="未扣款")
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"], 10000)
+        self.assertEqual(self.guild_id(1), 0)
+        original = storage.atomic_write
+
+        def fail_publish(path, raw):
+            state = json.loads(raw) if Path(path).name == "guilds.json" else {}
+            if state.get("guilds") and not any(g.get("pending") for g in state["guilds"].values()):
+                raise OSError("publish failed")
+            return original(path, raw)
+
+        with patch.object(storage, "atomic_write", side_effect=fail_publish), self.assertRaises(OSError):
+            self.request(1, 2231, text="已扣款待恢复")
+        self.store.close_session(1)
+        self.sessions[1] = self.store.open_session(1, PASSWORD, ("reconnect", 1))
+        self.assertGreater(self.guild_id(1), 0)
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"], 9000)
+
+    def test_concurrent_duplicate_names_and_corrupt_journal_fail_closed(self):
+        barrier = threading.Barrier(2)
+        result = []
+        def create(account):
+            barrier.wait(5)
+            result.append(self.request(account, 2231, text="同名公会")[0][0])
+        threads = [threading.Thread(target=create, args=(a,)) for a in (1, 2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+            self.assertFalse(t.is_alive())
+        self.assertCountEqual(result, [2231, 999999])
+        self.assertEqual(sum(self.store.snapshot(a)["save"]["role_state"]["gold"] for a in (1, 2)), 19000)
+        (self.root / "guilds.json").write_text('{"guilds": null}')
+        self.assertEqual(self.request(3, 2231, text="损坏时不得创建")[0][0], 999999)
+        self.assertEqual(self.sessions[3].save["role_state"]["gold"], 10000)
+
+    def test_creation_cost_and_failed_draft_preserve_pending_applications(self):
+        gid = self.create()
+        self.success(2, 2233, values=[gid])
+        data = self.sessions[2].save
+        data["role_snapshot"] = protocol.pb_set_varint(bytes.fromhex(data["role_snapshot"]), 22, self.now - 3600).hex()
+        self.sessions[2].save["role_state"]["gold"] = 999
+        before = copy.deepcopy(self.sessions[2].save)
+        journal = (self.root / "guilds.json").read_bytes()
+        self.assertEqual(self.request(2, 2231, text="余额不足")[0][0], 999999)
+        self.assertEqual(self.sessions[2].save, before)
+        self.assertEqual((self.root / "guilds.json").read_bytes(), journal)
+        self.sessions[2].save["role_state"]["gold"] = 10000
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(2, 2231, text="失败草稿")
+        self.assertTrue(self.success(1, 2234))
+        packets = self.request(2, 2231, text="独立公会")
+        self.assertEqual([op for op, _ in packets[:2]], [2231, 1001])
+        self.assertEqual(protocol.pb_get_varint(packets[1][1], 9), 9000)
+        self.assertFalse(self.success(1, 2234))
+        self.assertEqual(self.sessions[2].save["activity_state"]["gold_spent"], 1000)
+
+    def test_parallel_approvals_cannot_join_two_guilds(self):
+        self.create(1, "第一公会")
+        self.create(2, "第二公会")
+        self.success(3, 2233, values=[0])
+        barrier, results = threading.Barrier(2), []
+        def approve(account):
+            barrier.wait(5)
+            results.append(self.request(account, 2235, values=[1000003, 0])[0][0])
+        threads = [threading.Thread(target=approve, args=(a,)) for a in (1, 2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+            self.assertFalse(t.is_alive())
+        self.assertCountEqual(results, [2235, 999999])
+        state = json.loads((self.root / "guilds.json").read_bytes())
+        self.assertEqual(sum("3" in g["members"] for g in state["guilds"].values()), 1)
+        self.assertFalse(self.success(1, 2234))
+        self.assertFalse(self.success(2, 2234))
+
+    def test_parallel_auto_join_respects_last_slot_and_failed_membership_write(self):
+        gid = self.create()
+        self.success(1, 2265, values=[1, 19])
+        original = (self.root / "guilds.json").read_bytes()
+        with patch.object(storage, "atomic_write", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.request(2, 2233, values=[gid])
+        self.assertEqual((self.root / "guilds.json").read_bytes(), original)
+        self.assertEqual(self.guild_id(2), 0)
+        barrier, results = threading.Barrier(2), []
+        def join(account):
+            barrier.wait(5)
+            results.append(self.request(account, 2233, values=[gid])[0][0])
+        threads = [threading.Thread(target=join, args=(a,)) for a in (2, 3)]
+        with patch.dict(CONFIG["gang2_level"]["1"], people=2):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+                self.assertFalse(t.is_alive())
+        self.assertCountEqual(results, [2233, 999999])
+
+    def test_corrupt_role_or_missing_guild_file_never_erases_membership(self):
+        self.create()
+        original = self.store.path(1).read_bytes()
+        journal = (self.root / "guilds.json").read_bytes()
+        for broken in ({}, {"has_role": True}, {**json.loads(original), "created_at": None},
+                       {**json.loads(original), "guild_creations": "invalid"}):
+            self.store.path(1).write_text(json.dumps(broken))
+            self.assertEqual(self.request(2, 2232)[0][0], 999999)
+            self.assertEqual((self.root / "guilds.json").read_bytes(), journal)
+        self.store.path(1).write_bytes(original)
+        (self.root / "guilds.json").unlink()
+        self.assertEqual(self.request(2, 2231, text="不能重置数据库")[0][0], 999999)
+        self.assertFalse((self.root / "guilds.json").exists())
+
+    def test_process_restart_and_recreated_leader_keep_other_members(self):
+        gid = self.create()
+        self.success(1, 2265, values=[1, 19])
+        self.success(2, 2233, values=[gid])
+        self.store.close_session(1)
+        self.maintain("reset", 1)
+        restarted = accounts.AccountStore(self.store.save_path, TABLES, COUNTS, CONFIG)
+        with patch.object(restarted, "authenticate", return_value=None):
+            self.sessions[2] = restarted.open_session(2, PASSWORD, ("restarted", 2))
+        self.assertEqual(self.guild_id(2), gid)
+        self.add_account(1)
+        self.assertEqual(self.guild_id(1), 0)
+        posts = protocol.parse_ids_pb(self.business_rows(self.success(2, 2236))[0])
+        own = protocol.pb_get_varint(bytes.fromhex(self.sessions[2].save["role_snapshot"]), 1)
+        self.assertEqual(posts, [own, 0, 0, 0])
+
+    def test_native_lua_callbacks_decode_guild_rows_and_charge_once(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("公会客户端回调验证需本机已有 lupa.lua51")
+        if not (ROOT / "z7_7_4.apk").exists():
+            self.skipTest("原始 APK 未提供")
+        from build_local_apk import read_script
+        lua = LuaRuntime()
+
+        def decode(kind, raw):
+            fields = list(protocol.iter_pb_fields(bytes.fromhex(raw)))
+            if kind == "Ids":
+                result = {"ids": [v for n, w, v in fields if (n, w) == (1, 0)]}
+            elif kind == "Result":
+                result = {"result": bool(dict((n, v) for n, w, v in fields)[1])}
+            elif kind == "ParamS":
+                result = {"params": [{"i" if w == 0 else "s": v if w == 0 else v.decode()
+                                      for n, w, v in protocol.iter_pb_fields(value)} for _, _, value in fields]}
+            elif kind == "CombMessages":
+                result = {"messages": [{"id": mid, "data": body.hex()} for mid, body in self.business_rows(bytes.fromhex(raw)).items()]}
+            else:
+                self.assertEqual(kind, "Players")
+                names = {1: "rid", 2: "name", 3: "level", 4: "vip", 5: "profile", 7: "param", 8: "params"}
+                result = {"players": [{names[n]: decode("ParamS", v.hex()) if n == 8 else v.decode() if n == 2 else v
+                                        for n, w, v in protocol.iter_pb_fields(value)} for _, _, value in fields]}
+            return lua.table_from(result, recursive=True)
+
+        lua.globals().decode = decode
+        lua.execute('''
+            print, printT, cclog = function() end, function() end, function() end
+            for mod,kind in pairs({ids_pb="Ids",result_pb="Result",params_pb="ParamS",combmessages_pb="CombMessages",
+                players_pb="Players",gangstatus_pb="GangStatus",gangbroadcasts_pb="GangBroadcasts",
+                stringcontent_pb="StringContent",gangs_pb="Gangs",gangmembers_pb="GangMembers",somethings_pb="SomeThings"}) do
+                local name=kind
+                package.preload[mod]=function() return {[name]=function() return {
+                    ParseFromString=function(self,raw) for k,v in pairs(decode(name,raw)) do self[k]=v end end} end} end
+            end
+            gamedata={ext={},cache={role={gold=10000,level=19},gang2status={}},
+                config={global_kv={gang_establish_coin={value="1000"}}},sortData=function() end}
+            function gamedata:updateRoleGold(value) self.cache.role.gold=self.cache.role.gold+value end
+            for _,mod in ipairs({"worldboss1_pb","worldboss1realnotify_pb","PickBattleResultReport"}) do
+                package.preload[mod]=function() return {} end
+            end
+        ''')
+        source = read_script("gamedata").decode()
+        lua.execute(source[source.index("function gamedata.Gang2Status("):source.index("function gamedata.gangData(")])
+        lua.execute(source[source.index("function gamedata.playerdata("):source.index("function gamedata.players(")])
+        lua.execute(read_script("GameGang").decode())
+
+        def callback(name, body):
+            return lua.globals()[name](lua.table_from({"rbuf": body.hex()}))
+
+        callback("NetUserGang2CallBack", self.success(1, 2230))
+        self.assertIsNone(lua.globals().gamedata.cache.gang2status.id)
+        packets = self.request(1, 2231, text="原生解析公会")
+        self.assertEqual(callback("NetUserGang2CreateCallBack", packets[0][1]).result, 0)
+        self.assertEqual(lua.globals().gamedata.cache.role.gold, protocol.pb_get_varint(packets[1][1], 9))
+        gid = self.guild_id(1)
+        callback("NetUserGang2CallBack", self.success(1, 2230))
+        self.assertEqual(lua.globals().gamedata.cache.gang2status.id, gid)
+        self.assertEqual(callback("NetUserGang2ListCallBack", self.success(2, 2232)).gangs[1].name, "原生解析公会")
+        self.assertEqual(len(callback("NetUserGang2SearchCallBack", self.success(2, 2243, text="不存在")).gangs), 0)
+        self.success(2, 2233, values=[gid])
+        applicants = callback("NetUserGang2ReqQueryCallBack", self.success(1, 2234)).players
+        self.assertEqual((applicants[1].rid, applicants[1].name, applicants[1].level), (1000002, "测试账号2", 19))
+        self.success(1, 2235, values=[1000002, 0])
+        result = callback("NetUserGang2MemberCallBack", self.success(1, 2236))
+        self.assertEqual(len(result.gangmembers), 2)
+        self.assertEqual(result.gangmembers[1].rid, result.gang2post.post1)
+        self.assertEqual(result.gangmembers[2].rid, 1000002)
+        self.success(2, 2242)
+        self.success(1, 2266)
+        callback("NetUserGang2CallBack", self.success(1, 2230))
+        self.assertIsNone(lua.globals().gamedata.cache.gang2status.id)
 
 
 class AccountMaintenanceTests(AdminFixture):

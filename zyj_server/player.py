@@ -64,7 +64,7 @@ def load_role_config(config_path):
                              "pet3_fragment", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
-                             "mystery_shop", "renascence", "redl_awake_item", *sign_tables))
+                             "mystery_shop", "renascence", "redl_awake_item", "gang2_level", *sign_tables))
 
 
 def get_default_save():
