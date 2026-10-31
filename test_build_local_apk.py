@@ -612,6 +612,44 @@ class LanBuildTests(unittest.TestCase):
             assert(login.type==9997 and login.local_login_failed)
         ''')
 
+    def test_protagonist_advance_original_client_parses_slots_and_deducts_cost_once(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("主角进阶客户端回调验证需本机已有 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            print=function() end
+            local function message()
+                return {ids={},SerializeToString=function(self) return self.ids end,
+                    ParseFromString=function(self,data) for k,v in pairs(data) do self[k]=v end end}
+            end
+            for _,name in ipairs({'role_pb','protagonist_pb','generals_pb'}) do package.preload[name]=function() return {} end end
+            package.preload.ids_pb=function() return {Ids=message} end
+            package.preload.slots_pb=function() return {SlotS=message} end
+            gamedata={ext={},cache={role={coin=1000000,gold=100},props={[20167]={num=10},[20161]={num=500}}},
+                config={protagonist_grow={['6']={atk_cost=20161}}}}
+            function gamedata.getIDandNUMs(spec)
+                assert(spec=='20167,10;1000,500000;')
+                return {{cid=20167,num=10},{cid=1000,num=500000}}
+            end
+            function gamedata:SlotInfoProcess(data) self.lastSlots=data;self.cache.protagonist=data.protagonist end
+            function gamedata:updateRoleCoin(n) self.cache.role.coin=self.cache.role.coin+n end
+            function gamedata:updateRoleGold(n) self.cache.role.gold=self.cache.role.gold+n end
+            function gamedata:updateprops(item) self.cache.props[item.cid].num=self.cache.props[item.cid].num+item.num end
+        ''')
+        lua.execute(builder.read_script("GameRole").decode("utf-8"))
+        lua.execute('''
+            local remote,opcode,body=UIUserProtagonist2GrowupCallBack({xstr='20167,10;1000,500000;'})
+            assert(remote==1 and opcode==1057 and #body==1 and body[1]==0)
+            local nextState={level2=5,atk_a=0,def_a=0,hp_a=0,train=2,general={cid=10128,iid=7059}}
+            local reply=NetUserProtagonist2GrowupCallBack({rbuf={protagonist=nextState,generals={nextState.general},slots={}}})
+            assert(reply.type==1057 and reply.protagonist==nextState and reply.xhasnum==500)
+            assert(gamedata.cache.role.coin==500000 and gamedata.cache.role.gold==100)
+            assert(gamedata.cache.props[20167].num==0 and gamedata.cache.role.profile==10128)
+            assert(gamedata.lastSlots.generals[1].iid==7059)
+        ''')
+
     def test_watchstar_original_client_parses_status_and_deducts_cost_once(self):
         try:
             from lupa.lua51 import LuaRuntime

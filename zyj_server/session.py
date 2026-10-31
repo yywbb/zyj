@@ -253,11 +253,13 @@ class Session:
             values = player.parse_prop_use(body)
             local_box = shop.openable_box(self.role_config["props"].get(str(values[0]), {}))
 
-        if sign_comb or break_comb or rob_comb or watch_comb or local_box or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        local_development = (opcode in development.MUTATIONS and (opcode != 1057
+                             or self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2))
+        if sign_comb or break_comb or rob_comb or watch_comb or local_box or local_development or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
                                   *watchstar.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
-                                  *development.MUTATIONS, *daily_events.CLAIMS,
+                                  *daily_events.CLAIMS,
                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)

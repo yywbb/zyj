@@ -1956,6 +1956,181 @@ class ReplayRoutingTests(unittest.TestCase):
         for key in ("world_state", "protagonist_snapshot", "role_state", "guide"):
             self.assertEqual(after[key], before[key])
 
+    def test_development_protagonist_advances_current_stage_and_reconnects(self):
+        self.seed_training_account()
+        self.give_props({20161: 1000})
+        for kind, count in ((1, 55), (2, 30), (3, 160)):
+            self.replay([self.activity_request(1055, [kind, count])])
+        before = json.loads(self.save_path.read_text())
+        old = bytes.fromhex(before["protagonist_snapshot"])
+        iid = protocol.pb_get_varint(old, 1)
+        previous = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)[iid]
+        preview = self.entity_records(self.query_world(1056), 1, 4)[3]
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(1057, 30002, b"\x08\x00")
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [1057, 205])
+            self.assertEqual(session.handle(1057, 30002, b"\x08\x00"), packets)
+            self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+        body = packets[0][16:]
+        changed = self.entity_records(body, 1, 2)[iid]
+        snapshot = next(v for n, w, v in protocol.iter_pb_fields(body) if (n, w) == (6, 2))
+        self.assertEqual(changed, preview)
+        self.assertEqual([protocol.pb_get_varint(snapshot, n) for n in (3, 4, 5, 6)], [3, 0, 0, 0])
+        self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(snapshot) if (n, w) == (10, 2)), changed)
+        for field, delta in ((6, 490), (7, 272), (8, 1406), (9, 0)):
+            self.assertEqual(protocol.pb_get_varint(changed, field), protocol.pb_get_varint(previous, field) + delta)
+        for field in (2, 3, 5, 17):
+            self.assertEqual(protocol.pb_get_varint(changed, field), protocol.pb_get_varint(previous, field))
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] - 50000)
+        self.assertEqual(after["world_state"]["1200"], before["world_state"]["1200"])
+        self.assertEqual(after["guide"], before["guide"])
+        self.assertEqual(self.query_world(1054), snapshot)
+        self.assertEqual(self.entity_records(self.query_world(1002), 1, 2)[iid], changed)
+        initial = self.replay([dict(self.by_seq[12], seq=30003)])[0]
+        self.assertEqual(self.entity_records(dict(protocol.get_comb_messages(bytes.fromhex(initial["hex"])))[1002], 1, 2)[iid], changed)
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(1057, [0])]), 1057, 20000, "培养")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_development_protagonist_advance_rejects_invalid_state_and_is_atomic(self):
+        self.seed_training_account()
+        self.give_props({20161: 1000})
+        for kind, count in ((1, 55), (2, 30), (3, 160)):
+            self.replay([self.activity_request(1055, [kind, count])])
+        ready = json.loads(self.save_path.read_text())
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            for body in (b"", b"\x08\x01", b"\x08\x00\x08\x00", b"\x10\x00", b"\x08\x00\x18\x00", b"\x08\x80"):
+                packets = session.handle(1057, 30004, body)
+                self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999999, 1999])
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+        for problem in ("training", "coin", "stage", "advanced", "shape", "attribute_overflow", "power_overflow"):
+            saved = copy.deepcopy(ready)
+            snapshot = bytes.fromhex(saved["protagonist_snapshot"])
+            raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[protocol.pb_get_varint(snapshot, 1)]
+            if problem == "training":
+                snapshot = protocol.pb_set_varint(snapshot, 4, 54)
+            elif problem == "coin":
+                saved["role_state"]["coin"] = 49999
+            elif problem == "stage":
+                snapshot = protocol.pb_set_varint(snapshot, 3, 23)
+            elif problem == "advanced":
+                raw = protocol.pb_set_varint(raw, 23, 1)
+            elif problem == "shape":
+                raw = protocol.pb_set_varint(raw, 1, 10111)
+            elif problem == "attribute_overflow":
+                raw = protocol.pb_set_varint(raw, 6, (1 << 31) - 1)
+            else:
+                saved["role_state"]["power_all"] = (1 << 31) - 1
+            saved["protagonist_snapshot"] = protocol.pb_set_field(snapshot, 10, 2, raw).hex()
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            self.save_path.write_text(json.dumps(saved))
+            with self.subTest(problem=problem), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                self.assertEqual(struct.unpack(">IIII", session.handle(1057, 30005, b"\x08\x00")[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+                self.assertEqual(struct.unpack(">IIII", session.handle(1054, 30006, b"")[0][:16])[2], 1054)
+        self.save_path.write_text(json.dumps(ready))
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1057, 30007, b"\x08\x00")
+            self.assertEqual((session.save, self.save_path.read_bytes(), session.random_replies), (memory, disk, {}))
+
+    def test_development_protagonist_advance_changes_shape_and_preserves_fashion(self):
+        saved = self.seed_training_account(coin=2000000)
+        saved["role_state"]["gold"] = 10000
+        self.save_path.write_text(json.dumps(saved))
+        self.give_props({20161: 10000})
+        self.replay([self.activity_request(1074, [80001]), self.activity_request(1073, [80001])])
+        for target in (3, 4, 5):
+            row = self.role_config["protagonist_grow"][str(target)]
+            for kind, name in ((1, "atk"), (2, "def"), (3, "hp")):
+                self.replay([self.activity_request(1055, [kind, row[name]])])
+            if target < 5:
+                self.assertEqual(self.replay([self.activity_request(1057, [0])])[0]["opcode"], 1057)
+        disk = self.save_path.read_bytes()
+        self.assert_unavailable_response(self.replay([self.activity_request(1057, [0])]), 1057, 20000, "20167")
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.give_props({20167: 10})
+        before = json.loads(self.save_path.read_text())
+        preview = self.entity_records(self.query_world(1056), 1, 4)[5]
+        packets = self.replay([self.activity_request(1057, [0])])
+        self.assertEqual(packets[0]["opcode"], 1057)
+        after = json.loads(self.save_path.read_text())
+        snapshot = bytes.fromhex(after["protagonist_snapshot"])
+        iid = protocol.pb_get_varint(snapshot, 1)
+        changed = self.entity_records(bytes.fromhex(after["world_state"]["1002"]), 1, 2)[iid]
+        self.assertEqual(protocol.pb_get_varint(changed, 1), 10128)
+        self.assertEqual(protocol.pb_set_varint(changed, 1, 10113), preview)
+        self.assertEqual(after["fashion_state"], before["fashion_state"])
+        self.assertEqual(protocol.pb_get_varint(snapshot, 7), 2)
+        self.assertEqual(after["role_state"]["profile"], 10128)
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] - 500000)
+        self.assertEqual(protocol.pb_get_varint(self.entity_records(self.query_world(1200), 1, 1).get(20167, b""), 2) or 0, 0)
+        slot = self.entity_records(bytes.fromhex(after["world_state"]["1002"]), 4, 2)[iid]
+        old_slot = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 4, 2)[iid]
+        self.assertEqual([v for n, w, v in protocol.iter_pb_fields(slot) if n != 3],
+                         [v for n, w, v in protocol.iter_pb_fields(old_slot) if n != 3])
+        self.replay([self.activity_request(1071)])
+        hidden = self.entity_records(self.query_world(1002), 1, 2)[iid]
+        self.assertEqual(hidden, protocol.pb_set_varint(changed, 1, 10113))
+        self.replay([self.activity_request(1071)])
+        self.assertEqual(self.entity_records(self.query_world(1002), 1, 2)[iid], changed)
+
+    def test_development_protagonist_growth_matches_recorded_first_advance(self):
+        self.replay_through(132)
+        saved = json.loads(self.save_path.read_text())
+        # 官方1055刚增加的1点培养在Protagonist里，不能用更早的世界快照作基线。
+        raw = next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(saved["protagonist_snapshot"])) if (n, w) == (10, 2))
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+        body, costs, update = development.prepare(1057, saved, b"\x08\x00", self.role_config)
+        self.assertEqual(costs, [(1000, 10000)])
+        self.assertEqual(body, update)
+        actual = self.entity_records(body, 1, 2)[7059]
+        expected = self.entity_records(bytes.fromhex(self.recorded[(133, 1057)]["hex"]), 1, 2)[7059]
+        for field in range(1, 20):
+            self.assertEqual(protocol.pb_get_varint(actual, field), protocol.pb_get_varint(expected, field), field)
+
+    def test_development_protagonist_all_ordinary_stages_and_choices_preserve_unknown_fields(self):
+        baseline = self.seed_training_account(coin=2000000000)
+        unknown = protocol.encode_pb_field(50, 2, b"keep")
+        for choice in (1, 2, 3):
+            saved = copy.deepcopy(baseline)
+            saved["selected_general_id"] = choice
+            snapshot = bytes.fromhex(saved["protagonist_snapshot"]) + unknown
+            iid = protocol.pb_get_varint(snapshot, 1)
+            raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[iid] + unknown
+            raw = protocol.pb_set_varint(raw, 1, self.role_config["protagonist_grow"]["2"][f"general{choice}"])
+            for cid in (20167, 20286):
+                player.change_item_count(saved, cid, 100000, self.role_config, self.now)
+            for target in range(3, 24):
+                with self.subTest(choice=choice, target=target):
+                    row = self.role_config["protagonist_grow"][str(target)]
+                    raw, _ = development.adjust(raw, {field: row[name] for field, name in ((6, "atk"), (7, "def"), (8, "hp"))})
+                    for field, name in ((4, "atk"), (5, "def"), (6, "hp")):
+                        snapshot = protocol.pb_set_varint(snapshot, field, row[name])
+                    saved["protagonist_snapshot"] = protocol.pb_set_field(snapshot, 10, 2, raw).hex()
+                    player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+                    preview, _, _ = development.prepare(1056, copy.deepcopy(saved), b"", self.role_config)
+                    expected = self.entity_records(preview, 1, 4)[target]
+                    reply = player.prepare_recorded_response(1057, b"", saved, b"\x08\x00", self.step_counts, self.role_config, self.now)
+                    changed = self.entity_records(reply, 1, 2)[iid]
+                    self.assertEqual(changed, expected)
+                    self.assertEqual(protocol.pb_get_varint(changed, 1), row[f"general{choice}"])
+                    self.assertTrue(changed.endswith(unknown))
+                    snapshot = bytes.fromhex(saved["protagonist_snapshot"])
+                    self.assertEqual([protocol.pb_get_varint(snapshot, n) for n in (3, 4, 5, 6)], [target, 0, 0, 0])
+                    self.assertIn((50, 2, b"keep"), list(protocol.iter_pb_fields(snapshot)))
+                    raw = changed
+            with self.assertRaisesRegex(ValueError, "高级进阶"):
+                development.prepare(1057, saved, b"\x08\x00", self.role_config)
+
     def seed_break_account(self):
         saved = self.seed_training_account()
         saved["role_state"]["level"] = 9

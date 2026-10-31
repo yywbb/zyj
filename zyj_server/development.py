@@ -1,10 +1,10 @@
-"""主角魔晶培养/预览与普通伙伴突破；在事务副本上准备属性和消耗。"""
+"""主角魔晶培养/进阶与普通伙伴突破；在事务副本上准备属性和消耗。"""
 
 from . import battle, formation
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 QUERIES = (1023, 1056)
-MUTATIONS = (1017, 1055)
+MUTATIONS = (1017, 1055, 1057)
 
 
 def ids(body):
@@ -29,6 +29,23 @@ def adjust(raw, changes):
     return pb_set_varint(raw, 20, power), increase
 
 
+def grow_protagonist(raw, row, cid, trained, slot, members, equips, config):
+    changed = pb_set_varint(pb_set_varint(raw, 1, cid), 4, row["level"])
+    previous, _ = formation.bonuses(raw, slot, members, equips, config)
+    current, relations = formation.bonuses(changed, slot, members, equips, config)
+    changes = {field: current[field] - previous[field] for field in current}
+    old, new = config["general"][str(pb_get_varint(raw, 1))], config["general"][str(cid)]
+    level = pb_get_varint(raw, 3)
+    for field, name in ((6, "atk"), (7, "def"), (8, "hp"), (9, "speed")):
+        changes[field] += (int(battle.general_base(new, name, level, 0, config))
+                           - int(battle.general_base(old, name, level, 0, config)) + row[f"{name}_grow"])
+        if field != 9:
+            # 已培养的属性留在总值里，进阶只补未培养部分与配置增量。
+            changes[field] += row[name] - trained.get(field, 0)
+    changed, increase = adjust(changed, changes)
+    return changed, increase, relations
+
+
 def prepare(opcode, save, body, config):
     values = ids(body)
     if not save.get("has_role"):
@@ -37,44 +54,76 @@ def prepare(opcode, save, body, config):
     generals = formation.records(world, 1, 2)
     slots = formation.records(world, 4, 2)
     costs, update, increase = [], b"", 0
-    if opcode in (1055, 1056):
+    if opcode in (1055, 1056, 1057):
         snapshot = bytes.fromhex(save.get("protagonist_snapshot", ""))
         iid, stage = pb_get_varint(snapshot, 1), pb_get_varint(snapshot, 3)
         if iid not in generals or stage is None:
             raise ValueError("主角状态缺失，请重新登录")
         raw = generals[iid]
         row = config["protagonist_grow"].get(str(stage + 1))
-        if opcode == 1056:
-            if values:
+        if opcode in (1056, 1057):
+            if opcode == 1056 and values:
                 raise ValueError("进阶预览不接受参数")
             choice = save.get("selected_general_id")
             if choice not in (1, 2, 3):
                 raise ValueError("主角选项未记录")
-            previews = []
-            # shortcut: 只预览普通形态至23阶；金将分支需飞升/觉醒业务后接入。
-            for target in range(stage + 1, 24):
-                grow = config["protagonist_grow"][str(target)]
-                changes = {field: grow[name] + grow[f"{name}_grow"]
-                           - ((pb_get_varint(snapshot, field - 2) or 0) if target == stage + 1 else 0)
-                           for field, name in ((6, "atk"), (7, "def"), (8, "hp"))}
-                changes[9] = grow["speed_grow"]
-                raw, _ = adjust(raw, changes)
-                raw = pb_set_varint(pb_set_varint(raw, 1, grow[f"general{choice}"]), 4, target)
-                previews.append(encode_pb_field(1, 2, raw))
-            return b"".join(previews), costs, update
-        if len(values) != 2 or values[0] not in (1, 2, 3) or not 1 <= values[1] <= 1000:
-            raise ValueError("魔晶培养需要属性类型和1–1000点数量")
-        kind, count = values
-        attribute = {1: "atk", 2: "def", 3: "hp"}[kind]
-        trained = pb_get_varint(snapshot, kind + 3) or 0
-        if not row or trained + count > row[attribute] or row[f"{attribute}_cost"] <= 0:
-            raise ValueError("已超过本阶培养上限")
-        costs = [(row[f"{attribute}_cost"], count * row[f"{attribute}_stone"])]
-        raw, increase = adjust(raw, {kind + 5: count})
-        snapshot = pb_set_varint(snapshot, kind + 3, trained + count)
-        reply = pb_set_field(snapshot, 10, 2, raw)
-        save["protagonist_snapshot"] = reply.hex()
-        update = encode_pb_field(1, 2, raw) + encode_pb_field(6, 2, reply)
+            trained = {field: pb_get_varint(snapshot, field - 2) or 0 for field in (6, 7, 8)}
+            equips = formation.records(world, 2, 1)
+            members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
+            if opcode == 1056:
+                previews = []
+                for target in range(stage + 1, 24):
+                    grow = config["protagonist_grow"][str(target)]
+                    raw, _, _ = grow_protagonist(raw, grow, grow[f"general{choice}"], trained,
+                                                 slots.get(iid, b""), members, equips, config)
+                    trained = {}
+                    previews.append(encode_pb_field(1, 2, raw))
+                return b"".join(previews), costs, update
+            if values != [0]:
+                raise ValueError("普通主角进阶只接受方式0")
+            # shortcut: 普通进阶至23阶；金将分支需飞升/觉醒业务后接入。
+            if (not 1 <= stage < 23 or not row or row["soaring_limit"] or row["game_limit"]
+                    or any(pb_get_varint(raw, n) for n in range(21, 41))
+                    or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
+                raise ValueError("尚不支持此主角的高级进阶")
+            if any(trained[field] != row[name] for field, name in ((6, "atk"), (7, "def"), (8, "hp"))):
+                raise ValueError("请先完成本阶全部魔晶培养")
+            current = config["protagonist_grow"][str(stage)][f"general{choice}"]
+            cid = row[f"general{choice}"]
+            fashion = save.get("fashion_state", {})
+            if fashion.get("equipped") and fashion.get("show"):
+                coats = config["fashioncoat"][str(fashion["equipped"])]
+                if str(current) not in coats or str(cid) not in coats:
+                    raise ValueError("此主角进阶后的时装形态尚未支持")
+                current, cid = coats[str(current)]["coat_id"], coats[str(cid)]["coat_id"]
+            if pb_get_varint(raw, 1) != current:
+                raise ValueError("主角形态与当前进阶不一致，请重新登录")
+            raw, increase, relations = grow_protagonist(raw, row, cid, trained, slots.get(iid, b""), members, equips, config)
+            snapshot = pb_set_varint(snapshot, 3, stage + 1)
+            for field in (4, 5, 6):
+                snapshot = pb_set_varint(snapshot, field, 0)
+            costs = [tuple(map(int, entry.split(","))) for entry in row["consume"].split(";") if entry]
+            save["role_state"]["profile"] = cid
+        else:
+            if len(values) != 2 or values[0] not in (1, 2, 3) or not 1 <= values[1] <= 1000:
+                raise ValueError("魔晶培养需要属性类型和1–1000点数量")
+            kind, count = values
+            attribute = {1: "atk", 2: "def", 3: "hp"}[kind]
+            trained = pb_get_varint(snapshot, kind + 3) or 0
+            if not row or trained + count > row[attribute] or row[f"{attribute}_cost"] <= 0:
+                raise ValueError("已超过本阶培养上限")
+            costs = [(row[f"{attribute}_cost"], count * row[f"{attribute}_stone"])]
+            raw, increase = adjust(raw, {kind + 5: count})
+            snapshot = pb_set_varint(snapshot, kind + 3, trained + count)
+        protagonist = pb_set_field(snapshot, 10, 2, raw)
+        save["protagonist_snapshot"] = protagonist.hex()
+        update = encode_pb_field(1, 2, raw) + encode_pb_field(6, 2, protagonist)
+        reply = protagonist
+        if opcode == 1057:
+            if iid in slots:
+                slot = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(slots[iid]) if n != 3) + relations
+                update += encode_pb_field(4, 2, slot)
+            reply = update
     else:
         if save["role_state"]["level"] < config["build"]["52"]["level"]:
             raise ValueError("伙伴突破尚未解锁")
