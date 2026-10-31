@@ -3,7 +3,7 @@
 from fractions import Fraction
 import json
 
-from . import activities, battle, recharge
+from . import activities, battle, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields
 
 
@@ -179,7 +179,7 @@ def fight(save, opcode, body, config, now, seed):
         if cost > state["star"]:
             raise ValueError("Boss临时加成所需星数不足")
         apply_bonuses(attack, defense, bonus, selected, config)
-    report = battle.simulate(attack, defense, config, seed)
+    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config))
     condition = config["mieshendian_condition"][str(floor)]
     report["result"] = condition_met(report, condition)
     if not report["result"]:

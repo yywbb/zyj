@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, training, watchstar, welfare, world_boss
+from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -61,7 +61,7 @@ def load_role_config(config_path):
                              "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
                              "trump", "trump_gem", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
-                             "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "boss2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
+                             "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "pet3_illustrated", "trigger_gift2", "boss2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense", *sign_tables))
@@ -502,11 +502,17 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = online_rewards.prepare(opcode, save, request_body, role_config)
         if opcode == 2038:
             apply_reward(save, body, role_config, now)
+    elif opcode in timebag.OPCODES:
+        body = timebag.prepare(opcode, save, request_body, role_config, now, body)
+        if opcode == 2881:
+            apply_reward(save, body, role_config, now)
     elif opcode in pets.OPCODES:
         previous = pets.attributes(save, role_config)
         body, costs = pets.prepare(opcode, save, request_body, role_config)
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
+        if opcode == 1065:
+            apply_reward(save, body, role_config, now)
         changes = {field: int(value) - int(previous[field]) for field, value in pets.attributes(save, role_config).items()
                    if int(value) != int(previous[field])}
         if changes:
@@ -840,18 +846,26 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
+    if save.get("pet_gift_state") != before.get("pet_gift_state") and responses and responses[0]["opcode"] == 116:
+        packets.append(pack_frame(2882, 0, timebag.prepare(2880, save, b"", role_config, now)))
+    if responses and responses[0]["opcode"] in (1046, 1062, 1065):
+        for mid in (1040, 1044, 1047):
+            raw, _ = pets.prepare(mid, save, b"", role_config)
+            packets.append(pack_frame(mid, 0, raw))
+        packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
     if automatic_reward:
         for mid in WORLD_QUERY_IDS:
             if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
-    if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628):
+    if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
-    if responses and responses[0]["opcode"] in pets.MUTATIONS and save["world_state"]["1002"] != before["world_state"]["1002"]:
+    pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
+    if pet_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
                                                          *development.MUTATIONS, *pets.MUTATIONS) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
-    if local_update or break_comb:
+    if local_update or break_comb or pet_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
         if any(state[key] != previous[key] for key in ("power", "g_power", "power_all")):
             power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
@@ -895,7 +909,7 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
         attempts, location = 1, request_body
     attack, defense = battle.rosters(save, point, role_config)
     seed = random.getrandbits(64)
-    report = None if opcode == 1307 else battle.simulate(attack, defense, role_config, seed)
+    report = None if opcode == 1307 else battle.simulate(attack, defense, role_config, seed, attack_pet=pets.combat(save, role_config))
     if report is not None:
         report["meta"]["attack"]["n"] = save.get("role_name") or "主角"
         report["meta"]["defense"]["n"] = point["name"]

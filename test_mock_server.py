@@ -12,6 +12,7 @@ import tempfile
 import threading
 import socket
 import unittest
+import zipfile
 from unittest.mock import patch
 
 import mock_server as server
@@ -4632,7 +4633,7 @@ class ReplayRoutingTests(unittest.TestCase):
         units = {}
         for side, direct in (("attack", True), ("defense", False)):
             for pos, unit in report["b"]["init"][side].items():
-                meta = report["meta"][side]["g"][str(unit["i"])]
+                meta = report["meta"][side]["pet" if pos == "0" else "g"][str(unit["i"])]
                 units[direct, int(pos)] = {"hp": meta["h"], "maxhp": meta["j"], "ap": meta["ap"], "dizzy": False,
                                            "cover": meta.get("cover_d", 0)}
         for action in report["b"]["a"]:
@@ -5317,7 +5318,7 @@ class ReplayRoutingTests(unittest.TestCase):
             session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
             packets = session.handle(999900, 31013, self.pet_guide_body())
             self.assertEqual(session.handle(999900, 31013, self.pet_guide_body()), packets)
-        self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999900])
+        self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999900, 1027, 205])
         messages = protocol.get_comb_messages(packets[0][16:])
         self.assertEqual([mid for mid, _ in messages], [1049, 201])
         iid, cid, phase, update, collected = protocol.parse_ids_pb(messages[0][1])
@@ -5333,8 +5334,8 @@ class ReplayRoutingTests(unittest.TestCase):
             self.replay([{"opcode": 201, "seq": 31020 + step, "hex": (b"\x08\x3b" + protocol.encode_pb_field(2, 0, step)).hex()}])
         after = json.loads(self.save_path.read_text())
         self.assertEqual(after["guide"]["sections"]["59"]["status"], 2)
-        self.assertEqual(after["role_state"], before["role_state"])
-        self.assertEqual(after["world_state"]["1002"], before["world_state"]["1002"])
+        self.assertEqual(after["role_state"]["gold"], before["role_state"]["gold"])
+        self.assertGreater(after["role_state"]["power"], before["role_state"]["power"])
 
     def test_level21_pet_rejects_malformed_comb_and_unowned_or_locked_mutations(self):
         self.seed_level21_account()
@@ -5393,7 +5394,7 @@ class ReplayRoutingTests(unittest.TestCase):
         for state in ({"active": 1, "pets": [], "starter_claimed": False},
                       {"active": 0, "pets": [[5000001, 90001, 0, 1]] * 2, "starter_claimed": True},
                       {"active": 0, "pets": [], "starter_claimed": 1},
-                      {"active": 0, "pets": [[5000001, 90001, 1, 1]], "starter_claimed": True}):
+                      {"active": 0, "pets": [[5000001, 90001, 99, 1]], "starter_claimed": True}):
             self.save_path.write_text(json.dumps(dict(saved, pet_state=state)))
             disk = self.save_path.read_bytes()
             with redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
@@ -5407,6 +5408,371 @@ class ReplayRoutingTests(unittest.TestCase):
         iid = protocol.parse_ids_pb(bytes.fromhex(reply["hex"]))[0]
         self.replay([self.activity_request(1043, [iid])])
         return json.loads(self.save_path.read_text())
+
+    def test_pet_reentry_gift_trigger_is_persistent_and_never_grants_free_items(self):
+        before = self.seed_level21_pet()
+        self.replay([{"opcode": 201, "seq": 31900, "hex": "083b1009"}])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            reply = session.handle(2882, 31901, bytes.fromhex("08dcf707"))
+            self.assertEqual(struct.unpack(">IIII", reply[0][:16])[2], 2882)
+            values = protocol.parse_ids_pb(reply[0][16:])
+            self.assertEqual(values[:2], [130012, 0])
+            started = session.save["pet_gift_state"]["triggered_at"]
+            self.assertEqual(session.save["world_state"], before["world_state"])
+            self.assertEqual(session.save["role_state"], before["role_state"])
+            later = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            later.handle(2882, 31902, bytes.fromhex("08dcf707"))
+            self.assertEqual(later.save["pet_gift_state"]["triggered_at"], started)
+            self.assertEqual(later.save["pet_state"], session.save["pet_state"])
+            disk, memory = self.save_path.read_bytes(), copy.deepcopy(later.save)
+            self.assertEqual(struct.unpack(">IIII", later.handle(2881, 31903, recharge.ids([130012]))[0][:16])[2], 999999)
+            self.assertEqual((later.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_pet_gift_payment_claim_and_expiration_are_atomic(self):
+        self.seed_level21_pet()
+        self.replay([{"opcode": 201, "seq": 31910, "hex": "083b1009"}])
+        self.replay([self.activity_request(2882, [130012])])
+        before = json.loads(self.save_path.read_text())
+        request = protocol.encode_pb_field(1, 2, recharge.ids([4])) + protocol.encode_pb_field(1, 2, recharge.ids([130012]))
+        order_reply = self.replay([{"opcode": 115, "seq": 31911, "hex": request.hex()}])[0]
+        order = protocol.pb_get_varint(next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(order_reply["hex"])) if (n, w) == (1, 2)), 1)
+        self.replay([self.activity_request(116, [order])])
+        paid = json.loads(self.save_path.read_text())
+        self.assertTrue(paid["pet_gift_state"]["paid"])
+        self.assertEqual(paid["role_state"]["gold"], before["role_state"]["gold"])
+        self.assertEqual(paid["recharge_state"]["bought"], before["recharge_state"]["bought"])
+        self.replay([self.activity_request(116, [order])])
+        replies = self.replay([self.activity_request(2881, [130012])])
+        self.assertEqual(replies[0]["opcode"], 2881)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(pets.fragments(after, self.role_config)[91001], pets.fragments(before, self.role_config)[91001] + 20)
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2881, [130012])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_pet_advancement_and_collection_charge_config_and_restore_on_reconnect(self):
+        saved = self.seed_level21_pet()
+        self.give_props({91001: 100, 20166: 100})
+        before = json.loads(self.save_path.read_text())
+        reply = self.replay([self.activity_request(1046, [5000001])])
+        self.assertEqual(reply[0]["opcode"], 1046)
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(reply[0]["hex"]))[3:23:4], [0] * 5)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["pet_state"]["pets"][0][2], 1)
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] - 100000)
+        self.assertEqual(pets.fragments(after, self.role_config)[91001], 95)
+        self.assertEqual(pets.skill_slots(after["pet_state"], self.role_config), 3)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1040))[3:], [1, 1])
+        # 图鉴第一笔要求39级，不能只凭足够材料放行。
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1062, [5000001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        after["role_state"]["level"] = 39
+        self.save_path.write_text(json.dumps(after))
+        reply = self.replay([self.activity_request(1062, [5000001])])
+        self.assertEqual(reply[0]["opcode"], 1062)
+        result = json.loads(self.save_path.read_text())
+        self.assertEqual(result["pet_state"]["pets"][0][3], 2)
+        self.assertEqual(result["role_state"]["coin"], after["role_state"]["coin"] - 30000)
+        self.assertEqual(pets.fragments(result, self.role_config)[91001], 75)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1040))[-1], 2)
+        self.assertEqual(result["guide"], saved["guide"])
+
+    def test_pet_locked_reset_refunds_only_unlocked_points_and_bonuses(self):
+        self.seed_level21_pet()
+        with patch.object(player.random, "getrandbits", return_value=1):
+            for _ in range(3):
+                self.replay([self.activity_request(1048)])
+        before = json.loads(self.save_path.read_text())
+        first = before["pet_state"]["skills"][0]
+        self.replay([self.activity_request(1060, [1])])
+        locked = json.loads(self.save_path.read_text())
+        self.assertEqual(locked["pet_state"]["locks"], [1, 0, 0, 0, 0])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            result = session.handle(1061, 31920, b"")
+            self.assertEqual(session.handle(1061, 31920, b""), result)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["gold"], before["role_state"]["gold"] - 150)
+        self.assertEqual(after["pet_state"]["skills"], [first] + [[0, 0]] * 4)
+        self.assertEqual(after["pet_state"]["spent_points"], first[1])
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1061)])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.replay([self.activity_request(1060, [1])])
+        self.replay([self.activity_request(1061)])
+        final = json.loads(self.save_path.read_text())
+        self.assertEqual(final["pet_state"]["spent_points"], 0)
+        self.assertEqual(final["pet_state"]["skills"], [[0, 0]] * 5)
+        self.assertEqual(final["pet_state"]["locks"], [0] * 5)
+
+    def test_pet_quality_promotions_require_earned_points_and_reset_returns_them(self):
+        saved = self.seed_level21_pet()
+        saved["role_state"]["level"] = 150
+        # 测试专用已养成角色，旧外部记录不产生可退款收据。
+        saved["pet_state"]["pets"][0][2] = 26
+        saved["pet_state"].update(skills=[[92004, 3], [0, 0], [0, 0], [0, 0], [0, 0]], spent_points=3)
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1047))[:3], [147, 1, 1])
+        self.assertEqual(self.replay([self.activity_request(1064, [1])])[0]["opcode"], 1064)
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1047))[:3], [147, 0, 1])
+        self.replay([self.activity_request(1064, [1])])
+        final = json.loads(self.save_path.read_text())
+        self.assertEqual(final["pet_state"]["skills"][0], [92031, 3])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1047))[:3], [147, 0, 0])
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1064, [1])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.replay([self.activity_request(1061)])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1047))[:3], [150, 1, 1])
+
+    def test_pet_rebirth_refunds_receipt_once_and_keeps_owned_pet(self):
+        self.seed_level21_pet()
+        self.give_props({91001: 100, 20166: 100})
+        before = json.loads(self.save_path.read_text())
+        self.replay([self.activity_request(1046, [5000001])])
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1065, [5000001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.replay([self.activity_request(1043, [0])])
+        self.replay([self.activity_request(1065, [5000001])])
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["pet_state"]["pets"], [[5000001, 90001, 0, 1]])
+        self.assertEqual(after["pet_state"]["receipts"], {})
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"])
+        self.assertEqual(after["world_state"]["1200"], before["world_state"]["1200"])
+        self.assertEqual(after["role_state"]["gold"], before["role_state"]["gold"] - self.role_config["renascence"]["1"]["pet_reborn"])
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1065, [5000001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_pet_owned_stats_migrate_once_without_erasing_learned_skills(self):
+        saved = self.seed_level21_pet()
+        saved["pet_state"]["owned_stats"] = False
+        # 构造补丁前只有被动属性、没有图鉴/基础加成的旧档。
+        bonus = pets.attributes({**saved, "pet_state": {**saved["pet_state"], "owned_stats": True}}, self.role_config)
+        world = bytes.fromhex(saved["world_state"]["1002"])
+        units = self.entity_records(world, 1, 2)
+        for iid in self.entity_records(world, 4, 2):
+            if iid:
+                raw, _ = development.adjust(units[iid], {field: -int(n) for field, n in bonus.items()})
+                player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+                player.record_protagonist_general(saved, raw)
+        saved["pet_state"].update(skills=[[92010, 2], [92014, 1], [0, 0], [0, 0], [0, 0]], spent_points=3)
+        self.save_path.write_text(json.dumps(saved))
+        reply = self.replay([self.activity_request(1040)])
+        self.assertIn(1027, [r["opcode"] for r in reply])
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["pet_state"]["skills"], saved["pet_state"]["skills"])
+        self.assertEqual(after["pet_state"]["spent_points"], 3)
+        self.query_world(1040)
+        final = json.loads(self.save_path.read_text())
+        self.assertEqual(final["world_state"], after["world_state"])
+        self.assertEqual(final["role_state"], after["role_state"])
+
+    def test_pet_all_configured_phases_and_collection_levels_are_valid(self):
+        saved = self.seed_level21_account()
+        saved["role_state"]["level"] = 150
+        for row in self.role_config["pet3_fragment"].values():
+            player.change_item_count(saved, row["debris"], row["number"], self.role_config, self.now)
+            result, _ = pets.prepare(1049, saved, recharge.ids([row["debris"]]), self.role_config)
+            iid = protocol.parse_ids_pb(result)[0]
+            pet = next(p for p in saved["pet_state"]["pets"] if p[0] == iid)
+            while str(pet[2] + 1) in self.role_config["pet3_attr"][str(pet[1])]:
+                with self.subTest(cid=pet[1], phase=pet[2]):
+                    _, costs = pets.prepare(1046, saved, recharge.ids([iid]), self.role_config)
+                    self.assertTrue(all(n > 0 for _, n in costs))
+            while str(pet[3] + 1) in self.role_config["pet3_illustrated"][str(pet[1])]:
+                with self.subTest(cid=pet[1], collect=pet[3]):
+                    _, costs = pets.prepare(1062, saved, recharge.ids([iid]), self.role_config)
+                    self.assertTrue(all(n > 0 for _, n in costs))
+        self.assertEqual(len(saved["pet_state"]["pets"]), 7)
+        self.assertTrue(all(n >= 0 for n in pets.attributes(saved, self.role_config).values()))
+
+    def test_pet_battle_heals_lost_hp_and_does_not_change_its_inputs(self):
+        attack = {2: self.combat_unit(10201, hp=1000, atk=1, speed=100)}
+        defense = {2: self.combat_unit(10201, iid=2, hp=10000, atk=100, speed=200)}
+        pet = {"iid": 5000001, "cid": 90001, "phase": 0, "level": 1}
+        before = copy.deepcopy((attack, defense, pet))
+        report = battle.simulate(attack, defense, self.role_config, 1, attack_pet=pet)
+        self.assertEqual(report, battle.simulate(attack, defense, self.role_config, 1, attack_pet=pet))
+        self.assertEqual((attack, defense, pet), before)
+        actions = [a for a in report["b"]["a"] if a["s"].get("S") == 12801]
+        self.assertEqual(actions[0]["s"]["p"], [0])
+        self.assertEqual(actions[0]["e"][0]["m"]["m"], 0)
+        self.assertEqual(actions[1]["e"][0]["m"]["m"], -10)
+        self.assert_battle_report(report)
+
+    def test_pet_all_configured_active_skills_produce_consistent_reports(self):
+        for cid, rows in self.role_config["pet3_attr"].items():
+            checked = set()
+            for row in rows.values():
+                if row["skillid"] in checked:
+                    continue
+                checked.add(row["skillid"])
+                with self.subTest(cid=cid, phase=row["phase"], skill=row["skillid"]):
+                    attack = {pos: self.combat_unit(10201, iid=i, hp=5000, atk=100, speed=100) for i, pos in enumerate(battle.POSITIONS, 1)}
+                    defense = {pos: self.combat_unit(10201, iid=i + 10, hp=5000, atk=100, speed=100) for i, pos in enumerate(battle.POSITIONS, 1)}
+                    pet = {"iid": 5000001, "cid": int(cid), "phase": row["phase"], "level": 1}
+                    report = battle.simulate(attack, defense, self.role_config, 3, attack_pet=pet)
+                    self.assertTrue(any(a["s"].get("S") == row["skillid"] for a in report["b"]["a"]))
+                    self.assert_battle_report(report)
+
+    def test_pet_battle_buff_debuff_and_damage_use_real_targets(self):
+        for cid, expected in ((90002, 90), (90003, 119)):
+            with self.subTest(cid=cid):
+                attack = {2: self.combat_unit(10201, atk=200, hp=10000, speed=200, **{"def": 100})}
+                defense = {2: self.combat_unit(10201, iid=2, atk=200, hp=10000, speed=100, **{"def": 100})}
+                report = battle.simulate(attack, defense, self.role_config, 1,
+                                        attack_pet={"iid": 5000001, "cid": cid, "phase": 0, "level": 1})
+                first = next(a for a in report["b"]["a"] if a["s"].get("p") == [2] and a["s"]["r"] == (cid == 90003))
+                self.assertEqual(first["e"][0]["m"]["m"], expected)
+                self.assert_battle_report(report)
+        with patch.object(battle.random.Random, "random", return_value=0):
+            report = battle.simulate({2: self.combat_unit(10201, atk=200)}, {2: self.combat_unit(10201, iid=2, hp=1000)},
+                                    self.role_config, 1, attack_pet={"iid": 5000001, "cid": 90008, "phase": 0, "level": 1})
+        self.assertEqual(report["b"]["a"][0]["s"]["p"], [0])
+        self.assertEqual(report["b"]["a"][0]["e"][0]["m"]["m"], 400)
+        self.assert_battle_report(report)
+
+    def test_pet_reports_convert_using_real_apk_animations(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("魔宠战报播放转换需本机已有 lupa.lua51")
+        package = Path(server.BASE_DIR) / "zyj_local.apk"
+        if not package.exists():
+            self.skipTest("魔宠动画验证需要本地APK")
+        with patch.object(apk_builder, "SRC_APK", str(package)):
+            converter = apk_builder.read_script("battleReportConvert").decode("utf-8")
+            abbreviations = apk_builder.read_script("BattleReportAbbToKey").decode("utf-8")
+        config = dict(self.role_config)
+        with zipfile.ZipFile(Path(server.BASE_DIR) / "configs_sec5.zip") as archive:
+            for name in ("generalanimation", "skillanimation"):
+                config[name] = json.loads(archive.read("5/" + name + ".json"))
+        lua = LuaRuntime()
+        lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
+        lua.execute('''print=function() end;printT=print
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            CCFileUtils={sharedFileUtils=function(self) return self end,fullPathForFilename=function(self,p) return p end}
+            ui={Split=function(s,sep) local t={} for v in string.gmatch(s,'[^'..sep..']+') do t[#t+1]=v end return t end}''')
+        with zipfile.ZipFile(package) as archive:
+            assets = {}
+            def load_asset(path):
+                if path not in assets:
+                    matches = [n for n in archive.namelist() if n.endswith("/" + path)]
+                    self.assertEqual(len(matches), 1, path)
+                    assets[path] = json.loads(archive.read(matches[0]))
+                return lua.table_from(assets[path], recursive=True)
+            lua.globals().LoadJsonFileToTable = load_asset
+            lua.execute(converter)
+            lua.execute(abbreviations)
+            for cid, rows in config["pet3_attr"].items():
+                checked = set()
+                for row in rows.values():
+                    if row["skillid"] in checked:
+                        continue
+                    checked.add(row["skillid"])
+                    with self.subTest(cid=cid, skill=row["skillid"]):
+                        team = {pos: self.combat_unit(10201, iid=i, hp=5000, atk=100) for i, pos in enumerate(battle.POSITIONS, 1)}
+                        report = battle.simulate(team, team, config, 3,
+                            attack_pet={"iid": 5000001, "cid": int(cid), "phase": row["phase"], "level": 1})
+                        decoded = json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report)))
+                        native = lua.table_from(decoded, recursive=True)
+                        attack, defense = lua.globals().getBattleInitSlotInfo(native)
+                        animations, ext = lua.globals().convertBattleReportToAnimationSub(native, attack, defense)
+                        self.assertGreater(len(animations), 1)
+                        for side, key in (("attack", "atk"), ("defense", "def")):
+                            for pos, unit in report["endmeta"][side].items():
+                                self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
+
+    def test_pet_learning_points_accumulate_after_level21(self):
+        saved = self.seed_level21_pet()
+        saved["pet_state"].update(skills=[[92001, 10], [92005, 10], [0, 0], [0, 0], [0, 0]], spent_points=20)
+        for level in (21, 22, 39, 60, 150):
+            with self.subTest(level=level):
+                saved["role_state"]["level"] = level
+                self.assertEqual(protocol.parse_ids_pb(pets.skills(saved, saved["pet_state"], self.role_config))[0], level - 20)
+
+    def test_pet_new_transactions_save_failure_keeps_all_resources_and_progress(self):
+        saved = self.seed_level21_pet()
+        saved["role_state"].update(level=150, coin=2000000000, gold=2000000000)
+        for cid in (91001, 91004, 20166, 20390):
+            player.change_item_count(saved, cid, 100000, self.role_config, self.now)
+        saved["pet_state"]["pets"][0][2] = 26
+        saved["pet_state"].update(skills=[[92004, 2], [92010, 2], [0, 0], [0, 0], [0, 0]], spent_points=4)
+        pets.prepare(1049, saved, recharge.ids([91004]), self.role_config)
+        pets.prepare(1046, saved, recharge.ids([5000002]), self.role_config)
+        saved["guide"]["sections"]["59"] = {"status": 2, "step": 9, "steps": list(range(1, 10))}
+        self.save_path.write_text(json.dumps(saved))
+        for opcode, values in ((1046, [5000001]), (1060, [1]), (1061, []), (1062, [5000001]),
+                               (1064, [1]), (1065, [5000002]), (2882, [130012])):
+            with self.subTest(opcode=opcode), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                    session.handle(opcode, 31940, recharge.ids(values))
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_pet_new_mutations_reject_unowned_malformed_and_insufficient_resources(self):
+        self.seed_level21_pet()
+        self.give_props({91001: 100, 20166: 100})
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["coin"] = 0
+        self.save_path.write_text(json.dumps(saved))
+        cases = [(1046, recharge.ids([5000001])), (1046, recharge.ids([5000002])),
+                 (1062, recharge.ids([5000001])), (1064, recharge.ids([1])),
+                 (1060, recharge.ids([0])), (1065, recharge.ids([5000002])),
+                 (1065, recharge.ids([5000001, 5000001]))]
+        cases += [(op, recharge.ids([5000001]) + b"\x10\x00") for op in (1046, 1060, 1062, 1064, 1065)]
+        cases += [(op, recharge.ids([1])) for op in (1048, 1061, 1040, 1044, 1047)]
+        for opcode, body in cases:
+            with self.subTest(opcode=opcode, body=body.hex()), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                self.assertEqual(struct.unpack(">IIII", session.handle(opcode, 31950, body)[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_pet_gift_deadline_cannot_restart_on_reentry_or_clock_rollback(self):
+        self.seed_level21_pet()
+        self.replay([{"opcode": 201, "seq": 31960, "hex": "083b1009"}])
+        self.replay([self.activity_request(2882, [130012])])
+        before = json.loads(self.save_path.read_text())
+        start = before["pet_gift_state"]["triggered_at"]
+        deadline = start + self.role_config["trigger_gift2"]["130012"]["time"] * 60
+        with patch.object(player.time, "time", return_value=deadline):
+            reply = self.replay([self.activity_request(2882, [130012])])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(reply["hex"]))[1:], [(1 << 64) - 2, 0])
+        with patch.object(player.time, "time", return_value=start + 1):
+            reply = self.replay([self.activity_request(2882, [130012])])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(reply["hex"]))[1:], [(1 << 64) - 2, 0])
+        request = protocol.encode_pb_field(1, 2, recharge.ids([4])) + protocol.encode_pb_field(1, 2, recharge.ids([130012]))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([{"opcode": 115, "seq": 31961, "hex": request.hex()}])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        for values in ([130012, 130012], [130013], []):
+            self.assertEqual(self.replay([self.activity_request(2882, values)])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_pet_rebirth_rejects_unknown_history_and_skill_point_loss(self):
+        saved = self.seed_level21_pet()
+        saved["role_state"]["level"] = 150
+        saved["pet_state"].update(active=0, pets=[[5000001, 90001, 14, 1]])
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1065, [5000001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["pet_state"].update(skills=[[92025, 1], [0, 0], [0, 0], [0, 0], [0, 0]], spent_points=1,
+                                  receipts={"5000001": {"pet": [5000001, 90001, 14, 1], "costs": [[1000, 100000]]}})
+        self.save_path.write_text(json.dumps(saved))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1065, [5000001])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        saved["pet_state"]["receipts"]["5000001"]["pet"][2] = 13
+        self.save_path.write_text(json.dumps(saved))
+        with redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
+            Session(self.tables, self.save_path, self.step_counts, self.role_config)
 
     def test_level21_pet_study_spends_points_once_and_updates_current_generals(self):
         before = self.seed_level21_pet()
@@ -5513,15 +5879,17 @@ class ReplayRoutingTests(unittest.TestCase):
             self.skipTest("实际包内回调验证需要本地APK")
         with patch.object(apk_builder, "SRC_APK", str(package)):
             scripts = {name: apk_builder.read_script(name).decode("utf-8")
-                       for name in ("gamedata", "GameTech", "GameWorldBoss")}
+                       for name in ("gamedata", "GameTech", "GameWorldBoss", "GameTimeBag")}
         lua = LuaRuntime()
         def decode_message(kind, raw):
             data = bytes.fromhex(raw)
             if kind == "Ids":
-                values = {"ids": protocol.parse_ids_pb(data)}
+                values = {"ids": [v - (1 << 64) if v >= (1 << 63) else v for v in protocol.parse_ids_pb(data)]}
             elif kind == "IdNums":
                 values = {"idnums": [{"id": cid, "num": protocol.pb_get_varint(v, 2)}
-                                     for cid, v in self.entity_records(data, 1, 1).items()]}
+                                      for cid, v in self.entity_records(data, 1, 1).items()]}
+            elif kind == "Result":
+                values = {"result": bool(protocol.pb_get_varint(data, 1))}
             elif kind == "WorldBoss1":
                 values = {key: protocol.pb_get_varint(data, n) or 0 for n, key in
                           ((1, "status"), (2, "damage"), (3, "kill"), (4, "cd"), (7, "attackcount"),
@@ -5534,7 +5902,7 @@ class ReplayRoutingTests(unittest.TestCase):
         lua.execute('''
             print=function() end; printT=print; cclog=print
             require=function() return setmetatable({}, {__index=function(_,kind) return function()
-                return {ParseFromString=function(self,raw)
+                return {ids={},SerializeToString=function(self) return self.ids end,ParseFromString=function(self,raw)
                     for k,v in pairs(decode_message(kind,raw)) do self[k]=v end
                 end}
             end end}) end
@@ -5548,6 +5916,7 @@ class ReplayRoutingTests(unittest.TestCase):
             lua.execute(source[source.index("function gamedata." + start + "("):source.index("function gamedata." + end + "(")])
         lua.execute(scripts["GameTech"])
         lua.execute(scripts["GameWorldBoss"])
+        lua.execute(scripts["GameTimeBag"])
         self.seed_level21_account()
         self.give_props({91001: 10})
         for reply in self.replay([self.activity_request(1040)]):
@@ -5567,6 +5936,38 @@ class ReplayRoutingTests(unittest.TestCase):
         reply = self.replay([self.activity_request(1048)])[0]
         lua.globals().NetPetPassiveSkillStudyCallback(lua.table_from({"rbuf": reply["hex"]}))
         lua.execute('assert(gamedata.cache.petpassiveskill.nowskillpoint==20 and gamedata.cache.petpassiveskill.skill[1].cid>0)')
+        self.give_props({91001: 100, 20166: 100})
+        lua.execute('''gamedata.cache.petsfragment[91001].num=100
+            gamedata.cache.props={[20166]={num=100}}
+            gamedata.cache.role={coin=1000000,gold=200,level=21}
+            function gamedata:updateRoleCoin(n) self.cache.role.coin=self.cache.role.coin+n end
+            function gamedata:updateRoleGold(n) self.cache.role.gold=self.cache.role.gold+n end''')
+        lua.globals().gamedata.ext.petstageup = lua.table_from({"iid": iid, "spenddata": {
+            "1": {"cid": 91001, "num": 5}, "2": {"cid": 20166, "num": 30}, "3": {"cid": 1000, "num": 100000}}}, recursive=True)
+        reply = self.replay([self.activity_request(1046, [iid])])[0]
+        lua.globals().NetPetStageUpCallback(lua.table_from({"rbuf": reply["hex"]}))
+        lua.execute('''assert(gamedata.cache.petsdata.pets[gamedata.cache.petsdata.iid].level==1)
+            assert(gamedata.cache.role.coin==900000 and gamedata.cache.props[20166].num==70)
+            assert(gamedata.cache.petsfragment[91001].num==95 and gamedata.cache.petpassiveskill.skill[3].status==2)''')
+        for lock in (0, 1):
+            lua.globals().gamedata.ext.passiveSkillLock = lua.table_from({"id": 1, "lock": lock})
+            reply = self.replay([self.activity_request(1060, [1])])[0]
+            lua.globals().NetPetPassiveSkillLockCallback(lua.table_from({"rbuf": reply["hex"]}))
+            lua.execute(f'assert(gamedata.cache.petpassiveskill.skill[1].lock=={1 - lock})')
+        lua.globals().gamedata.ext.petPassiveSkillResetSpend = 50
+        reply = self.replay([self.activity_request(1061)])[0]
+        lua.globals().NetPetPassiveSkillResetCallback(lua.table_from({"rbuf": reply["hex"]}))
+        lua.execute('assert(gamedata.cache.petpassiveskill.nowskillpoint==21 and gamedata.cache.role.gold==150)')
+        lua.globals().gamedata.config = lua.table_from(self.role_config, recursive=True)
+        lua.globals().NetTimeBagCallback(lua.table_from({"rbuf": self.query_world(2880).hex()}))
+        lua.execute('''local net,opcode,ids=UITimeBagTrigCallBack({opt=1,sysID=49})
+            assert(net==1 and opcode==2882 and #ids==1 and ids[1]==130012)''')
+        self.replay([{"opcode": 201, "seq": 31970, "hex": "083b1009"}])
+        reply = self.replay([self.activity_request(2882, [130012])])[0]
+        lua.globals().NetTimeBagTrigCallBack(lua.table_from({"rbuf": reply["hex"]}))
+        lua.execute('''assert(gamedata.cache.timebag[130012].status==0)
+            local net,opcode=UITimeBagTrigCallBack({opt=1,sysID=49})
+            assert(net==0 and opcode==2882)''')
         for opcode, name in ((3400, "NetWorldBoss1QueryCallBack"), (3410, "NetWorldBoss2QueryCallBack"),
                              (3404, "NetWorldBoss1PreRankCallBack"), (3414, "NetWorldBoss2PreRankCallBack")):
             result = lua.globals()[name](lua.table_from({"rbuf": self.query_world(opcode).hex()}))

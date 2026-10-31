@@ -338,7 +338,7 @@ def targets(actor, enemies, skill, rng):
     raise ValueError(f"战斗 v2 尚不支持技能范围 {scope}")
 
 
-def simulate(attack, defense, config, seed):
+def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None):
     """不改变输入；同一输入/配置/seed 生成完全相同的行动及终局。"""
     teams = {True: copy.deepcopy(attack), False: copy.deepcopy(defense)}
     _prepare_teams(teams, config)
@@ -347,6 +347,7 @@ def simulate(attack, defense, config, seed):
               "dead_log": {"true": {}, "false": {}}, "rules": "zyj-v2", "seed": seed}
     actions = report["b"]["a"]
     pending_deaths = []
+    combat_pets = {True: copy.deepcopy(attack_pet), False: copy.deepcopy(defense_pet)}
     for direct, team in teams.items():
         side = "attack" if direct else "defense"
         meta, initial = {}, {}
@@ -360,6 +361,16 @@ def simulate(attack, defense, config, seed):
         report["meta"][side] = {"n": "本地玩家" if direct else next(iter(team.values())).get("name", "守关队伍"),
                                 "g": meta, "pet": {}, "cheer": []}
         report["b"]["init"][side] = initial
+        pet = combat_pets[direct]
+        if pet is not None:
+            row = config["pet3_attr"].get(str(pet["cid"]), {}).get(str(pet["phase"]))
+            if not row or str(row["skillid"]) not in config["combskill"] or pet["level"] < 1:
+                raise ValueError("魔宠战前数据无效")
+            pet["skill"] = row["skillid"]
+            report["meta"][side]["pet"][str(pet["iid"])] = {
+                "i": pet["iid"], "c": pet["cid"], "level1": pet["level"], "level2": pet["phase"],
+                "ap": row["ap"], "h": 1, "j": 1, "d": {"i": row["skillid"]}}
+            initial["0"] = {"i": pet["iid"], "o": False}
 
     def roll(chance):
         return chance > 0 and rng.random() < min(1, chance)
@@ -656,6 +667,63 @@ def simulate(attack, defense, config, seed):
                 event([change_hp(target, -amount)])
         return reactions
 
+    def pet_action(direct, pet):
+        skill = config["combskill"][str(pet["skill"])]
+        if not roll(Fraction(str(skill["trigger"]))):
+            return
+        friends = [u for _, u in sorted(teams[direct].items()) if u["hp"] > 0]
+        enemies = [u for _, u in sorted(teams[not direct].items()) if u["hp"] > 0]
+        cid, sid = pet["cid"], pet["skill"]
+        coefficient = Fraction(skill["atk-param"].split(";")[0].strip())
+        destinations = []
+        if cid == 90001:
+            selected = sorted(friends, key=lambda u: (u["hp"], u["pos"]))[:skill["randnum"]]
+            destinations = [change_hp(u, -int((u["maxhp"] - u["hp"]) * coefficient)) for u in selected]
+        else:
+            candidates = enemies if cid in (90003, 90005) else friends
+            if cid == 90008:
+                count = rng.randint(1 if sid == 12998 else 2, skill["randnum"]) if sid in (12998, 14032) else skill["randnum"]
+                selected = sorted(rng.sample(enemies, min(len(enemies), count)), key=lambda u: u["pos"])
+                average = sum(stat(u, "atk") for u in friends) // len(friends)
+                for target in selected:
+                    amount = damage({"atk": max(1, average)}, {**target, "def": stat(target, "def"), "hp": target["hp"] + target["cover_d"]},
+                                    config, sid, multiplier=target["in_multiplier"] * guard(target))
+                    destinations.append(change_hp(target, amount))
+                    if target["hp"] > 0 and sid != 12996:
+                        target["ap"] = max(0, target["ap"] - 2)
+                        destinations.append(dest(target, ap=target["ap"], E=True))
+                candidates = friends
+            front = cid in (90002, 90003)
+            preferred = [u for u in candidates if (u["pos"] < 8) == front]
+            other = [u for u in candidates if u not in preferred]
+            count = 3 if cid == 90008 else skill["randnum"]
+            if cid == 90008 and sid >= 14031:
+                count = 4
+            # 四目标金宠优先三后排一前排；不足时从其余存活位置补齐。
+            first = min(len(preferred), count, 3 if count == 4 else count)
+            selected = rng.sample(preferred, first)
+            selected += rng.sample(other, min(len(other), count - len(selected)))
+            remaining = [u for u in candidates if u not in selected]
+            selected += rng.sample(remaining, min(len(remaining), count - len(selected)))
+            selected.sort(key=lambda u: u["pos"])
+            attr = "def" if front else "atk"
+            kind = "weaken" if cid in (90003, 90005) else "promote"
+            for target in selected:
+                amount = Fraction(2, 5) if cid == 90008 else coefficient
+                target["buffs"][kind, attr] = (amount, round_number + 2)
+                destinations.append(dest(target, B={"R": attr, "u": kind, "w": True}))
+                if sid in (14029, 14030):
+                    target["buffs"]["promote", "critical"] = (Fraction(15 if sid == 14029 else 30, 100), round_number + 2)
+                    destinations.append(dest(target, B={"R": "critical", "u": "promote", "w": True}))
+            ap_count = {12936: 1, 12937: 2, 12939: 1, 12940: 2, 12941: 3, 14019: 2, 14020: 3,
+                        14021: 4, 14025: 2, 14026: 3, 14027: 4, 14028: 4, 14029: 4, 14030: 4,
+                        14023: 1, 14024: 2, 12996: 1, 12997: 2, 12998: 3, 14031: 4, 14032: 4, 14033: 4}.get(sid, 0)
+            for target in sorted(rng.sample(selected, min(len(selected), ap_count)), key=lambda u: u["pos"]):
+                target["ap"] = max(0, min(10, target["ap"] + (-2 if kind == "weaken" else 2)))
+                destinations.append(dest(target, ap=target["ap"], E=True))
+        event(destinations, {"r": direct, "p": [0], "t": "x", "S": sid})
+        deaths()
+
     round_number = 0
     for team in teams.values():
         for unit in team.values():
@@ -667,6 +735,11 @@ def simulate(attack, defense, config, seed):
     for round_number in range(1, MAX_ROUNDS + 1):
         if round_number > 1:
             event([])
+        if finished():
+            break
+        for direct, pet in combat_pets.items():
+            if pet is not None and not finished():
+                pet_action(direct, pet)
         order = sorted((u for team in teams.values() for u in team.values() if u["hp"] > 0),
                        key=lambda u: (-u["speed"], u["pos"], not u["direct"], u["iid"]))
         for actor in order:

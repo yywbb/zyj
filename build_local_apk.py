@@ -1179,6 +1179,27 @@ end
 end''' + code[end:]
     patched["assets/scripts/gamedata.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
+    code = read_script("window_devourSelect").decode("utf-8").replace("\r\n", "\n")
+    assert code.count('battleString = "已上阵"') == 1
+    code = code.replace('battleString = "已上阵"', 'battleString = "休息"')
+    marker = '''                    -- print("not...change==")
+                    gameWindows:closeWindow("devourSelect")'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '\n                    UIRequest({type = 1043, iid = 0})')
+    patched["assets/scripts/window_devourSelect.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_mochonglead").decode("utf-8").replace("\r\n", "\n")
+    marker = "function mochonglead.shiftPage(self, page)\n"
+    assert code.count(marker) == 1 and code.count("    local page = page or self.selectpage") == 1
+    code = code.replace("    local page = page or self.selectpage", "")
+    code = code.replace(marker, marker + '''    local page = page or self.selectpage
+    if (page == "shengji" or page == "jinjie") and (not self.allPetsData or self.allPetsData.iid == 0) then
+        runGamePrompt({msg = self.PromptString.notmochong})
+        return
+    end
+''')
+    patched["assets/scripts/Layer_mochonglead.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     code = read_script("Layer_activity").decode("utf-8").replace("\r\n", "\n")
     marker = "[57] = { request = 46111,"
     assert code.count(marker) == 1

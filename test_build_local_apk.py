@@ -333,6 +333,37 @@ class LanBuildTests(unittest.TestCase):
             end
         ''')
 
+    def test_pet_rest_control_is_packaged_and_empty_active_tabs_are_safe(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("魔宠按钮验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.execute('print=function() end;printT=print')
+        selection = scripts["assets/scripts/window_devourSelect.so"]
+        self.assertIn('battleString = "休息"', selection)
+        start = selection.index('            ccbDocumentControler.battleBtn:addHandleOfControlEvent(function()')
+        end = selection.index('end, CCControlEventTouchUpInside)', start) + len('end, CCControlEventTouchUpInside)')
+        lua.execute('''CCControlEventTouchUpInside=1
+            ccbDocumentControler={battleBtn={addHandleOfControlEvent=function(self,f) self.click=f end}}
+            gameWindows={closeWindow=function() closed=true end}
+            UIRequest=function(t) request=t end
+            celldata={iid=5000001};self={data={iid=5000001}}''')
+        lua.execute(selection[start:end])
+        lua.execute('ccbDocumentControler.battleBtn.click();assert(closed and request.type==1043 and request.iid==0)')
+        lua.execute('self.data.iid=0;request=nil;closed=false')
+        lua.execute('ccbDocumentControler.battleBtn.click();assert(closed and request.type==1043 and request.iid==5000001)')
+        lead = scripts["assets/scripts/Layer_mochonglead.so"]
+        start = lead.index('function mochonglead.shiftPage(self, page)')
+        end = lead.index('    print("mochonglead.shiftPage"', start)
+        lua.execute('mochonglead={};runGamePrompt=function(t) prompt=t.msg end\n' + lead[start:end] + '\nend')
+        lua.execute('''for _,page in ipairs({'shengji','jinjie'}) do
+            prompt=nil
+            mochonglead.shiftPage({selectpage=page,allPetsData={iid=0},PromptString={notmochong='resting'}},page)
+            assert(prompt=='resting')
+        end''')
+
     def test_campaign_sweep_uses_settled_attempts_not_stale_client_stamina(self):
         try:
             from lupa.lua51 import LuaRuntime

@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, blackmarket, daily_events, development, fashion, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, training, watchstar, welfare, world_boss
+from . import activities, blackmarket, daily_events, development, fashion, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -51,6 +51,7 @@ class Session:
         secret_shop.get_state(self.save, role_config)
         guild.daily_state(self.save)
         pets.get_state(self.save, role_config)
+        timebag.get_state(self.save)
         if self.save.get("has_role"):
             player.get_role_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
@@ -135,11 +136,11 @@ class Session:
         if opcode == 1401:
             return unavailable_response(opcode, seq, body, "本地服暂未开放此招募方式，请使用普通招募。")
 
-        if opcode in (1065, 5520, 8204):
+        if opcode in (5520, 8204):
             return unavailable_response(opcode, seq, body, "此高级养成没有完整消耗记录，安全保护：未扣款、未重生。")
 
         if opcode in pets.UNSUPPORTED:
-            return unavailable_response(opcode, seq, body, "本地魔宠暂开放合成、上阵与普通学习，其他养成尚未实现，未扣除资源。")
+            return unavailable_response(opcode, seq, body, "此接口属于旧版魔宠，当前版本请使用进阶、图鉴和技能页面，未扣除资源。")
 
         if opcode in (3401, 3411):
             return unavailable_response(opcode, seq, body, "本地屠龙暂只开放介绍页，世界Boss挑战与结算尚未实现，未扣除元宝。")
@@ -268,7 +269,7 @@ class Session:
         local_development = (opcode in development.MUTATIONS and (opcode != 1057
                              or self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2))
         if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
-                                  *pets.MUTATIONS,
+                                  *pets.MUTATIONS, *timebag.MUTATIONS,
                                   *watchstar.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
@@ -323,11 +324,11 @@ class Session:
 
         if opcode in (204, 300, 4016, 1304, 1350, *mieshendian.QUERIES, 1402, 2037, 2411, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
-                      *pets.QUERIES, *world_boss.QUERIES):
+                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900
-                                 for mid, data in get_comb_messages(bytes.fromhex(frame["hex"])) if mid == 300), b"") if opcode == 300 else b""
+                                 for mid, data in get_comb_messages(bytes.fromhex(frame["hex"])) if mid == opcode), b"") if opcode in (300, 2880) else b""
                 packets = player.prepare_recorded_responses(
                     seq, [{"opcode": opcode, "seq": seq, "hex": baseline.hex()}], working, body,
                     self.save_path, self.step_counts, self.role_config, self.connected_at)

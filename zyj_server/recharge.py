@@ -1,6 +1,6 @@
 """研究用本地模拟充值；订单确认即成功，永不调用支付渠道。"""
 
-from . import activities, daily_events, recruit, welfare
+from . import activities, daily_events, recruit, timebag, welfare
 from .protocol import encode_pb_field, iter_pb_fields
 
 
@@ -36,7 +36,7 @@ def get_state(save):
         if not isinstance(state.get(key), list) or any(type(v) is not int or v <= 0 for v in state[key]):
             raise ValueError("充值领取记录无效")
     if (type(state.setdefault("bagid", 0)) is not int
-            or not (state["bagid"] in (0, 2, 7, 8) or 190000 <= state["bagid"] < 192000)):
+            or not (state["bagid"] in (0, 2, 7, 8, timebag.PET_GIFT) or 190000 <= state["bagid"] < 192000)):
         raise ValueError("充值商品类型无效")
     if (not isinstance(state.get("card_days"), dict) or set(state["card_days"]) != {"1", "2"}
             or any(type(v) is not int or v < 0 for v in state["card_days"].values())):
@@ -64,7 +64,9 @@ def prepare(opcode, save, body, config, now):
         if bagid == 2 and (cid != config["chengzhangplan_money"]["1"]["recharge_id"]
                            or welfare.get_state(save)["growth_bought"]):
             raise ValueError("成长计划档位无效或已购买")
-        if bagid not in (0, 2):
+        if bagid == timebag.PET_GIFT:
+            timebag.validate_purchase(save, cid, config, now)
+        elif bagid not in (0, 2):
             daily_events.validate_purchase(save, cid, bagid, config, now)
         row = config["recharge"].get(str(cid))
         if not row or row["show"] != 1 or cid == 2 and state["forever"]:
@@ -92,7 +94,10 @@ def prepare(opcode, save, body, config, now):
             return recruit.build_reward(save, [], config)
         row = config["recharge"][str(state["cid"])]
         cid = row["id"]
-        if state["bagid"] not in (0, 2):
+        if state["bagid"] == timebag.PET_GIFT:
+            timebag.validate_purchase(save, cid, config, now)
+            timebag.get_state(save)["paid"] = True
+        elif state["bagid"] not in (0, 2):
             daily_events.validate_purchase(save, cid, state["bagid"], config, now)
         benefits = welfare.get_state(save)
         if state["bagid"] == 2:
