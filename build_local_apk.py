@@ -411,6 +411,65 @@ end
 ''' + code[end:]
 
 
+def patch_friend_copy_scripts():
+    code = read_script("ids_pb", "pb").decode("utf-8").replace("\r\n", "\n")
+    assert code.count("module('ids_pb')") == 1 and code.count("IDS.fields = {IDS_IDS_FIELD}") == 1
+    code = code.replace("module('ids_pb')", "module('localfriendcopy_pb')").replace(".Ids", ".LocalFriendCopyQuery")
+    code = code.replace('IDS.name = "Ids"', 'IDS.name = "LocalFriendCopyQuery"')
+    code = code.replace("IDS.fields = {IDS_IDS_FIELD}", '''local IDS_HELPERS_FIELD = protobuf.FieldDescriptor()
+IDS_HELPERS_FIELD.name = "local_helpers"
+IDS_HELPERS_FIELD.full_name = ".LocalFriendCopyQuery.local_helpers"
+IDS_HELPERS_FIELD.number = 2
+IDS_HELPERS_FIELD.index = 1
+IDS_HELPERS_FIELD.label = 1
+IDS_HELPERS_FIELD.has_default_value = false
+IDS_HELPERS_FIELD.default_value = ""
+IDS_HELPERS_FIELD.type = 12
+IDS_HELPERS_FIELD.cpp_type = 9
+IDS.fields = {IDS_IDS_FIELD, IDS_HELPERS_FIELD}''')
+    patched = {"localfriendcopy_pb": code}
+    code = read_script("GameFriendCopy").decode("utf-8").replace("\r\n", "\n")
+    marker = '\nlocal ids_pb = require("ids_pb")\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + 'local localfriendcopy_pb = require("localfriendcopy_pb")\nlocal friends_pb = require("friends_pb")\n')
+    marker = "    local friendcopyData = ids_pb.Ids()"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    local friendcopyData = localfriendcopy_pb.Ids()")
+    marker = "\n    gamedata:FriendCopies(friendcopyData)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''
+    gamedata.cache.localFriendCopyHelpers = {}
+    if friendcopyData.local_helpers ~= "" then
+        local helpers = friends_pb.Friends()
+        helpers:ParseFromString(friendcopyData.local_helpers)
+        for _,v in ipairs(helpers.friends) do
+            gamedata.cache.localFriendCopyHelpers[v.rid] = {
+                rid=v.rid, name=v.name, level=v.level, profile=v.profile, use=v.use,
+                title=gameConfig.defautTitleId, iconBox=gameConfig.defautIconBoxId,
+                params={{i=v.params.params[1].i}}
+            }
+        end
+    end
+''')
+    marker = "\n    local friends = table.copy(gamedata.cache.friends.friends)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "\n    local friends = table.copy(gamedata.cache.localFriendCopyHelpers or {})\n")
+    marker = "    gamedata.cache.friends.friends[gamedata.ext.friendcopyattack.help].use = 1"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    local helper = (gamedata.cache.localFriendCopyHelpers or {})[gamedata.ext.friendcopyattack.help]
+    if helper then helper.use = 1 end''')
+    patched["GameFriendCopy"] = code
+    code = read_script("window_friendCopy").decode("utf-8").replace("\r\n", "\n")
+    marker = "    ui.setLabelString(self.rootItems.des,nil,49)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '    ui.setLabelString(self.rootItems.des,"NPC助战每日一次；补空位，满阵临时替换末位伙伴",49)')
+    marker = '    ui.setLabelString(self.rootItems.buttontext1,gameConfig.strings:string_common("popups","addfr"),18)'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "\n    self.rootItems.button1:setVisible(false)")
+    patched["window_friendCopy"] = code
+    return patched
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -1252,6 +1311,9 @@ end"""
     patched["assets/scripts/Layer_activity.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched Layer_activity.so (query activities only when selected)")
 
+    for name, code in patch_friend_copy_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     return patched
 
 
@@ -1427,6 +1489,10 @@ def main(argv=None):
                 zout.writestr("assets/LocalGameServer.json", data)
 
             zout.writestr(item, data)
+
+        for filename, data in patched_lua.items():
+            if filename not in zin.namelist():
+                zout.writestr(filename, data)
 
         print("  [Config] Injecting offline JSON configs into APK assets...")
         count = 0

@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -45,7 +45,7 @@ def load_role_config(config_path):
     with zipfile.ZipFile(config_path) as archive:
         sign_tables = tuple(n[2:-5] for n in archive.namelist() if n.startswith("5/sign2_") and n.endswith(".json"))
     return configuration.load_tables(config_path,
-                            ("role_exp", "copy", "star_copy", "star_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
+                            ("role_exp", "copy", "star_copy", "star_map", "expedition2", "expedition_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
                              "begin7day", "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
@@ -569,6 +569,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     elif opcode == 1351:
         body, reward = star_copy.fight(save, request_body, role_config, now, random.getrandbits(64))
         apply_reward(save, reward, role_config, now)
+    elif opcode in (*friend_copy.QUERIES, *friend_copy.MUTATIONS):
+        body, reward = friend_copy.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode == 300:
         if request_body:
             raise ValueError("贵族状态查询不接受参数")
