@@ -116,6 +116,43 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn("if t.location == 0 then LoginScene:rememberLocalLogin() end", decrypted("assets/scripts/UILogin.so"))
         self.assertIn("LoginScene:failLocalLogin(t.msg, true)", decrypted("assets/scripts/UIErrorMessage.so"))
 
+    def test_guild_incense_queries_live_and_midnight_restores_buttons(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("公会上香回调验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        code = scripts["assets/scripts/GameGang.so"]
+        start = code.index("function UIUserGang2PrayQueryCallBack(uireq)")
+        end = code.index("function NetUserGang2PrayQueryCallBack(fd)", start)
+        lua = LuaRuntime()
+        lua.execute('gamedata={cache={gang2pray=3}}; cclog=function() end')
+        lua.execute(code[start:end])
+        self.assertEqual(lua.globals().UIUserGang2PrayQueryCallBack(lua.table()), (1, 2250, None))
+        self.assertIn("gamedata.cache.gang2status.totalcontribution+ids.ids[1]", code)
+        lua.execute('''
+            print=function() end
+            ui={addGray=function(_,button) button.gray=true end,removeGray=function(_,button) button.gray=false end,
+                setLabelString=function(label,text) label.text=text end}
+            gameConfig={strings={string_common=function() return "已贡献" end}}
+        ''')
+        layer = lua.execute(scripts["assets/scripts/Layer_guild2_shangxiang.so"])
+        lua.globals().layer = layer
+        lua.execute('''
+            layer.rootItems={}; layer.prayTitles={}
+            for _,name in ipairs({"first","second","third"}) do
+                layer.rootItems[name.."Btn"]={}; layer.rootItems[name.."Text"]={}
+                layer.prayTitles[name]="贡献"
+            end
+            layer:reloaddata({status=2})
+            assert(layer.rootItems.secondBtn.gray and layer.rootItems.secondText.text=="已贡献")
+            layer:reloaddata({status=0})
+            for _,name in ipairs({"first","second","third"}) do
+                assert(not layer.rootItems[name.."Btn"].gray)
+                assert(layer.rootItems[name.."Text"].text=="贡献")
+            end
+        ''')
+
     def test_local_rank_callbacks_preserve_ui_handoff_and_native_artifact_details(self):
         try:
             from lupa.lua51 import LuaRuntime

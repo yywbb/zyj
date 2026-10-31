@@ -739,6 +739,7 @@ end
         "GameSignIn": (("UISignIn2StatusCallBack", 3641), ("UILuxurySignInStatusCallBack", 3643)),
         "GameRecharge": (("UIVipStatusCallBack", 300), ("UIGrowPlan2CallBack", 7091)),
         "GameActivityMultipleRebate": (("UIMonthGrowQueryCallBack", 3680), ("UIMonthGrowWelfareQueryCallBack", 3682)),
+        "GameGang": (("UIUserGang2PrayQueryCallBack", 2250),),
     }
     for name, replacements in callbacks.items():
         code = read_script(name).decode("utf-8").replace("\r\n", "\n")
@@ -752,6 +753,10 @@ end
             marker = "    gamedata:Mammon(mammonData)"
             assert code.count(marker) == 1
             code = code.replace(marker, "    gamedata.cache.mammon = {}\n" + marker)
+        if name == "GameGang":
+            marker = "gamedata.cache.gang2status.totalcontribution+ids.ids[2]"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "gamedata.cache.gang2status.totalcontribution+ids.ids[1]")
         if name == "GameRecharge":
             start = code.index("function UIUserBuyCallBack(uireq)\n")
             end = code.index("\nfunction NetUserBuyCallBack(fd)", start)
@@ -772,6 +777,25 @@ end
             pos = code.index(marker, start) + len(marker)
             code = code[:pos] + "    gamedata.ext.isrechare = false\n" + code[pos:]
         patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_guild2_shangxiang").decode("utf-8").replace("\r\n", "\n")
+    marker = "    UIRequest({type = 2250})\n"
+    assert code.count(marker) == 2
+    code = code.replace(marker, '''    self.prayTitles = {}
+    for _,name in ipairs({"first", "second", "third"}) do
+        self.prayTitles[name] = self.rootItems[name.."Text"]:getString()
+    end
+''' + marker, 1)
+    marker = "    if tonumber(self.status) ~= 0 then"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    if tonumber(self.status) == 0 then
+        for _,name in ipairs({"first", "second", "third"}) do
+            ui.removeGray("CCControlButton", self.rootItems[name.."Btn"])
+            ui.setLabelString(self.rootItems[name.."Text"], self.prayTitles[name], 18)
+        end
+    end
+''' + marker)
+    patched["assets/scripts/Layer_guild2_shangxiang.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("window_buyPowerPop").decode("utf-8").replace("\r\n", "\n")
     marker = "function buy.open(self,touchPriority,data,callback)\n"

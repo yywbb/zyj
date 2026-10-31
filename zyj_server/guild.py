@@ -5,11 +5,12 @@ import math
 import re
 import secrets
 
-from . import storage
+from . import activities, storage
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
-OPCODES = (*range(2230, 2244), 2265, 2266, 2267)
+DAILY_OPCODES = (2250, 2251, 2260)
+OPCODES = (*range(2230, 2244), *DAILY_OPCODES, 2265, 2266, 2267)
 
 
 def ids(values):
@@ -55,7 +56,7 @@ def request_text(body, maximum, minimum=0):
 
 def load(path, saves):
     if not path.exists():
-        if any(s.get("guild_creations") for s in saves.values()):
+        if any(s.get("guild_creations") or daily_state(s)["receipt"] for s in saves.values()):
             raise ValueError("公会存档缺失，请恢复 guilds.json，不能重新创建空公会库")
         return {"version": 1, "next_id": 1, "checked_at": 0, "guilds": {}, "cooldowns": {}}
     try:
@@ -72,6 +73,7 @@ def validate_role(save):
         identity = save["created_at"]
         role = save["role_state"]
         receipts = save.get("guild_creations", [])
+        daily_state(save)
         if (type(identity) not in (float, int) or not math.isfinite(identity) or identity <= 0
                 or not isinstance(save["role_name"], str) or not isinstance(role, dict)
                 or not isinstance(receipts, list)
@@ -117,6 +119,7 @@ def validate(state):
         integer(row["created_at"])
         integer(row["auto"], 0, 1)
         integer(row["min_level"], 1, 120)
+        integer(row.get("experience", 0), high=(1 << 63) - 1)
         if not row["members"] or not isinstance(row["applications"], dict):
             raise ValueError("公会成员无效")
         posts = []
@@ -138,6 +141,15 @@ def validate(state):
             if (list(row["members"]) != [pending["account"]]
                     or not re.fullmatch(r"[a-f0-9]{32}", pending["token"])):
                 raise ValueError("公会创建收据无效")
+        if "pending_pray" in row:
+            pending = row["pending_pray"]
+            identity(pending["account"], pending)
+            integer(pending["exp"], 1)
+            if (pending["account"] not in row["members"]
+                    or pending["identity"] != row["members"][pending["account"]]["identity"]
+                    or not re.fullmatch(r"[a-f0-9]{32}", pending["token"])
+                    or row.get("experience", 0) + pending["exp"] >= (1 << 63)):
+                raise ValueError("公会上香收据无效")
     for account, cooldown in state["cooldowns"].items():
         identity(account, cooldown)
         integer(cooldown["left_at"])
@@ -158,6 +170,11 @@ def recover(state, saves):
                 del state["guilds"][gid]
                 continue
             del row["pending"]
+        pending = row.pop("pending_pray", None)
+        if pending:
+            saved = saves.get(int(pending["account"]), {})
+            if saved.get("created_at") == pending["identity"] and daily_state(saved)["receipt"] == pending["token"]:
+                row["experience"] = row.get("experience", 0) + pending["exp"]
         for group in (row["members"], row["applications"]):
             for account, entry in list(group.items()):
                 if saves.get(int(account), {}).get("created_at") != entry["identity"]:
@@ -198,23 +215,82 @@ def power(row, saves):
     return sum(saves[int(a)]["role_state"]["power"] for a in row["members"])
 
 
-def list_row(gid, row, viewer, saves):
+def progress(row, config):
+    level, exp = 1, row.get("experience", 0)
+    while str(level + 1) in config["gang2_level"] and exp >= config["gang2_level"][str(level)]["gang_exp"]:
+        exp -= config["gang2_level"][str(level)]["gang_exp"]
+        level += 1
+    return level, min(exp, config["gang2_level"][str(level)]["gang_exp"])
+
+
+def daily_state(save, now=None):
+    state = save.get("guild_daily_state", {"day": 0, "pray": 0, "claimed": False, "contribution": 0, "receipt": ""})
+    if (not isinstance(state, dict)
+            or any(type(state.get(k)) is not int or not 0 <= state[k] < (1 << 31) for k in ("day", "contribution"))
+            or type(state.get("pray")) is not int or not 0 <= state["pray"] <= 3
+            or type(state.get("claimed")) is not bool or not isinstance(state.get("receipt"), str)
+            or state["receipt"] and not re.fullmatch(r"[a-f0-9]{32}", state["receipt"])):
+        raise ValueError("公会日常存档无效")
+    state = dict(state)
+    if now is not None and (now + 28800) // 86400 > state["day"]:
+        state.update(day=(now + 28800) // 86400, pray=0, claimed=False)
+    return state
+
+
+def prepare_daily(opcode, body, state, save, viewer, config, now):
+    _, row = membership(state, viewer)
+    if row is None or not save.get("has_role") or save["role_state"]["level"] < config["build"]["28"]["level"]:
+        raise ValueError("请先加入已解锁的公会")
+    daily = daily_state(save, now)
+    save["guild_daily_state"] = daily
+    if opcode == 2251:
+        method, = request_ids(body, 1)
+        incense = config["gang2_incense"].get(str(method))
+        if not incense or daily["pray"]:
+            raise ValueError("上香档位无效或今日已贡献，请明日再来")
+        if method == 3 and not config["vip"][str(save["role_state"]["vip"])]["for_200"]:
+            raise ValueError("此档上香需要贵族3及以上")
+        cid, cost = map(int, incense["param"].rstrip(";").split(","))
+        contribution, exp = incense["contribution"], incense["gang_exp"]
+        if (cid not in (1000, 1001) or type(cost) is not int or not 0 < cost < (1 << 31)
+                or type(contribution) is not int or not 0 < contribution < (1 << 31)
+                or type(exp) is not int or not 0 < exp < (1 << 31)
+                or daily["contribution"] + contribution >= (1 << 31)):
+            raise ValueError("上香配置或贡献数量无效")
+        daily.update(pray=method, contribution=daily["contribution"] + contribution, receipt=secrets.token_hex(16))
+        row["pending_pray"] = {"account": str(viewer), "identity": save["created_at"], "token": daily["receipt"], "exp": exp}
+        return ids([contribution, exp, 0]), [(cid, cost)], b""
+    request_ids(body, 0)
+    if opcode == 2250:
+        return ids([daily["pray"]]), [], b""
+    if daily["claimed"]:
+        raise ValueError("今日公会奖励已领取，请明日再来")
+    level, _ = progress(row, config)
+    reward = activities.build_reward(save, config["gang2_level"][str(level)]["param"], config)
+    daily["claimed"] = True
+    return reward, [], reward
+
+
+def list_row(gid, row, viewer, saves, config):
     leader = next(a for a, m in row["members"].items() if m["post"] == 1)
-    return params([int(gid), row["name"], 1, len(row["members"]), saves[int(leader)]["role_name"],
+    return params([int(gid), row["name"], progress(row, config)[0], len(row["members"]), saves[int(leader)]["role_name"],
                    row["declaration"], power(row, saves), int(str(viewer) in row["applications"]), row["auto"], row["min_level"]])
 
 
-def status(state, viewer, saves):
+def status(state, viewer, saves, config, now):
     gid, row = membership(state, viewer)
     if row is None:
         cooldown = state["cooldowns"].get(str(viewer))
         return message(0, params([2, cooldown["left_at"]]) if cooldown else params([0, 0]))
-    return (message(1, params([int(gid), row["name"], 1, 0, row["content"], 0, 0, 0,
-                               row["declaration"], len(row["members"]), power(row, saves)]))
-            + message(2, ids([0, 0, row["members"][str(viewer)]["joined_at"], 0, 0, 0, 0, 0, 0, 0])))
+    level, exp = progress(row, config)
+    daily = daily_state(saves[viewer], now)
+    return (message(1, params([int(gid), row["name"], level, exp, row["content"], 0, 0, 0,
+                                row["declaration"], len(row["members"]), power(row, saves)]))
+            + message(2, ids([daily["contribution"], daily["contribution"], row["members"][str(viewer)]["joined_at"],
+                              int(daily["claimed"]), 0, 0, 0, 0, 0, 0])))
 
 
-def members(row, viewer, saves, online, now):
+def members(row, viewer, saves, online, now, config):
     posts = [0, 0, 0, 0]
     vice = 1
     result = b""
@@ -228,7 +304,9 @@ def members(row, viewer, saves, online, now):
             posts[vice], vice = rid, vice + 1
         raw = bytes.fromhex(save["role_snapshot"])
         secs = 0 if account in online else max(1, now - int(save.get("last_login", now)))
-        result += message(account, params([rid, save["role_name"], role["level"], role["power"], 0, 0, secs,
+        daily = daily_state(save, now)
+        today = config["gang2_incense"][str(daily["pray"])]["contribution"] if daily["pray"] else 0
+        result += message(account, params([rid, save["role_name"], role["level"], role["power"], daily["contribution"], today, secs,
                                           role["profile"], role["vip"], 0, 0,
                                           pb_get_varint(raw, 23) or 35001, pb_get_varint(raw, 24) or 35501]))
     return message(0, ids(posts)) + result
@@ -254,12 +332,13 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
     key, save = str(viewer), saves.get(viewer, {})
     if opcode == 2230:
         request_ids(body, 0)
-        return status(state, viewer, saves), 0
+        return status(state, viewer, saves, config, now), 0
     if not save.get("has_role") or save["role_state"]["level"] < config["build"]["28"]["level"]:
         raise ValueError("公会尚未解锁")
     gid, row = membership(state, viewer)
     kv = config["global_kv"]
-    capacity = config["gang2_level"]["1"]["people"]
+    def capacity(target):
+        return config["gang2_level"][str(progress(target, config)[0])]["people"]
 
     def eligible(account, target=None):
         data = saves[account]
@@ -269,7 +348,7 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
         if cooldown and now < cooldown["left_at"] + int(kv["gang_quit_limit"]["value"]):
             raise ValueError("退出公会后的冷却尚未结束")
         if target is not None:
-            if len(target["members"]) >= capacity:
+            if len(target["members"]) >= capacity(target):
                 raise ValueError("公会人数已满")
             if data["role_state"]["level"] < max(target["min_level"], config["build"]["28"]["level"]):
                 raise ValueError("等级未达到公会招募要求")
@@ -300,10 +379,10 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
         return ids([0]), int(kv["gang_establish_coin"]["value"])
     if opcode == 2232:
         request_ids(body, 0)
-        return b"".join(message(int(i), list_row(i, g, viewer, saves)) for i, g in sorted(state["guilds"].items(), key=lambda p: int(p[0]))), 0
+        return b"".join(message(int(i), list_row(i, g, viewer, saves, config)) for i, g in sorted(state["guilds"].items(), key=lambda p: int(p[0]))), 0
     if opcode == 2243:
         name = request_text(body, 12, 1)
-        return next((list_row(i, g, viewer, saves) for i, g in state["guilds"].items() if g["name"].casefold() == name.casefold()), b""), 0
+        return next((list_row(i, g, viewer, saves, config) for i, g in state["guilds"].items() if g["name"].casefold() == name.casefold()), b""), 0
     if opcode in (2233, 2267):
         target_id, = request_ids(body, 1)
         eligible(viewer)
@@ -318,7 +397,7 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
             return ids([0]), 0
         if target_id:
             eligible(viewer, targets[0])
-        targets = [g for g in targets if len(g["members"]) < capacity and save["role_state"]["level"] >= g["min_level"]]
+        targets = [g for g in targets if len(g["members"]) < capacity(g) and save["role_state"]["level"] >= g["min_level"]]
         for g in targets:
             if g["auto"]:
                 join(viewer, g)
@@ -334,7 +413,7 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
     post = row["members"][key]["post"]
     if opcode == 2236:
         request_ids(body, 0)
-        return members(row, viewer, saves, online, now), 0
+        return members(row, viewer, saves, online, now, config), 0
     if opcode == 2242:
         request_ids(body, 0)
         if post == 1:

@@ -343,6 +343,225 @@ class GuildTests(AdminFixture):
         own = protocol.pb_get_varint(bytes.fromhex(self.sessions[2].save["role_snapshot"]), 1)
         self.assertEqual(posts, [own, 0, 0, 0])
 
+    def test_guild_incense_prices_contribution_experience_and_native_reply_order(self):
+        gid = self.create()
+        self.success(1, 2265, values=[1, 19])
+        for account in (2, 3):
+            self.success(account, 2233, values=[gid])
+        for account, method, cid, amount in ((1, 1, 1000, 50000), (2, 2, 1001, 50), (3, 3, 1001, 200)):
+            save = self.sessions[account].save
+            save["role_state"].update(vip=3, coin=100000)
+            before = copy.deepcopy(save["role_state"])
+            self.assertEqual(protocol.parse_ids_pb(self.success(account, 2250)), [0])
+            packets = self.request(account, 2251, values=[method])
+            row = CONFIG["gang2_incense"][str(method)]
+            self.assertEqual([op for op, _ in packets[:2]], [2251, 1001])
+            self.assertEqual(protocol.parse_ids_pb(packets[0][1]), [row["contribution"], row["gang_exp"], 0])
+            field, number = ("coin", 8) if cid == 1000 else ("gold", 9)
+            self.assertEqual(protocol.pb_get_varint(packets[1][1], number), before[field] - amount)
+            saved = self.store.snapshot(account)["save"]
+            self.assertEqual(saved["role_state"][field], before[field] - amount)
+            self.assertEqual(saved["guild_daily_state"]["contribution"], row["contribution"])
+            self.assertEqual(protocol.parse_ids_pb(self.success(account, 2250)), [method])
+        journal = json.loads((self.root / "guilds.json").read_bytes())
+        self.assertEqual(journal["guilds"][str(gid)]["experience"], 510000)
+        for account, amount in ((1, 20000), (2, 40000), (3, 200000)):
+            status = self.business_rows(self.success(account, 2230))
+            self.assertEqual(protocol.parse_ids_pb(status[2])[:2], [amount, amount])
+
+    def test_guild_daily_reward_is_configured_atomic_and_once_after_reconnect(self):
+        self.create()
+        before = copy.deepcopy(self.sessions[1].save)
+        packets = self.request(1, 2260)
+        self.assertEqual([op for op, _ in packets[:2]], [2260, 1001])
+        self.assertTrue(packets[0][1])
+        current = self.store.snapshot(1)["save"]
+        for cid, amount in ((20256, 20), (20197, 2)):
+            def count(save):
+                return next((protocol.pb_get_varint(v, 2) for n, w, v in protocol.iter_pb_fields(bytes.fromhex(save["world_state"]["1200"]))
+                             if (n, w) == (1, 2) and protocol.pb_get_varint(v, 1) == cid), 0)
+            self.assertEqual(count(current) - count(before), amount)
+        self.assertEqual(protocol.parse_ids_pb(self.business_rows(self.success(1, 2230))[2])[3], 1)
+        self.store.close_session(1)
+        self.sessions[1] = self.store.open_session(1, PASSWORD, ("reconnect", 1))
+        original = self.store.path(1).read_bytes()
+        self.assertEqual(self.request(1, 2260)[0][0], 999999)
+        self.assertEqual(self.store.path(1).read_bytes(), original)
+
+    def test_guild_daily_invalid_locked_overflow_and_insufficient_funds_never_mutate(self):
+        self.assertEqual(self.request(1, 2260)[0][0], 999999)
+        self.assertEqual(self.request(1, 2250)[0][0], 999999)
+        self.create()
+        save = self.sessions[1].save
+        save["role_state"].update(coin=49999, gold=49, vip=2)
+        for op, values in ((2250, [1]), (2260, [1]), (2251, []), (2251, [0]), (2251, [4]), (2251, [1, 1]),
+                           (2251, [1]), (2251, [2]), (2251, [3])):
+            before = copy.deepcopy(save)
+            journal = (self.root / "guilds.json").read_bytes()
+            self.assertEqual(self.request(1, op, values=values)[0][0], 999999)
+            self.assertEqual(self.sessions[1].save, before)
+            self.assertEqual((self.root / "guilds.json").read_bytes(), journal)
+        self.success(1, 2250)
+        self.sessions[1].save["guild_daily_state"]["contribution"] = (1 << 31) - 1
+        self.sessions[1].save["role_state"]["coin"] = 100000
+        self.assertEqual(self.request(1, 2251, values=[1])[0][0], 999999)
+
+    def test_guild_daily_forward_midnight_rollback_and_switching_cannot_repeat(self):
+        gid = self.create()
+        self.create(2, "另一公会")
+        self.success(2, 2265, values=[1, 19])
+        self.success(1, 2251, values=[2])
+        self.success(1, 2260)
+        self.success(1, 2266)
+        self.clock.return_value += int(CONFIG["global_kv"]["gang_quit_limit"]["value"])
+        self.success(1, 2233, values=[self.guild_id(2)])
+        self.assertNotEqual(self.guild_id(1), gid)
+        self.assertEqual(self.request(1, 2251, values=[2])[0][0], 999999)
+        self.assertEqual(self.request(1, 2260)[0][0], 999999)
+        self.clock.return_value = ((self.now + 28800) // 86400 + 1) * 86400 - 28800
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2250)), [0])
+        self.success(1, 2251, values=[2])
+        self.success(1, 2260)
+        self.clock.return_value = self.now
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2250)), [2])
+        self.assertEqual(self.request(1, 2260)[0][0], 999999)
+
+    def test_guild_incense_save_and_publish_failures_recover_exactly_once(self):
+        gid = self.create()
+        self.success(1, 2250)
+        before = copy.deepcopy(self.sessions[1].save)
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 2251, values=[2])
+        self.assertEqual(self.sessions[1].save, before)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2250)), [0])
+        original = storage.atomic_write
+        def fail_publish(path, raw):
+            state = json.loads(raw) if Path(path).name == "guilds.json" else {}
+            row = state.get("guilds", {}).get(str(gid), {})
+            if row.get("experience") and "pending_pray" not in row:
+                raise OSError("publish failed")
+            return original(path, raw)
+        with patch.object(storage, "atomic_write", side_effect=fail_publish), self.assertRaises(OSError):
+            self.request(1, 2251, values=[2])
+        self.store.close_session(1)
+        self.sessions[1] = self.store.open_session(1, PASSWORD, ("restart", 1))
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2250)), [2])
+        for _ in range(2):
+            self.assertEqual(self.request(1, 2251, values=[2])[0][0], 999999)
+            self.success(1, 2230)
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"], before["role_state"]["gold"] - 50)
+        row = json.loads((self.root / "guilds.json").read_bytes())["guilds"][str(gid)]
+        self.assertEqual(row["experience"], 150000)
+        self.assertNotIn("pending_pray", row)
+        before = copy.deepcopy(self.sessions[1].save)
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 2260)
+        self.assertEqual(self.sessions[1].save, before)
+        self.success(1, 2260)
+
+    def test_guild_concurrent_incense_accumulates_shared_experience_and_level_rewards(self):
+        gid = self.create()
+        self.success(1, 2265, values=[1, 19])
+        self.success(2, 2233, values=[gid])
+        path = self.root / "guilds.json"
+        state = json.loads(path.read_bytes())
+        state["guilds"][str(gid)]["experience"] = CONFIG["gang2_level"]["1"]["gang_exp"] - 150000
+        path.write_text(json.dumps(state))
+        barrier, results = threading.Barrier(2), []
+        def pray(account):
+            barrier.wait(5)
+            results.append(self.request(account, 2251, values=[2])[0][0])
+        threads = [threading.Thread(target=pray, args=(a,)) for a in (1, 2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [2251, 2251])
+        status = self.business_rows(self.success(1, 2230))
+        values = [protocol.pb_get_varint(v, 1) for n, w, v in protocol.iter_pb_fields(status[1]) if (n, w) == (1, 2)]
+        self.assertEqual(values[2:4], [2, 150000])
+        reward = self.success(1, 2260)
+        props = next(v for n, w, v in protocol.iter_pb_fields(reward) if (n, w) == (5, 2))
+        self.assertEqual({protocol.pb_get_varint(v, 1): protocol.pb_get_varint(v, 2)
+                          for n, w, v in protocol.iter_pb_fields(props) if (n, w) == (1, 2)}, {20256: 30, 20197: 3})
+
+    def test_guild_corrupt_daily_state_or_pending_receipt_fail_closed(self):
+        self.create()
+        self.success(1, 2250)
+        path, journal = self.store.path(1), self.root / "guilds.json"
+        original, shared = path.read_bytes(), journal.read_bytes()
+        for key, value in (("day", True), ("pray", 4), ("claimed", 1), ("receipt", "bad"), ("contribution", -1)):
+            save = json.loads(original)
+            save["guild_daily_state"][key] = value
+            path.write_text(json.dumps(save))
+            self.assertEqual(self.request(2, 2232)[0][0], 999999)
+            self.assertEqual(journal.read_bytes(), shared)
+        path.write_bytes(original)
+        state = json.loads(shared)
+        state["guilds"]["1"]["pending_pray"] = {"account": "1", "identity": self.now, "token": "bad", "exp": 1}
+        journal.write_text(json.dumps(state))
+        self.assertEqual(self.request(1, 2251, values=[2])[0][0], 999999)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_guild_daily_reward_inventory_overflow_and_parallel_claims(self):
+        self.create()
+        save = self.sessions[1].save
+        initial = copy.deepcopy(save)
+        player.change_item_count(save, 20256, (1 << 31) - 1, CONFIG, self.now)
+        before = copy.deepcopy(save)
+        self.assertEqual(self.request(1, 2260)[0][0], 999999)
+        self.assertEqual(self.sessions[1].save, before)
+        self.sessions[1].save = initial
+        barrier, results = threading.Barrier(2), []
+        def claim():
+            barrier.wait(5)
+            results.append(self.request(1, 2260)[0][0])
+        threads = [threading.Thread(target=claim) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertCountEqual(results, [2260, 999999])
+
+    def test_guild_progress_membership_initialization_and_departed_donations(self):
+        gid = self.create()
+        self.success(1, 2265, values=[1, 19])
+        self.success(2, 2233, values=[gid])
+        self.success(2, 2251, values=[2])
+        other = self.store.path(2).read_bytes()
+        members = self.business_rows(self.success(1, 2236))
+        values = [protocol.pb_get_varint(v, 1) for n, w, v in protocol.iter_pb_fields(members[2]) if (n, w) == (1, 2)]
+        self.assertEqual(values[4:6], [40000, 40000])
+        self.assertEqual(self.store.path(2).read_bytes(), other)
+        self.success(2, 2242)
+        self.assertEqual(json.loads((self.root / "guilds.json").read_bytes())["guilds"][str(gid)]["experience"], 150000)
+        self.success(1, 2260)
+        self.clock.return_value += 86400
+        ids = (2313, 4800, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810)
+        body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid)) for mid in ids)
+        status = self.business_rows(dict(protocol.get_comb_messages(self.success(1, 999900, raw=body)))[2230])
+        self.assertEqual(protocol.parse_ids_pb(status[2])[3], 0)
+        self.assertEqual(self.store.path(2).read_bytes(), other)
+
+    def test_guild_max_level_uses_configured_daily_rewards_and_capacity(self):
+        gid = self.create()
+        path = self.root / "guilds.json"
+        state = json.loads(path.read_bytes())
+        state["guilds"][str(gid)]["experience"] = sum(row["gang_exp"] for row in CONFIG["gang2_level"].values()) + 300000
+        path.write_text(json.dumps(state))
+        status = self.business_rows(self.success(1, 2230))
+        values = [protocol.pb_get_varint(v, 1) for n, w, v in protocol.iter_pb_fields(status[1]) if (n, w) == (1, 2)]
+        self.assertEqual(values[2:4], [15, CONFIG["gang2_level"]["15"]["gang_exp"]])
+        reward = self.success(1, 2260)
+        props = next(v for n, w, v in protocol.iter_pb_fields(reward) if (n, w) == (5, 2))
+        self.assertEqual({protocol.pb_get_varint(v, 1): protocol.pb_get_varint(v, 2)
+                          for n, w, v in protocol.iter_pb_fields(props) if (n, w) == (1, 2)}, {20256: 170, 20199: 8, 20338: 8})
+        self.success(1, 2265, values=[1, 19])
+        with patch.dict(CONFIG["gang2_level"]["1"], people=1):
+            self.success(2, 2233, values=[gid])
+
     def test_native_lua_callbacks_decode_guild_rows_and_charge_once(self):
         try:
             from lupa.lua51 import LuaRuntime
@@ -364,6 +583,10 @@ class GuildTests(AdminFixture):
                                       for n, w, v in protocol.iter_pb_fields(value)} for _, _, value in fields]}
             elif kind == "CombMessages":
                 result = {"messages": [{"id": mid, "data": body.hex()} for mid, body in self.business_rows(bytes.fromhex(raw)).items()]}
+            elif kind == "SomeThings":
+                props = next(v for n, w, v in fields if (n, w) == (5, 2))
+                result = {"props": [{"cid": protocol.pb_get_varint(v, 1), "count": protocol.pb_get_varint(v, 2)}
+                                     for n, w, v in protocol.iter_pb_fields(props) if (n, w) == (1, 2)]}
             else:
                 self.assertEqual(kind, "Players")
                 names = {1: "rid", 2: "name", 3: "level", 4: "vip", 5: "profile", 7: "param", 8: "params"}
@@ -384,6 +607,8 @@ class GuildTests(AdminFixture):
             gamedata={ext={},cache={role={gold=10000,level=19},gang2status={}},
                 config={global_kv={gang_establish_coin={value="1000"}}},sortData=function() end}
             function gamedata:updateRoleGold(value) self.cache.role.gold=self.cache.role.gold+value end
+            function gamedata:updateRoleCoin(value) self.cache.role.coin=(self.cache.role.coin or 0)+value end
+            function gamedata:SomethingProcess(value) return value end
             for _,mod in ipairs({"worldboss1_pb","worldboss1realnotify_pb","PickBattleResultReport"}) do
                 package.preload[mod]=function() return {} end
             end
@@ -391,7 +616,11 @@ class GuildTests(AdminFixture):
         source = read_script("gamedata").decode()
         lua.execute(source[source.index("function gamedata.Gang2Status("):source.index("function gamedata.gangData(")])
         lua.execute(source[source.index("function gamedata.playerdata("):source.index("function gamedata.players(")])
-        lua.execute(read_script("GameGang").decode())
+        from build_local_apk import get_patched_lua_scripts, xxtea_decrypt, XXTEA_KEY
+        with redirect_stdout(io.StringIO()):
+            patched = get_patched_lua_scripts()
+        raw = xxtea_decrypt(patched["assets/scripts/GameGang.so"], XXTEA_KEY)
+        lua.execute(raw[:struct.unpack("<I", raw[-4:])[0]].decode())
 
         def callback(name, body):
             return lua.globals()[name](lua.table_from({"rbuf": body.hex()}))
@@ -414,6 +643,17 @@ class GuildTests(AdminFixture):
         self.assertEqual(len(result.gangmembers), 2)
         self.assertEqual(result.gangmembers[1].rid, result.gang2post.post1)
         self.assertEqual(result.gangmembers[2].rid, 1000002)
+        lua.execute('gamedata.ext.gonghuipraymethod=2; gamedata.ext.gonghuinextgold=50; gamedata.ext.gonghuinextconin=0')
+        packets = self.request(1, 2251, values=[2])
+        result = callback("NetUserGang2PrayCallBack", packets[0][1])
+        self.assertEqual((result.contribution, result.totalcontribution), (40000, 150000))
+        self.assertEqual(lua.globals().gamedata.cache.role.gold, protocol.pb_get_varint(packets[1][1], 9))
+        self.assertEqual(lua.globals().gamedata.cache.gang2status.totalcontribution, 40000)
+        callback("NetUserGang2CallBack", self.success(1, 2230))
+        self.assertEqual(lua.globals().gamedata.cache.gang2status.contribution, 40000)
+        reward = callback("NetUserGang2DailyRewardCallBack", self.success(1, 2260)).reward
+        self.assertEqual([(reward.props[i].cid, reward.props[i].count) for i in (1, 2)], [(20256, 20), (20197, 2)])
+        self.assertEqual(lua.globals().gamedata.cache.gang2status.rewardstatus, 1)
         self.success(2, 2242)
         self.success(1, 2266)
         callback("NetUserGang2CallBack", self.success(1, 2230))

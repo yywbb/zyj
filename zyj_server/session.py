@@ -49,6 +49,7 @@ class Session:
         resource_purchase.get_state(self.save)
         qiankun.get_state(self.save)
         secret_shop.get_state(self.save, role_config)
+        guild.daily_state(self.save)
         if self.save.get("has_role"):
             player.get_role_state(self.save, role_config)
         player.validate_stamina_clock(self.save)

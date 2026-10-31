@@ -152,6 +152,32 @@ class AccountStore:
                 guild.validate_role(session.save)
                 saves[account] = session.save
             now = max(int(time.time()), state["checked_at"])
+            if opcode in guild.DAILY_OPCODES:
+                working = copy.deepcopy(session.save)
+                reply, costs, reward = guild.prepare_daily(opcode, body, state, working, account, self.role_config, now)
+                online_rewards.settle(working, self.role_config, session.connected_at, now)
+                welfare.settle(working, now)
+                player.settle_stamina(working, self.role_config, now)
+                for cid, cost in costs:
+                    player.change_item_count(working, cid, -cost, self.role_config, now)
+                if reward:
+                    player.apply_reward(working, reward, self.role_config, now)
+                packets = [protocol.pack_frame(opcode, seq, reply)]
+                if opcode != 2250:
+                    packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
+                if opcode == 2251:
+                    state["checked_at"] = now
+                    # 先存上香草稿，角色扣费/贡献/次数/收据同存档；恢复后仅补一次公会经验。
+                    guild.write(path, state)
+                packets = player.save_response_group(packets, working, session.save, session.save_path,
+                                                     self.step_counts, self.role_config, now)
+                session.save = working
+                saves[account] = working
+                guild.recover(state, saves)
+                if state != before:
+                    state["checked_at"] = now
+                    guild.write(path, state)
+                return packets
             reply, cost = guild.prepare(opcode, body, state, saves, account, self.role_config, now, self.active)
             packets = [protocol.pack_frame(opcode, seq, reply)]
             if opcode == 2231:
