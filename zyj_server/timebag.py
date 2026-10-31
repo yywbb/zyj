@@ -60,7 +60,7 @@ def prepare(opcode, save, body, config, now, baseline=b""):
                 or save.get("guide", {}).get("sections", {}).get("59", {}).get("status") != 2):
             raise ValueError("魔宠引导完成后才能触发礼包")
         if not state["triggered_at"]:
-            state["triggered_at"] = max(now, state["checked_at"])
+            state["triggered_at"] = state["checked_at"] = max(now, state["checked_at"])
         return b"".join(encode_pb_field(1, 0, v & ((1 << 64) - 1)) for v in (PET_GIFT, *status(save, config, now)))
     if status(save, config, now)[0] != 1:
         raise ValueError("请先完成魔宠礼包的本地模拟付款，且不能重复领取")

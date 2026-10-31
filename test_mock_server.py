@@ -6122,6 +6122,7 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_pet_reentry_gift_trigger_is_persistent_and_never_grants_free_items(self):
         before = self.seed_level21_pet()
         self.replay([{"opcode": 201, "seq": 31900, "hex": "083b1009"}])
+        self.clock.return_value += 1
         with redirect_stdout(io.StringIO()):
             session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
             reply = session.handle(2882, 31901, bytes.fromhex("08dcf707"))
@@ -6129,15 +6130,40 @@ class ReplayRoutingTests(unittest.TestCase):
             values = protocol.parse_ids_pb(reply[0][16:])
             self.assertEqual(values[:2], [130012, 0])
             started = session.save["pet_gift_state"]["triggered_at"]
+            self.assertEqual(started, self.clock.return_value)
+            self.assertEqual(session.save["pet_gift_state"]["checked_at"], started)
             self.assertEqual(session.save["world_state"], before["world_state"])
             self.assertEqual(session.save["role_state"], before["role_state"])
+            self.clock.return_value += 30
             later = Session(self.tables, self.save_path, self.step_counts, self.role_config)
-            later.handle(2882, 31902, bytes.fromhex("08dcf707"))
+            reply = later.handle(2882, 31902, bytes.fromhex("08dcf707"))
+            self.assertEqual(protocol.parse_ids_pb(reply[0][16:]), [130012, 0, values[2] - 30])
             self.assertEqual(later.save["pet_gift_state"]["triggered_at"], started)
             self.assertEqual(later.save["pet_state"], session.save["pet_state"])
             disk, memory = self.save_path.read_bytes(), copy.deepcopy(later.save)
             self.assertEqual(struct.unpack(">IIII", later.handle(2881, 31903, recharge.ids([130012]))[0][:16])[2], 999999)
             self.assertEqual((later.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_pet_gift_first_trigger_without_query_or_after_clock_rollback(self):
+        self.seed_level21_pet()
+        self.replay([{"opcode": 201, "seq": 31900, "hex": "083b1009"}])
+        saved = json.loads(self.save_path.read_text())
+        self.clock.return_value = self.now + 30
+        for checked_at in (0, self.now + 60):
+            with self.subTest(checked_at=checked_at), redirect_stdout(io.StringIO()):
+                saved["pet_gift_state"] = {"triggered_at": 0, "checked_at": checked_at, "paid": False, "claimed": False}
+                self.save_path.write_text(json.dumps(saved))
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                reply = session.handle(2882, 31901, recharge.ids([130012]))
+                self.assertEqual(struct.unpack(">IIII", reply[0][:16])[2], 2882)
+                self.assertEqual(protocol.parse_ids_pb(reply[0][16:]),
+                                 [130012, 0, self.role_config["trigger_gift2"]["130012"]["time"] * 60])
+                start = max(self.clock.return_value, checked_at)
+                expected = {"triggered_at": start, "checked_at": start, "paid": False, "claimed": False}
+                self.assertEqual(session.save["pet_gift_state"], expected)
+                self.assertEqual(json.loads(self.save_path.read_text())["pet_gift_state"], expected)
+                for key in ("pet_state", "guide", "role_state", "world_state"):
+                    self.assertEqual(session.save[key], saved[key])
 
     def test_pet_gift_payment_claim_and_expiration_are_atomic(self):
         self.seed_level21_pet()
