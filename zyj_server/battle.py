@@ -4,6 +4,7 @@ import copy
 import random
 from fractions import Fraction
 
+from . import pets
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -75,6 +76,7 @@ def rosters(save, point, config):
     fields = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))
     generals = {pb_get_varint(v, 2): v for n, w, v in fields if n == 1 and w == 2}
     attack, defense = {}, {}
+    pet_bonus = pets.attributes(save, config)
     for n, w, slot in fields:
         if n != 4 or w != 2 or not pb_get_varint(slot, 2):
             continue
@@ -95,6 +97,8 @@ def rosters(save, point, config):
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
             raise ValueError("阵位或上阵武将重复")
         unit["skill"] = config["general"][str(unit["cid"])]["skillid"]
+        unit["pet_rates"] = {name: pet_bonus[field] - int(pet_bonus[field])
+                             for name, field in pets.ATTR_FIELDS.items() if name in ("dodge", "resilience", "arp")}
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")
@@ -395,7 +399,7 @@ def simulate(attack, defense, config, seed):
                 value += (unit.get(name, 0) if name in ("atk", "def", "speed") else 100) * amount * (1 if kind == "promote" else -1)
         if name in ("def", "resilience") and any(9000413 in u["effects"] and u["hp"] > 0 for u in teams[unit["direct"]].values()):
             value += unit["def"] * Fraction(1, 5) if name == "def" else 10
-        return max(0, int(value))
+        return max(0, int(value) + unit.get("pet_rates", {}).get(name, 0))
 
     def buff(unit, skill):
         attr, amount = skill["effect-param"].split(";")

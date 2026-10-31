@@ -2,7 +2,7 @@
 
 from fractions import Fraction
 
-from . import battle
+from . import battle, pets
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -139,10 +139,14 @@ def change(save, opcode, body, config):
     old_members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in before}
     new_members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in after}
     update = b""
+    pet_bonus = pets.attributes(save, config)
     for iid in sorted(before.keys() | after.keys()):
         raw = generals[iid]
         previous, _ = bonuses(raw, before.get(iid, b""), old_members, equips, config)
         current, relations = bonuses(raw, after.get(iid, b""), new_members, equips, config)
+        for field, value in pet_bonus.items():
+            previous[field] += int(value) if iid in before else 0
+            current[field] += int(value) if iid in after else 0
         power_delta = 0
         for field in range(6, 17):
             value = pb_get_varint(raw, field) or 0

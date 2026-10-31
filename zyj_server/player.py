@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, training, watchstar, welfare
+from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -61,7 +61,7 @@ def load_role_config(config_path):
                              "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
                              "trump", "trump_gem", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
-                             "pet3_fragment", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
+                             "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "boss2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense", *sign_tables))
@@ -502,6 +502,32 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = online_rewards.prepare(opcode, save, request_body, role_config)
         if opcode == 2038:
             apply_reward(save, body, role_config, now)
+    elif opcode in pets.OPCODES:
+        previous = pets.attributes(save, role_config)
+        body, costs = pets.prepare(opcode, save, request_body, role_config)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        changes = {field: int(value) - int(previous[field]) for field, value in pets.attributes(save, role_config).items()
+                   if int(value) != int(previous[field])}
+        if changes:
+            world = bytes.fromhex(save["world_state"]["1002"])
+            generals, slots = formation.records(world, 1, 2), formation.records(world, 4, 2)
+            update, increase = b"", 0
+            for iid in sorted(i for i in slots if i):
+                if iid not in generals:
+                    raise ValueError("上阵武将属性不存在")
+                raw, delta = development.adjust(generals[iid], changes)
+                record_protagonist_general(save, raw)
+                update += encode_pb_field(1, 2, raw)
+                increase += delta
+            record_slot_update(save, update)
+            for key in ("power", "power_all"):
+                save["role_state"][key] += increase
+                if not 0 <= save["role_state"][key] < (1 << 31):
+                    raise ValueError("魔宠技能增加后的战力超出范围")
+            record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
+    elif opcode in world_boss.QUERIES:
+        body = world_boss.query(opcode, save, request_body, role_config)
     elif opcode in welfare.OPCODES:
         body, costs = welfare.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
@@ -798,11 +824,17 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
     automatic_reward = b""
+    starter = pets.starter(save, role_config) if responses and responses[0]["opcode"] == 1040 and not request_body else 0
+    if starter:
+        change_item_count(save, 91001, starter, role_config, now)
     if responses and responses[0]["opcode"] in mieshendian.QUERIES:
         automatic_reward = mieshendian.finish_sweep(save, role_config, now)
         if automatic_reward:
             apply_reward(save, automatic_reward, role_config, now)
     packets = []
+    if starter:
+        fragments, _ = pets.prepare(1044, save, b"", role_config)
+        packets.append(pack_frame(1044, 0, fragments))
     for response in responses:
         opcode = response["opcode"]
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
@@ -814,8 +846,10 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
     if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
+    if responses and responses[0]["opcode"] in pets.MUTATIONS and save["world_state"]["1002"] != before["world_state"]["1002"]:
+        packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
-                                                         *development.MUTATIONS) and not responses[0]["hex"])
+                                                         *development.MUTATIONS, *pets.MUTATIONS) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb:
         state, previous = save["role_state"], get_role_state(before, role_config)
