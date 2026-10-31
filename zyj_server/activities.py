@@ -1,5 +1,7 @@
 """本地活动协议与领取条件；奖励入账和原子保存由 player 统一完成。"""
 
+import copy
+
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 PAGE_OPCODES = (4016, 4810, 4813, 4814, 5010, 5015, 5017, 5020, 5022, 5030, 5039)
@@ -8,6 +10,7 @@ UNSUPPORTED_OPCODES = (2081, 2082, 7092, 4017, 4811, 4812, 5011, 5012, 5013, 501
 OPCODES = (3610, 3611, 2410, 2411, 6517, 4600, *PAGE_OPCODES, *TRANSACTION_OPCODES)
 CLAIM_OPCODES = (3611, 2411, 5040)
 BEGIN_REWARDS = (*range(80001, 80015), 80030)
+LIVENESS_TASKS = (1, 3, 7, 8, 9, 11, 14, 16, 23, 37, 48)
 HINT_IDS = (40, *range(82, 110), 542, 30, 32, 36, 132, 245, 252, 429, 551)
 
 
@@ -15,7 +18,8 @@ def get_state(save):
     state = save.setdefault("activity_state", {})
     if not isinstance(state, dict):
         raise ValueError("activity_state 必须是对象")
-    for key, supported in (("begin7day_claimed", BEGIN_REWARDS), ("liveness_claimed", (16,)),
+    for key, supported in (("begin7day_claimed", BEGIN_REWARDS), ("liveness_claimed", tuple(t for t in LIVENESS_TASKS if t != 7)),
+                           ("liveness_boxes", range(1, 6)),
                            ("consume_claimed", range(1, 7))):
         values = state.setdefault(key, [])
         if (not isinstance(values, list) or any(type(v) is not int or v not in supported for v in values)
@@ -24,6 +28,14 @@ def get_state(save):
     count = state.setdefault("strengthen_count", 0)
     if type(count) is not int or not 0 <= count < (1 << 31):
         raise ValueError("活动强化进度无效")
+    for key in ("liveness_day", "liveness_week", "liveness_week_score"):
+        value = state.setdefault(key, 0)
+        if type(value) is not int or not 0 <= value < (1 << 31):
+            raise ValueError("日常任务周期或积分无效")
+    counts = state.setdefault("liveness_counts", {})
+    if (not isinstance(counts, dict) or any(key not in {str(t) for t in LIVENESS_TASKS if t not in (7, 16)}
+            or type(value) is not int or not 0 <= value < (1 << 31) for key, value in counts.items())):
+        raise ValueError("日常任务进度无效")
     # 兼容旧档：只承接已记录的本地充值，不从 VIP、元宝或官方录制推算。
     rmb = state.setdefault("begin7day_rmb", save.get("recharge_state", {}).get("rmb", 0))
     if type(rmb) is not int or not 0 <= rmb < (1 << 31):
@@ -37,6 +49,52 @@ def get_state(save):
                    or not 0 <= value < (1 << 31) for key, value in purchases.items())):
         raise ValueError("活动限购存档无效")
     return state
+
+
+def settle_liveness(save, config, now):
+    state = get_state(save)
+    if not save.get("has_role"):
+        return state
+    day = (now + 28800) // 86400
+    week = (day + 3) // 7
+    if not state["liveness_day"]:
+        # 旧强化记录无日期，首次接入保留进度和已领标记，不能再发一次奖励。
+        state.update(liveness_day=day, liveness_week=week,
+                     liveness_week_score=sum(config["liveness"][str(t)]["point"] for t in state["liveness_claimed"]))
+    if day > state["liveness_day"]:
+        state.update(liveness_day=day, liveness_counts={}, liveness_claimed=[], liveness_boxes=[], strengthen_count=0)
+    if week > state["liveness_week"]:
+        state.update(liveness_week=week, liveness_week_score=0)
+    return state
+
+
+def record_liveness(save, task, amount, config, now):
+    if not save.get("has_role") or not amount:
+        return
+    state = settle_liveness(save, config, now)
+    limit = config["liveness"][str(task)]["num"]
+    if task == 16:
+        state["strengthen_count"] = min(limit, state["strengthen_count"] + amount)
+    else:
+        state["liveness_counts"][str(task)] = min(limit, state["liveness_counts"].get(str(task), 0) + amount)
+
+
+def liveness_statuses(save, config, now):
+    from . import welfare
+
+    # 提示和管理页只投影跨日状态，不能修改被读取的角色。
+    projected = dict(save, activity_state=copy.deepcopy(save.get("activity_state", {})))
+    state = settle_liveness(projected, config, now)
+    counts = {t: min(config["liveness"][str(t)]["num"], state["liveness_counts"].get(str(t), 0)) for t in LIVENESS_TASKS}
+    counts[16] = min(config["liveness"]["16"]["num"], state["strengthen_count"])
+    flags = {t: 2 if t in state["liveness_claimed"] else
+             int(bool(save.get("has_role") and counts[t] >= config["liveness"][str(t)]["num"])) for t in LIVENESS_TASKS}
+    flags[7] = welfare.sign_task_status(projected, now)
+    counts[7] = int(flags[7] > 0)
+    score = sum(config["liveness"][str(t)]["point"] for t, status in flags.items() if status == 2)
+    boxes = [2 if i in state["liveness_boxes"] else int(bool(save.get("has_role") and score >= config["liveness_reward"][str(i)]["point"]))
+             for i in range(1, len(config["liveness_reward"]) + 1)]
+    return flags, counts, boxes
 
 
 def _ids(values):
@@ -118,6 +176,7 @@ def first_period(save, config, activity_id, now):
 
 
 def record_gold_spend(save, amount, config, now):
+    record_liveness(save, 14, amount, config, now)
     day, remaining = first_period(save, config, 91, now)
     if save.get("has_role") and day > 0 and remaining:
         state = get_state(save)
@@ -165,7 +224,7 @@ def prepare_page(opcode, save, config, now):
     return _ids(values)
 
 
-def record_strengthening(save, reward, config):
+def record_strengthening(save, reward, config, now):
     equipment = _equipment(save)
     increase = 0
     for field, wire, value in iter_pb_fields(reward):
@@ -175,9 +234,10 @@ def record_strengthening(save, reward, config):
                 raise ValueError("强化装备数据无效")
             previous = equipment.get(ids[0], [ids[0], ids[1], 1])
             increase += max(0, ids[2] - previous[2])
-    state = get_state(save)
-    limit = config["liveness"]["16"]["num"]
-    state["strengthen_count"] = min(limit, state["strengthen_count"] + increase)
+    critical = sum(sum(parse_ids_pb(value)) for field, wire, value in iter_pb_fields(reward) if (field, wire) == (12, 2))
+    if not 0 <= critical <= increase:
+        raise ValueError("强化暴击次数无效")
+    record_liveness(save, 16, increase - critical, config, now)
 
 
 def begin7day_day(save, now):
@@ -205,20 +265,20 @@ def get_reward_statuses(save, config, now):
                                           and (pb_get_varint(point, 3) or 0) > 0 for f, t, point in iter_pb_fields(row)):
                 eligible.add(80030)
     statuses = {rid: 2 if rid in state["begin7day_claimed"] else 1 if rid in eligible else 0 for rid in BEGIN_REWARDS}
-    limit = config["liveness"]["16"]["num"]
-    task_status = 2 if 16 in state["liveness_claimed"] else int(bool(save.get("has_role") and state["strengthen_count"] >= limit))
-    return statuses, task_status
+    flags, _, _ = liveness_statuses(save, config, now)
+    return statuses, flags[16]
 
 
 def get_hints(save, config, now):
     from . import welfare
 
-    statuses, task_status = get_reward_statuses(save, config, now)
-    # shortcut: 其他任务、超值付费页和周宝箱待相应业务开放。
+    statuses, _ = get_reward_statuses(save, config, now)
+    flags, _, boxes = liveness_statuses(save, config, now)
+    # shortcut: 未开放玩法、超值付费页和周宝箱待相应业务开放。
     hints = dict.fromkeys(HINT_IDS, 0)
-    hints.update({40: int(task_status == 1), 84: int(statuses[80030] == 1)})
+    hints[84] = int(statuses[80030] == 1)
     hints.update(welfare.get_hints(save, config, now))
-    hints[40] = int(task_status == 1 or welfare.sign_task_status(save, now) == 1)
+    hints[40] = int(1 in flags.values() or 1 in boxes)
     for pages in config["begin7day"].values():
         page = pages["1"]
         hints[82 + (page["day"] - 1) * 4] = int(any(statuses.get(page[f"task{i}"]) == 1 for i in (1, 2)))
@@ -297,11 +357,11 @@ def prepare_response(opcode, save, request_body, config, now):
         reward = build_reward(save, row["reward"], config)
         state["consume_claimed"].append(reward_id)
         return reward
-    statuses, task_status = get_reward_statuses(save, config, now)
-    limit = config["liveness"]["16"]["num"]
-    score = sum(config["liveness"][str(task)]["point"] for task in state["liveness_claimed"])
+    statuses, _ = get_reward_statuses(save, config, now)
+    if opcode in (2410, 2411, 6517):
+        settle_liveness(save, config, now)
+    task_statuses, task_counts, boxes = liveness_statuses(save, config, now)
     benefits = welfare.get_state(save)
-    sign_status = welfare.sign_task_status(save, now)
 
     if opcode == 3610:
         flags = [statuses.get(80000 + i, 0) for i in range(1, max(map(int, config["begin7day_task"])) - 80000 + 1)]
@@ -309,15 +369,17 @@ def prepare_response(opcode, save, request_body, config, now):
         return b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid) + encode_pb_field(2, 2, _ids(values)))
                         for mid, values in enumerate(groups))
     if opcode == 2410:
-        # shortcut: 仅签到任务7按日刷新；强化任务16和其他任务日重置待业务接入。
         # 协议按任务 ID 下标排列，配置存在缺号。
         size = max(map(int, config["liveness"]))
         flags, counts = [0] * size, [0] * size
-        flags[15], counts[15] = task_status, min(limit, state["strengthen_count"])
-        flags[6], counts[6] = sign_status, int(sign_status > 0)
-        return _ids(flags + counts) + b"".join(encode_pb_field(2, 0, 0) for _ in config["liveness_reward"])
+        for task in LIVENESS_TASKS:
+            flags[task - 1], counts[task - 1] = task_statuses[task], task_counts[task]
+        return _ids(flags + counts) + b"".join(encode_pb_field(2, 0, status) for status in boxes)
     if opcode == 6517:
-        return _ids([score + benefits["sign_week_score"]] + [0] * len(config["week_liveness_reward"]))
+        score = state["liveness_week_score"] + benefits["sign_week_score"]
+        if score >= (1 << 31):
+            raise ValueError("日常任务积分超出范围")
+        return _ids([score] + [0] * len(config["week_liveness_reward"]))
     if not save.get("has_role"):
         raise ValueError("活动奖励未解锁或不支持")
     if opcode == 3611:
@@ -332,16 +394,29 @@ def prepare_response(opcode, save, request_body, config, now):
         reward = recruit.build_reward(save, gets, config)
         state["begin7day_claimed"].extend(ids)
         return reward
-    eligible = [task for task, status in ((7, sign_status), (16, task_status)) if status == 1]
+    if ids and ids[0] <= 100:
+        box = ids[0]
+        if box > len(boxes) or boxes[box - 1] == 0:
+            raise ValueError("活动奖励未解锁或不支持")
+        if boxes[box - 1] == 2:
+            raise ValueError("活动奖励已领取")
+        # shortcut: 已接任务最多65分，仅可达25/50分基础宝箱；高档附奖随更多玩法接入。
+        reward = build_reward(save, config["liveness_reward"][str(box)]["reward"], config)
+        state["liveness_boxes"].append(box)
+        return reward
+    eligible = [task for task, status in task_statuses.items() if status == 1]
     requested = [ids[0] - 100] if ids else eligible
     if not requested or any(task not in eligible for task in requested):
-        if (ids == [107] and sign_status == 2) or (ids == [116] and task_status == 2) or (not ids and task_status == 2):
+        if (ids and task_statuses.get(ids[0] - 100) == 2) or (not ids and 2 in task_statuses.values()):
             raise ValueError("活动奖励已领取")
         raise ValueError("活动奖励未解锁或不支持")
     reward = build_reward(save, ";".join(config["liveness"][str(task)]["reward"] for task in requested), config)
     if 7 in requested:
         benefits["sign_task_claimed"] = True
         benefits["sign_week_score"] += config["liveness"]["7"]["point"]
-    if 16 in requested:
-        state["liveness_claimed"].append(16)
+    gained = sum(config["liveness"][str(task)]["point"] for task in requested if task != 7)
+    if state["liveness_week_score"] + benefits["sign_week_score"] + gained >= (1 << 31):
+        raise ValueError("日常任务积分超出范围")
+    state["liveness_week_score"] += gained
+    state["liveness_claimed"].extend(task for task in requested if task != 7)
     return reward

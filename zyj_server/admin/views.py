@@ -85,7 +85,8 @@ def business(save, config):
     paid = recharge.get_state(save)
     active = activities.get_state(save)
     draws = recruit.get_state(save)
-    first, task = activities.get_reward_statuses(save, config, now)
+    first, _ = activities.get_reward_statuses(save, config, now)
+    task_statuses, counts, _ = activities.liveness_statuses(save, config, now)
     labels = {0: "未达标", 1: "可领取", 2: "已领取"}
     monthly = max(0, paid["month_until"] - day)
     order = config["recharge"].get(str(paid["cid"]), {})
@@ -103,8 +104,9 @@ def business(save, config):
                      "forever_claim": "已领取" if paid["card_days"]["2"] >= day else "可领取" if paid["forever"] else "未生效",
                      "bought": paid["bought"], "card_gifts": paid["card_gifts"]},
         "activities": [{"id": cid, "name": config["begin7day_task"][str(cid)]["name"], "status": labels[status]}
-                       for cid, status in first.items()] + [{"id": 16, "name": "装备强化", "status": labels[task],
-                                                           "progress": active["strengthen_count"], "target": config["liveness"]["16"]["num"]}],
+                       for cid, status in first.items()] + [{"id": task, "name": config["liveness"][str(task)]["desc"],
+                        "status": labels[status], "progress": counts[task], "target": config["liveness"][str(task)]["num"]}
+                        for task, status in task_statuses.items()],
         "consumption": {"gold_spent": active["gold_spent"], "claimed": active["consume_claimed"], "purchases": active["discount_bought"]},
         "recruit": [{"pool": int(key), **row} for key, row in draws.items()],
         "pending": [{"cid": cid, "name": reward_name(cid), "count": count}

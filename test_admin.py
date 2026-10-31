@@ -427,6 +427,31 @@ class GuildTests(AdminFixture):
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 2250)), [2])
         self.assertEqual(self.request(1, 2260)[0][0], 999999)
 
+    def test_guild_incense_completes_daily_task_and_claims_once(self):
+        day = (self.now + 28800) // 86400
+        self.sessions[1].save["activity_state"].update(liveness_day=day, liveness_week=(day + 3) // 7)
+        self.create()
+        self.success(1, 2250)
+        values = protocol.parse_ids_pb(self.success(1, 2410))
+        self.assertEqual((values[22], values[len(values) // 2 + 22]), (0, 0))
+        self.success(1, 2251, values=[1])
+        values = protocol.parse_ids_pb(self.success(1, 2410))
+        self.assertEqual((values[22], values[len(values) // 2 + 22]), (1, 1))
+        self.success(1, 2411, values=[123])
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 6517))[0], 5)
+        self.store.close_session(1)
+        self.sessions[1] = self.store.open_session(1, PASSWORD, ("reconnect", 1))
+        disk = self.store.path(1).read_bytes()
+        self.assertEqual(self.request(1, 2411, values=[123])[0][0], 999999)
+        self.assertEqual(self.request(1, 2251, values=[1])[0][0], 999999)
+        self.assertEqual(self.store.path(1).read_bytes(), disk)
+        self.clock.return_value += 86400
+        values = protocol.parse_ids_pb(self.success(1, 2410))
+        self.assertEqual((values[22], values[len(values) // 2 + 22]), (0, 0))
+        self.success(1, 2251, values=[1])
+        self.success(1, 2411, values=[123])
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 6517))[0], 10)
+
     def test_guild_incense_save_and_publish_failures_recover_exactly_once(self):
         gid = self.create()
         self.success(1, 2250)
@@ -1440,6 +1465,8 @@ class AdminHttpTests(AdminFixture):
                 self.assertIn(str(CONFIG["general_fragment"][str(row["cid"])]["general"]), CONFIG["general"])
         data = self.request("/api/accounts/1")[2]
         self.assertEqual(len(data["business"]["recruit"]), 4)
+        self.assertEqual({row["id"] for row in data["business"]["activities"] if row["id"] < 100},
+                         {1, 3, 7, 8, 9, 11, 14, 16, 23, 37, 48})
         self.assertEqual(data["business"]["recharge"]["rmb"], SAVE["recharge_state"]["rmb"])
         self.assertTrue(data["copies"][0]["points"])
         self.assertEqual(data["general_level_cap"], 12)

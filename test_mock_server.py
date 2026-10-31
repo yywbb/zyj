@@ -827,8 +827,9 @@ class ReplayRoutingTests(unittest.TestCase):
         original = self.entity_records(bytes.fromhex(baseline["world_state"]["1002"]), 1, 2)[iid]
         buy = self.activity_request(1074, [80001])
         frames = self.replay([buy, buy])
-        self.assertEqual([f["opcode"] for f in frames], [1074, 205, 1074, 205])
-        self.assertEqual(frames[:2], frames[2:])
+        self.assertEqual([f["opcode"] for f in frames], [1074, 205, 1034] * 2)
+        self.assertEqual(self.hint_changes(frames[2]), {40: 1})
+        self.assertEqual(frames[:3], frames[3:])
         self.assertEqual(self.query_role()[9], 1000000 - 3999)
         self.assertNotIn(80001, self.entity_records(self.query_world(1200), 1, 1))
         bought = self.entity_records(self.query_world(1002), 1, 2)[iid]
@@ -1333,8 +1334,9 @@ class ReplayRoutingTests(unittest.TestCase):
         conn.sendall = check_saved
         with redirect_stdout(io.StringIO()):
             self.run_client(conn)
-        self.assertEqual(len(conn.responses), 2)
-        self.assertEqual(conn.responses[0], conn.responses[1])
+        self.assertEqual([f["opcode"] for f in conn.responses], [3201, 1034] * 2)
+        self.assertEqual(self.hint_changes(conn.responses[1]), {40: 1})
+        self.assertEqual(conn.responses[:2], conn.responses[2:])
 
     def test_fashion_discount_ownership_and_level_gate(self):
         self.seed_shop_account()
@@ -2575,6 +2577,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(protocol.parse_ids_pb(self.entity_records(body, 6, 1)[10726])[2], 10)
         self.assertEqual(protocol.pb_get_varint(body, 1), (1 << 64) - 560)
         self.assertEqual(protocol.parse_ids_pb(next(v for n, w, v in protocol.iter_pb_fields(body) if n == 12)), [1])
+        self.assertEqual(json.loads(self.save_path.read_text())["activity_state"]["strengthen_count"], 1)
 
     def test_old_tutorial_strengthening_cannot_overwrite_live_progress(self):
         self.seed_training_account()
@@ -4166,6 +4169,273 @@ class ReplayRoutingTests(unittest.TestCase):
                                              2411, 20000, "活动奖励已领取")
             self.assertEqual(self.save_path.read_bytes(), before)
 
+    def liveness_task(self, task):
+        values = protocol.parse_ids_pb(self.query_world(2410))
+        return values[task - 1], values[len(values) // 2 + task - 1]
+
+    def prepare_liveness(self):
+        self.save_path.unlink(missing_ok=True)
+        saved = self.seed_shop_account()
+        day = (self.now + 28800) // 86400
+        saved["role_state"].update(level=21, vip=3, stamina=1000, energy=30)
+        saved["activity_state"].update(liveness_day=day, liveness_week=(day + 3) // 7, liveness_week_score=0,
+                                       liveness_counts={}, liveness_claimed=[], liveness_boxes=[], strengthen_count=0)
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_liveness_stamina_battle_and_sweep_count_actual_cost_once(self):
+        saved = self.prepare_liveness()
+        with redirect_stdout(io.StringIO()), patch.object(player.random, "getrandbits", return_value=42):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            body = recharge.ids([42102, 2])
+            packets = session.handle(1306, 31000, body)
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1306)
+            self.assertEqual(session.handle(1306, 31000, body), packets)
+        self.assertEqual(self.liveness_task(1), (0, 2))
+        player.record_copy_win(saved, recharge.ids([42102, 1]), 3, self.role_config, allow_repeat=True)
+        saved["role_state"]["stamina"] = 7
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(1307, [42102, 1, 1, 0])])[0]["opcode"], 1307)
+        self.assertEqual(self.liveness_task(1), (0, 6))
+        self.clock.return_value += 360
+        self.query_role()
+        self.give_props({20014: 1})
+        self.replay([self.activity_request(1201, [20014, 1])])
+        self.assertEqual(self.liveness_task(1), (0, 6))
+
+    def test_liveness_tutorial_stamina_uses_every_actual_battle_cost(self):
+        self.replay(self.requests)
+        total = 0
+        for request in self.requests:
+            raw = bytes.fromhex(request["hex"])
+            messages = protocol.get_comb_messages(raw) if request["opcode"] == 999900 else [(request["opcode"], raw)]
+            for opcode, body in messages:
+                if opcode == 1306:
+                    map_id, point_id = protocol.parse_ids_pb(body)
+                    total += self.role_config["copy"][str(map_id)][str(point_id)]["physical"]
+        self.assertGreater(total, 0)
+        self.assertEqual(self.liveness_task(1), (0, total))
+
+    def test_liveness_batch_strengthening_counts_paid_attempts_not_critical_levels(self):
+        self.seed_training_account(vip=3)
+        with patch.dict(self.role_config["liveness"]["16"], num=100), patch.object(player.random, "getrandbits", return_value=0):
+            response = self.replay([self.training_request(1101, 10726, (1,))])[0]
+            body = bytes.fromhex(response["hex"])
+            critical = sum(protocol.parse_ids_pb(next(v for n, w, v in protocol.iter_pb_fields(body) if n == 12)))
+            self.assertGreater(critical, 0)
+            self.assertEqual(self.liveness_task(16), (0, 5 - critical))
+
+    def test_liveness_watchstar_counts_collections_not_queries_or_rerolls(self):
+        self.prepare_watchstar()
+        self.query_world(2062)
+        self.assertEqual(self.liveness_task(8), (0, 0))
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            for index in range(3):
+                session.handle(2063, 31000 + index * 2, b"")
+                packets = session.handle(2065, 31001 + index * 2, b"")
+                self.assertEqual(session.handle(2065, 31001 + index * 2, b""), packets)
+            memory = copy.deepcopy(session.save)
+            self.assertEqual(struct.unpack(">IIII", session.handle(2065, 31010, b"")[0][:16])[2], 999999)
+            self.assertEqual(session.save, memory)
+        self.assertEqual(self.liveness_task(8), (1, 3))
+
+    def test_liveness_shop_purchases_count_but_refreshes_do_not(self):
+        for prepare, query, purchase, refresh, task in ((self.prepare_qiankun, 3650, 3651, 3652, 37),
+                                                        (self.prepare_blackmarket, 3630, 3631, 3632, 48)):
+            with self.subTest(task=task):
+                self.save_path.unlink(missing_ok=True)
+                prepare()
+                self.query_world(query)
+                self.assertEqual(self.liveness_task(task), (0, 0))
+                self.assertEqual(self.replay([self.activity_request(purchase, [1, 1])])[0]["opcode"], purchase)
+                self.replay([self.activity_request(refresh)])
+                self.assertEqual(self.liveness_task(task), (1, 1))
+
+    def test_liveness_recruit_counts_draws_and_fengshen_only_after_claim(self):
+        self.prepare_liveness()
+        self.give_props({20100: 100})
+        self.replay([self.activity_request(1403, [1, 2])])
+        self.assertEqual(self.liveness_task(11), (1, 10))
+        self.prepare_liveness()
+        self.replay([self.activity_request(7111), self.activity_request(7112)])
+        self.assertEqual(self.liveness_task(11), (0, 0))
+        self.replay([self.activity_request(7113)])
+        self.assertEqual(self.liveness_task(11), (1, 10))
+
+    def test_liveness_gold_spend_counts_outside_consumption_event(self):
+        saved = self.prepare_liveness()
+        saved["role_snapshot"] = protocol.pb_set_varint(bytes.fromhex(saved["role_snapshot"]), 22,
+                                                        self.now - 40 * 86400).hex()
+        saved["activity_state"]["gold_spent"] = 0
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(1403, [4, 1])])
+        self.assertEqual(self.liveness_task(14), (1, 500))
+        self.assertEqual(json.loads(self.save_path.read_text())["activity_state"]["gold_spent"], 0)
+
+    def test_liveness_mieshendian_counts_real_battles_and_completed_sweep(self):
+        self.prepare_mieshendian()
+        self.query_world(3620)
+        self.assertEqual(self.liveness_task(3), (0, 0))
+        self.replay([self.activity_request(3621, [1])])
+        self.assertEqual(self.liveness_task(3), (1, 1))
+        saved = json.loads(self.save_path.read_text())
+        saved["activity_state"]["liveness_counts"].pop("3")
+        saved["mieshendian_state"].update(floor=1, failcount=0, star=0, earned=0, maxfloor=5, maxstar=5,
+                                         best={str(i): 1 for i in range(1, 6)}, sweep=None)
+        saved["role_state"]["vip"] = 3
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.replay([self.activity_request(3623)])[0]["opcode"], 3623)
+        self.assertEqual(self.liveness_task(3), (0, 0))
+        self.clock.return_value += 5 * int(self.role_config["global_kv"]["mieshendian_saodang_time"]["value"])
+        self.assertEqual(self.replay([self.activity_request(3620)])[0]["opcode"], 3620)
+        self.assertEqual(self.liveness_task(3), (1, 1))
+
+    def test_liveness_treasure_ten_counts_actual_losses_not_button_taps(self):
+        saved = self.prepare_liveness()
+        for raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).values():
+            for field, value in ((6, 1), (7, 0), (8, 1), (9, 1)):
+                raw = protocol.pb_set_varint(raw, field, value)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            player.record_protagonist_general(saved, raw)
+        saved["role_state"]["energy"] = 3
+        self.save_path.write_text(json.dumps(saved))
+        target = rob.NPC_BASE + 28001 * 3
+        request = self.activity_request(1114, [target])
+        replies = self.replay([request, request])
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual(json.loads(self.save_path.read_text())["last_rob"]["attempts"], 3)
+        self.assertEqual(self.liveness_task(9), (0, 3))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1114, [target])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_liveness_legacy_migration_preserves_claims_without_backfilling(self):
+        saved = self.prepare_liveness()
+        state = saved["activity_state"]
+        for key in ("liveness_day", "liveness_week", "liveness_week_score", "liveness_counts", "liveness_boxes"):
+            state.pop(key)
+        state.update(strengthen_count=4, liveness_claimed=[16])
+        self.save_path.write_text(json.dumps(saved))
+        self.assertEqual(self.liveness_task(16), (2, 4))
+        self.assertEqual(self.liveness_task(1), (0, 0))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 5)
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2411, [116])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.clock.return_value += 86400
+        self.assertEqual(self.liveness_task(16), (0, 0))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 5)
+
+    def test_liveness_queries_and_claims_failed_saves_are_atomic(self):
+        baseline = self.prepare_liveness()
+        for task in (1, 3, 8, 9):
+            activities.record_liveness(baseline, task, self.role_config["liveness"][str(task)]["num"], self.role_config, self.now)
+        for opcode, body, claimed, tomorrow in ((2411, b"", False, False), (2411, recharge.ids([101]), False, False),
+                                                (2411, recharge.ids([1]), True, False), (2410, b"", True, True),
+                                                (6517, b"", True, True)):
+            with self.subTest(opcode=opcode, body=body, tomorrow=tomorrow), redirect_stdout(io.StringIO()):
+                saved = copy.deepcopy(baseline)
+                if claimed:
+                    saved["activity_state"].update(liveness_claimed=[1, 3, 8, 9], liveness_week_score=25)
+                self.save_path.write_text(json.dumps(saved))
+                self.clock.return_value = self.now + 86400 if tomorrow else self.now
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                    session.handle(opcode, 31000, body)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_liveness_corrupt_progress_and_score_overflow_fail_closed(self):
+        baseline = self.prepare_liveness()
+        for key, value in (("liveness_day", True), ("liveness_week", -1), ("liveness_week_score", 1 << 31),
+                           ("liveness_counts", {"2": 1}), ("liveness_counts", {"1": -1}),
+                           ("liveness_counts", []), ("liveness_boxes", [1, 1]), ("liveness_boxes", [0])):
+            with self.subTest(key=key, value=value), redirect_stdout(io.StringIO()):
+                saved = copy.deepcopy(baseline)
+                saved["activity_state"][key] = value
+                self.save_path.write_text(json.dumps(saved))
+                disk = self.save_path.read_bytes()
+                with self.assertRaises(ValueError):
+                    Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                self.assertEqual(self.save_path.read_bytes(), disk)
+        baseline["activity_state"].update(liveness_counts={"1": 100}, liveness_week_score=(1 << 31) - 1)
+        self.save_path.write_text(json.dumps(baseline))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2411, [101])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_liveness_reward_overflow_rolls_back_all_tasks_and_boxes(self):
+        baseline = self.prepare_liveness()
+        for task in (1, 3, 8, 9):
+            activities.record_liveness(baseline, task, self.role_config["liveness"][str(task)]["num"], self.role_config, self.now)
+        baseline["role_state"]["coin"] = (1 << 31) - 1
+        for body in (b"", recharge.ids([101]), recharge.ids([1])):
+            with self.subTest(body=body), redirect_stdout(io.StringIO()):
+                saved = copy.deepcopy(baseline)
+                if body == recharge.ids([1]):
+                    saved["activity_state"].update(liveness_claimed=[1, 3, 8, 9], liveness_week_score=25)
+                self.save_path.write_text(json.dumps(saved))
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                before, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                self.assertEqual(struct.unpack(">IIII", session.handle(2411, 31000, body)[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (before, disk))
+
+    def test_liveness_projection_does_not_mutate_or_settle_role(self):
+        saved = self.prepare_liveness()
+        saved["activity_state"].update(strengthen_count=4, liveness_claimed=[16])
+        before = copy.deepcopy(saved)
+        flags, counts, _ = activities.liveness_statuses(saved, self.role_config, self.now + 86400)
+        self.assertEqual((flags[16], counts[16]), (0, 0))
+        self.assertEqual(saved, before)
+
+    def test_liveness_claim_all_includes_sign_and_rejects_unsupported_or_malformed_claims(self):
+        self.seed_welfare_account()
+        self.replay([self.activity_request(3642)])
+        saved = json.loads(self.save_path.read_text())
+        activities.record_liveness(saved, 1, 100, self.role_config, self.now)
+        activities.record_liveness(saved, 16, 4, self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(2411)])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 20)
+        for task in (1, 7, 16):
+            self.assertEqual(self.liveness_task(task)[0], 2)
+        disk = self.save_path.read_bytes()
+        for body in (recharge.ids([102]), recharge.ids([3]), recharge.ids([100]), recharge.ids([101, 116]), b"\x0a\x01\x01"):
+            self.assertEqual(self.replay([{"opcode": 2411, "seq": 31000, "hex": body.hex()}])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_liveness_daily_claims_boxes_and_week_reset(self):
+        saved = self.prepare_liveness()
+        for task in (1, 3, 8, 9, 11, 14, 16, 23, 37, 48):
+            activities.record_liveness(saved, task, self.role_config["liveness"][str(task)]["num"], self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(2411)])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 60)
+        flags = [v for n, w, v in protocol.iter_pb_fields(self.query_world(2410)) if (n, w) == (2, 0)]
+        self.assertEqual(flags, [1, 1, 0, 0, 0])
+        for box in (1, 2):
+            request = self.activity_request(2411, [box])
+            before = json.loads(self.save_path.read_text())
+            self.assertEqual(self.replay([request])[0]["opcode"], 2411)
+            after = json.loads(self.save_path.read_text())
+            expected = activities.build_reward(before, self.role_config["liveness_reward"][str(box)]["reward"], self.role_config)
+            player.apply_reward(before, expected, self.role_config, self.now)
+            self.assertEqual((after["world_state"], after["role_state"]), (before["world_state"], before["role_state"]))
+            disk = self.save_path.read_bytes()
+            self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+            self.assertEqual(self.save_path.read_bytes(), disk)
+        self.assertEqual(self.hint_map(self.query_world(1032))[40], 0)
+        self.clock.return_value += 86400
+        self.assertEqual(self.liveness_task(16), (0, 0))
+        self.assertEqual(self.liveness_task(1), (0, 0))
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 60)
+        self.clock.return_value = self.now
+        self.assertEqual(self.liveness_task(16), (0, 0))
+        self.assertEqual(self.replay([self.activity_request(2411, [116])])[0]["opcode"], 999999)
+        self.clock.return_value = self.now + 7 * 86400
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(6517))[0], 0)
+
     def test_liveness_empty_claim_saves_once_and_restores_queries(self):
         self.replay(self.requests)
         before = self.query_role()[8]
@@ -4741,6 +5011,7 @@ class ReplayRoutingTests(unittest.TestCase):
         for key in ("coin", "gold", "level", "exp"):
             self.assertEqual(after["role_state"][key], saved["role_state"][key])
         self.assertEqual(after["role_state"]["stamina"], saved["role_state"]["stamina"] - 2)
+        self.assertEqual(after["activity_state"]["liveness_counts"]["1"], saved["activity_state"]["liveness_counts"]["1"] + 2)
 
     def combat_unit(self, cid, **values):
         return {"cid": cid, "iid": cid, "level": 1, "advance": 0, "exp": 0,

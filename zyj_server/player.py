@@ -427,6 +427,8 @@ def apply_reward(save, body, role_config, now=None):
             state[name] = balance
             if name == "gold" and delta < 0:
                 activities.record_gold_spend(save, -delta, role_config, int(time.time()) if now is None else now)
+            elif name == "stamina" and delta < 0:
+                activities.record_liveness(save, 1, -delta, role_config, int(time.time()) if now is None else now)
         elif field in (5, 10) and wire == 2:
             for n, w, record in iter_pb_fields(value):
                 if n == 1 and w == 2:
@@ -560,6 +562,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if reward:
             apply_reward(save, reward, role_config, now)
+        if opcode in mieshendian.BATTLES or opcode == 3624 and reward:
+            activities.record_liveness(save, 3, 1, role_config, now)
     elif opcode == 1350:
         body = star_copy.query(save, request_body, role_config, now)
     elif opcode == 1351:
@@ -597,6 +601,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -cost, role_config, now)
         if opcode == 7113:
             apply_reward(save, body, role_config, now)
+            activities.record_liveness(save, 11, 10, role_config, now)
     elif opcode in recharge.OPCODES:
         body = recharge.prepare(opcode, save, request_body, role_config, now)
         if opcode in recharge.CLAIMS:
@@ -607,12 +612,16 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if reward:
             apply_reward(save, reward, role_config, now)
+        if opcode == 3631:
+            activities.record_liveness(save, 48, 1, role_config, now)
     elif opcode in secret_shop.OPCODES:
         body, costs, reward = secret_shop.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
         if reward:
             apply_reward(save, reward, role_config, now)
+        if opcode == 3651:
+            activities.record_liveness(save, 37, 1, role_config, now)
     elif opcode == 3780:
         body = qiankun.red_query(save, request_body, body)
     elif opcode in qiankun.OPCODES:
@@ -628,6 +637,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 change_item_count(save, cid, -count, role_config, now)
         if reward:
             apply_reward(save, reward, role_config, now)
+        if opcode == 2065:
+            activities.record_liveness(save, 8, 1, role_config, now)
     elif opcode in shop.OPCODES:
         body, costs, reward = shop.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
@@ -648,6 +659,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         for reward in rewards:
             apply_reward(save, reward, role_config, now)
+        if opcode in (1111, 1114, 1125):
+            activities.record_liveness(save, 9, save["last_rob"]["attempts"], role_config, now)
     elif opcode in WORLD_QUERY_IDS:
         body = bytes.fromhex(save["world_state"][str(opcode)])
         if opcode == 1002 and save.get("protagonist_snapshot"):
@@ -738,6 +751,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             state["stamina"] -= role_config["copy"][str(location[0])][str(location[1])]["physical"]
             if state["stamina"] < 0:
                 raise ValueError("体力不足")
+            activities.record_liveness(save, 1, role_config["copy"][str(location[0])][str(location[1])]["physical"], role_config, now)
             for field, wire, value in iter_pb_fields(body):
                 if field == 6 and wire == 2:
                     record_protagonist_general(save, value)
@@ -763,7 +777,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 if not 0 <= state[key] < (1 << 31):
                     raise ValueError("角色战力超出范围")
         if opcode in (1101, 1109):
-            activities.record_strengthening(save, body, role_config)
+            activities.record_strengthening(save, body, role_config, now)
         apply_reward(save, body, role_config, now)
         if save.get("protagonist_snapshot"):
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
@@ -819,6 +833,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         rewards = [data for mid, data in get_comb_messages(body) if mid == 1]
         for reward in rewards:
             apply_reward(save, reward, role_config, now)
+        activities.record_liveness(save, 11, {1: 1, 2: 10, 3: 100}[parse_ids_pb(request_body)[1]], role_config, now)
     settle_stamina(save, role_config, now)
     return body
 
@@ -837,6 +852,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         automatic_reward = mieshendian.finish_sweep(save, role_config, now)
         if automatic_reward:
             apply_reward(save, automatic_reward, role_config, now)
+            activities.record_liveness(save, 3, 1, role_config, now)
     packets = []
     if starter:
         fragments, _ = pets.prepare(1044, save, b"", role_config)
@@ -876,6 +892,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
 
 
 def save_response_group(packets, save, before, save_path, step_counts, role_config, now):
+    activities.settle_liveness(save, role_config, now)
     state = save.get("role_state")
     if state:
         for name, key in (("level", "level"), ("coin", "silver"), ("gold", "gold"), ("energy", "energy")):
@@ -957,6 +974,7 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
     reward_body = activities.build_reward(save, ";".join(f"{cid},{count}" for cid, count in sorted(rewards.items())), role_config)
     apply_reward(save, reward_body, role_config, now)
     state["stamina"] -= point["physical"] * attempts
+    activities.record_liveness(save, 1, point["physical"] * attempts, role_config, now)
     settle_stamina(save, role_config, now)
     experience = b"".join(encode_pb_field(n, 0, v) for n, v in ((1, gained), (2, state["level"]), (3, state["exp"]))) + experience
     body = (encode_pb_field(1, 0, int(won)) + encode_pb_field(2, 0, star)

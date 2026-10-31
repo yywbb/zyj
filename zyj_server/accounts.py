@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import guild, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, guild, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -166,6 +166,7 @@ class AccountStore:
                 if opcode != 2250:
                     packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
                 if opcode == 2251:
+                    activities.record_liveness(working, 23, 1, self.role_config, now)
                     state["checked_at"] = now
                     # 先存上香草稿，角色扣费/贡献/次数/收据同存档；恢复后仅补一次公会经验。
                     guild.write(path, state)
