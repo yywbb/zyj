@@ -4882,6 +4882,20 @@ class ReplayRoutingTests(unittest.TestCase):
         sources = [a["s"] for a in report["b"]["a"] if a["s"]]
         self.assertEqual([s["r"] for s in sources[:4]], [False, True, True, False])
 
+    def test_protagonist_plus_five_stuns_only_surviving_ordinary_hit_targets(self):
+        cases = ((5, 10000, 0, 2, .29, True), (5, 10000, 0, 2, .3, False),
+                 (4, 10000, 0, 2, 0, False), (5, 100, 0, 2, 0, False),
+                 (5, 10000, 75, 2, 0, False), (5, 10000, 0, 4, 0, False))
+        for advance, hp, dodge, ap, draw, expected in cases:
+            with self.subTest(advance=advance, hp=hp, dodge=dodge, ap=ap, draw=draw):
+                attack = {2: self.combat_unit(10128, advance=advance, initial_ap=ap, speed=200)}
+                defense = {2: self.combat_unit(10201, iid=1, hp=hp, dodge=dodge, atk=1)}
+                with patch.object(battle.random.Random, "random", return_value=draw):
+                    report = battle.simulate(attack, defense, self.role_config, 42)
+                self.assert_battle_report(report)
+                hit = next(d for d in report["b"]["a"][0]["e"] if not d["r"] and "m" in d)
+                self.assertEqual(hit.get("u"), {"u": "dizzy", "w": True} if expected else None)
+
     def test_live_lifesteal_poison_and_round_limit(self):
         report = battle.simulate({2: self.combat_unit(10201, atk=200, speed=200)},
                                 {2: self.combat_unit(10303)}, self.role_config, 1)
@@ -6163,6 +6177,11 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_mieshendian_all_supported_difficulties_generate_consistent_battles(self):
         baseline = self.prepare_mieshendian()
+        protagonist = bytes.fromhex(baseline["protagonist_snapshot"])
+        raw = next(v for n, w, v in protocol.iter_pb_fields(protagonist) if (n, w) == (10, 2))
+        raw = protocol.pb_set_varint(protocol.pb_set_varint(raw, 1, 10128), 4, 6)
+        player.record_protagonist_general(baseline, raw)
+        player.record_slot_update(baseline, protocol.encode_pb_field(1, 2, raw))
         checked = 0
         for floor in range(1, max(map(int, self.role_config["mieshendian_monster_param"])) + 1):
             for difficulty in self.role_config["mieshendian_monster_param"][str(floor)]:

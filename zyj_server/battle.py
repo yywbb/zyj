@@ -193,7 +193,7 @@ def general_experience(unit, gained, config, maximum=None):
 
 
 def _prepare_teams(teams, config):
-    dynamic = {9100001, 9000001, 9000008, 9000015, 9000020, 9000023, 9000024, 9000025,
+    dynamic = {9100001, 9100002, 9000001, 9000008, 9000015, 9000020, 9000023, 9000024, 9000025,
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
                9000038, 9000039, 9000040, 9000400, 9000412, 9000413, 9000483, 9000489,
                9000496, 9000501, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803}
@@ -232,7 +232,7 @@ def _prepare_teams(teams, config):
                 attr, code = row["attr"], row["type_param"] or row["id"]
                 if row["id"] == 9100001:
                     code = 9100001
-                if row["type"] == 0 and code != 9100001:
+                if row["type"] == 0 and code not in (9100001, 9100002):
                     if attr not in (*stats, "ap", "dmg", "fdmg") or row["target"] not in ("1", "2", "3", "4", "5"):
                         raise ValueError("尚不支持该突破属性")
                 elif code not in dynamic:
@@ -266,7 +266,7 @@ def _prepare_teams(teams, config):
             for row in provider["passive_rows"]:
                 code = 9100001 if row["id"] == 9100001 else row["type_param"] or row["id"]
                 value = Fraction(str(row["value"]))
-                if code == 9100001:
+                if code in (9100001, 9100002):
                     continue
                 if row["type"] == 0 or code == 9000001:
                     if row["attr"] == "fdmg" or row["method"] == "value" and row["attr"] == "dmg":
@@ -576,7 +576,8 @@ def simulate(attack, defense, config, seed):
             if target["hp"] > 0 and amount > 0:
                 dizzy = (skill_id == 12622 and target["hp"] * 5 < target["maxhp"]
                          or skill_id == 12618 and target["pos"] > 7 and roll(.35)
-                         or skill and skill.get("effect") == "dizzy" and roll(skill["effect-trigger"]))
+                         or skill and skill.get("effect") == "dizzy" and roll(skill["effect-trigger"])
+                         or not skill and 9100002 in actor["effects"] and roll(.3))
                 dizzy = dizzy or target["firing"] and roll(effect(actor, 9000483))
                 if dizzy and stun(target):
                     hit["u"] = {"u": "dizzy", "w": True}
