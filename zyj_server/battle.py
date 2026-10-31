@@ -11,6 +11,9 @@ from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
 QUEENS = (10595, 10817)
 MAX_ROUNDS = 30
+MULTI_COMBOS = (12601, 12602, 12604, *range(12622, 12639), 12836, 12841, 12943,
+                12988, 12989, 12990, 13017, 13018, 13073, 13075, 13076, 13077,
+                13078, 13079, 13122, 13124, 13125)
 GENERAL_FIELDS = {"cid": 1, "iid": 2, "level": 3, "advance": 4, "exp": 5,
                   "atk": 6, "def": 7, "hp": 8, "speed": 9,
                   "critical": 10, "dodge": 11, "parry": 12, "resilience": 13,
@@ -137,11 +140,12 @@ def rosters(save, point, config):
 
 
 def damage(attacker, defender, config, skill_id=None, critical=False, *, multiplier=Fraction(1),
-           flat=0, critical_multiplier=Fraction(3, 2)):
+           flat=0, critical_multiplier=Fraction(3, 2), combo=False):
     """倍率在分段取整前应用，固定加减伤在求和后应用，最后死亡截断。"""
     coefficient, hits = Fraction(1), 1
     if skill_id is not None:
-        skill = config["skill"].get(str(skill_id)) or config["combskill"].get(str(skill_id))
+        # 两张技能表有重号，合体必须显式选表，不能误取同ID的普通技能。
+        skill = config["combskill"].get(str(skill_id)) if combo else config["skill"].get(str(skill_id)) or config["combskill"].get(str(skill_id))
         if not skill or skill["kind"] != "attack":
             raise ValueError("不支持的伤害技能")
         coefficient, hits = Fraction(skill["atk-param"].split(";")[0]), skill["count"]
@@ -219,7 +223,7 @@ def _prepare_teams(teams, config):
             initial_ap = unit.get("initial_ap", 2)
             if type(initial_ap) is not int or not 0 <= initial_ap <= 10:
                 raise ValueError("初始怒气无效")
-            unit.update(pos=pos, direct=direct, ap=initial_ap, dizzy=False, dot=None, firing=None, buffs={},
+            unit.update(pos=pos, direct=direct, ap=initial_ap, dizzy=False, dot=None, firing=None, buffs={}, states={},
                         emergency=False, strikes=0, guard=0, effects={}, passive_rows=rows,
                         flat_out=0, flat_in=0, cover_d=unit.get("cover_d", 0))
             unit["cover_d2"] = unit["cover_d"]
@@ -387,6 +391,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             raise ValueError("战斗事件超出上限，未结算")
 
     def change_hp(unit, amount, status="N", hits=0, *, shield=True):
+        if amount > 0 and unit["states"].get("invincible", 0) > round_number:
+            amount, status = 0, "proof"
         absorbed = min(unit["cover_d"], int(max(0, amount) * Fraction(unit.get("cover_p", 0), 100))) if shield else 0
         unit["cover_d"] -= absorbed
         amount -= absorbed
@@ -423,7 +429,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         return dest(unit, B={"R": attr, "u": skill["effect"], "w": True})
 
     def stun(unit):
-        if unit["dizzy"] or effect(unit, 9000789) >= 1:
+        if unit["dizzy"] or effect(unit, 9000789) >= 1 or unit["states"].get("xiyin", 0) > round_number:
             return False
         unit["dizzy"] = True
         return True
@@ -441,6 +447,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if unit[kind]:
                 unit[kind] = False if kind == "dizzy" else None
                 changes.append(dest(unit, m=[], u={"u": kind, "w": False}))
+        for kind in ("skilllock", "fire"):
+            if kind in unit["states"]:
+                del unit["states"][kind]
+                changes.append(state_event(unit, kind, False))
         for kind, attr in list(unit["buffs"]):
             if kind == "weaken":
                 del unit["buffs"][kind, attr]
@@ -500,22 +510,147 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     target = selected[0]
                     event([extra_hit(unit, target, effect(unit, 9000040))])
 
-    def act(actor, forced_target=None, reaction=False):
+    def living(team):
+        return [u for _, u in sorted(team.items()) if u["hp"] > 0]
+
+    def state_event(unit, kind, enabled):
+        if kind in ("xiyin", "fire"):
+            return dest(unit, B={"R": kind, "u": "promote" if kind == "xiyin" else "break", "w": enabled})
+        return dest(unit, m=[], u={"u": kind, "w": enabled})
+
+    def set_state(unit, kind, duration=1):
+        if kind == "skilllock":
+            duration -= int(effect(unit, 9000789))
+        if duration <= 0:
+            return []
+        unit["states"][kind] = round_number + duration
+        return [state_event(unit, kind, True)]
+
+    def change_ap(unit, amount):
+        unit["ap"] = max(0, min(10, unit["ap"] + amount))
+        return dest(unit, ap=unit["ap"], E=True)
+
+    def choose_combo(actor, friends, enemies):
+        general = config["general"][str(actor["cid"])]
+        skill = config["combskill"].get(str(general["combskillid"]))
+        if not skill or not skill["cid2"]:
+            return None
+        if skill["id"] not in MULTI_COMBOS:
+            raise ValueError(f"尚不支持该合体技能 {skill['id']}")
+        if actor["ap"] < skill["ap"]:
+            return None
+        members = [skill[f"cid{i}"] for i in (1, 2, 3) if skill[f"cid{i}"]]
+        identity = general["init_cid"] or actor["cid"]
+        if identity not in members:
+            raise ValueError("合体技能与发动者身份不匹配")
+        participants = [actor["pos"]]
+        for cid in members:
+            if cid == identity:
+                continue
+            partner = next((u for u in living(friends) if (config["general"][str(u["cid"])]["init_cid"] or u["cid"]) == cid
+                            and not u["dizzy"] and u["states"].get("skilllock", 0) <= round_number), None)
+            if partner is None:
+                return None
+            participants.append(partner["pos"])
+        candidates = living(friends if skill["kind"] == "gain" else enemies)
+        if skill["range"] == "second":
+            candidates = [u for u in candidates if u["pos"] > 7]
+        chance = config["combskillprobability"][str(skill["id"])][f"bout{min(10, round_number)}"]
+        return (skill, participants) if candidates and roll(chance) else None
+
+    def combo_effects(actor, skill, hits, killed):
+        sid = skill["id"]
+        friends = teams[actor["direct"]]
+        survivors = [u for u in hits if u["hp"] > 0]
+        changes = []
+        if sid in (12601, 12625, 12636):
+            for target in survivors:
+                eligible = (target["hp"] * 2 < target["maxhp"] if sid != 12625 else target["hp"] * 5 > target["maxhp"] * 4)
+                if eligible and (sid != 12636 or target["pos"] > 7) and stun(target):
+                    changes.append(dest(target, m=[], u={"u": "dizzy", "w": True}))
+        if sid in (12627, 12988, 13075):
+            candidates = [u for u in survivors if sid == 12988 or not u["dizzy"]]
+            if sid == 12627:
+                selected = sorted(rng.sample(candidates, min(2, len(candidates))), key=lambda u: u["pos"])
+                selected = [u for u in selected if roll(skill["trigger"])]
+            else:
+                selected = sorted(candidates, key=lambda u: (-stat(u, "atk"), u["pos"]))[:1 if sid == 13075 else 2]
+            for target in selected:
+                if stun(target):
+                    changes.append(dest(target, m=[], u={"u": "dizzy", "w": True}))
+        if sid in (12602, 12623, 12630, 12632, 12841):
+            candidates = living(friends) if sid in (12602, 12632) else survivors
+            if sid in (12602, 12841):
+                selected = sorted(rng.sample(candidates, min(3, len(candidates))), key=lambda u: u["pos"])
+            else:
+                selected = [actor] if sid == 12632 else [u for u in candidates if sid != 12630 or u["pos"] < 8]
+            kind, attr = ("promote", "atk") if sid in (12602, 12632) else ("weaken", "def")
+            amount = Fraction(1, 5) if sid == 12632 else Fraction(1, 2) if sid == 12630 else Fraction(3, 10)
+            duration = 3 if sid == 12841 else 2 if sid in (12602, 12632) else 1
+            for target in selected:
+                change = buff(target, {"effect": kind, "effect-param": f"{attr};{amount}", "effect-round": duration})
+                if change:
+                    changes.append(change)
+        if sid in (12624, 12631):
+            allies = sorted(living(friends), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
+            if sid == 12624:
+                changes.extend(change_hp(u, -stat(actor, "atk")) for u in allies)
+            elif allies:
+                changes.extend(set_state(allies[0], "invincible"))
+        if sid in (12626, 12628, 12630, 12634, 12637):
+            for target in survivors:
+                if sid in (12626, 12628):
+                    changes.append(change_ap(target, -rng.randint(1, 2)))
+                elif (sid == 12630 and target["pos"] > 7 or sid == 12634 and target["pos"] < 8 and roll(Fraction(2, 5))
+                      or sid == 12637 and target["pos"] > 7 and roll(skill["trigger"])):
+                    changes.append(change_ap(target, -1))
+        if sid in (12836, 12989, 13018, 13124):
+            selected = sorted(survivors, key=lambda u: (-stat(u, "atk") if sid == 13018 else -u["ap"], u["pos"]))
+            for target in selected[:1 if sid == 13018 else 2]:
+                changes.append(change_ap(target, -2))
+                if sid in (12989, 13124):
+                    changes.extend(set_state(target, "skilllock"))
+            if sid == 13018 and killed:
+                changes.append(change_ap(actor, min(4, killed * 2)))
+        if sid in (12635, 12990, 13073, 13079):
+            allies = [u for u in living(friends) if u is not actor]
+            shu = [u for u in allies if config["general"][str(u["cid"])]["region"] == "8"]
+            candidates = shu if sid == 12990 and shu else allies
+            for target in sorted(candidates, key=lambda u: (u["ap"], u["pos"]))[:2 if sid == 13073 else 1]:
+                changes.append(change_ap(target, 4 if sid == 13079 or sid == 12990 and shu else 2))
+        if sid in (12633, 12638):
+            for target in survivors:
+                if sid == 12633 and target["pos"] < 8 or sid == 12638 and roll(skill["trigger"]):
+                    # shortcut: 合体灼烧未给比例，沿用本地普攻10%/跳，拿到实战参数后替换。
+                    amount = damage({**actor, "atk": stat(actor, "atk")},
+                                    {**target, "def": stat(target, "def"), "hp": target["maxhp"]}, config) // 10
+                    change = status_damage(target, "firing", amount, 3 if sid == 12633 else 2)
+                    if change:
+                        changes.append(change)
+        if sid == 13078:
+            allies = living(friends)
+            for target in sorted(rng.sample(allies, min(4, len(allies))), key=lambda u: u["pos"]):
+                changes.extend(set_state(target, "xiyin"))
+        if sid == 13125:
+            for target in survivors:
+                if roll(skill["trigger"]):
+                    changes.extend(set_state(target, "fire", MAX_ROUNDS + 1))
+        if changes:
+            event(changes)
+
+    def act(actor, forced_target=None, reaction=False, followup=None, chain=0):
         enemies, friends = teams[not actor["direct"]], teams[actor["direct"]]
         skill, participants = None, [actor["pos"]]
         base_skill = config["skill"].get(str(actor["skill"]))
-        if not reaction and base_skill and actor["ap"] >= base_skill["ap"]:
-            skill = base_skill
-            if actor["cid"] == 10112:
-                skill = config["combskill"]["12618"]
-            elif actor["cid"] in (10213, 10214):
-                partner_cid = {10213: 10214, 10214: 10213}[actor["cid"]]
-                partner = next((u for _, u in sorted(friends.items()) if u["cid"] == partner_cid
-                                and u["hp"] > 0 and not u["dizzy"]), None)
-                chance = config["combskillprobability"]["12622"][f"bout{min(10, round_number)}"]
-                if partner and any(u["hp"] > 0 and u["pos"] > 7 for u in enemies.values()) and roll(chance):
-                    skill = config["combskill"]["12622"]
-                    participants.append(partner["pos"])
+        if followup:
+            skill, participants, _ = followup
+        elif not reaction and actor["states"].get("skilllock", 0) <= round_number:
+            if base_skill and actor["ap"] >= base_skill["ap"]:
+                skill = config["combskill"]["12618"] if actor["cid"] == 10112 else base_skill
+            combination = choose_combo(actor, friends, enemies)
+            if combination:
+                skill, participants = combination
+        combined = len(participants) > 1 or skill is not None and skill["id"] == 12618
         if skill and skill["kind"] == "gain":
             selected = sorted((u for u in friends.values() if u["hp"] > 0), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
             if skill["range"] in ("first", "second"):
@@ -528,7 +663,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 selected = targets(actor, enemies, {"range": "three"}, rng)
             elif not skill and not forced_target and 9000501 in actor["effects"]:
                 selected = sorted((u for u in enemies.values() if u["hp"] > 0), key=lambda u: (-stat(u, "atk"), u["pos"]))[:1]
-        if skill and skill["id"] not in (12618, 12622) and effect(actor, 9000528):
+        if skill and not combined and effect(actor, 9000528):
             candidates = friends if skill["kind"] == "gain" else enemies
             extra = sorted((u for u in candidates.values() if u["hp"] > 0 and u not in selected),
                            key=lambda u: (Fraction(u["hp"], u["maxhp"]) if skill["kind"] == "gain" else 0, u["pos"]))
@@ -536,13 +671,21 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if not selected:
             return []
         skill_id = skill["id"] if skill else None
-        source = {"r": actor["direct"], "p": participants, "t": "x" if skill_id in (12618, 12622) else "k" if skill else "N"}
+        combo_id = skill_id if combined else None
+        source = {"r": actor["direct"], "p": participants, "t": "x" if combined else "k" if skill else "N"}
         if skill:
             source["S"] = skill_id
-        old_ap = actor["ap"]
-        actor["ap"] = 0 if skill else min(10, old_ap + 2)
+        old_ap = followup[2] if followup else actor["ap"]
+        if not followup:
+            actor["ap"] = 0 if skill else min(10, old_ap + 2)
         destinations, reactions, dealt, recovered = [], [], 0, []
         killed, hit_targets, burned = 0, [], False
+        critical_targets = set()
+        if combo_id == 13077:
+            critical_targets = {u["pos"] for u in rng.sample(selected, min(4, len(selected)))}
+        male_count = sum(config["general"][str(u["cid"])]["sex"] == "nan" and config["general"][str(u["cid"])]["name"] != "主角"
+                         for u in living(enemies)) if combo_id == 13017 else 0
+        dead_count = sum(u["hp"] <= 0 for u in enemies.values()) if combo_id == 13122 else 0
         for target in selected:
             if target["hp"] <= 0:
                 continue
@@ -551,9 +694,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     destinations.extend(cleanse(target))
                 coefficient, growth = map(Fraction, skill["atk-param"].split(";")[:2])
                 multiplier = 1 + max(0, old_ap - skill["ap"]) * Fraction(str(skill["ap_up"]))
-                amount = int(stat(actor, "atk") * (coefficient + growth * max(0, actor.get("skilllevel", 0) - 1)) * multiplier)
+                amount = int(stat(actor, "atk") * (coefficient + (0 if combined else growth * max(0, actor.get("skilllevel", 0) - 1))) * multiplier)
                 destinations.append(change_hp(target, -amount))
-                if skill["effect"] == "promote" and roll(skill["effect-trigger"]):
+                if skill.get("effect") == "promote" and roll(skill["effect-trigger"]):
                     change = buff(target, skill)
                     if change:
                         destinations.append(change)
@@ -563,30 +706,44 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 destinations.append(dest(target, m={"m": 0, "f": 0, "u": "dodge", "U": 0}))
                 continue
             critical_chance = (stat(actor, "critical") - stat(target, "resilience")) / 100 if 9000030 not in target["effects"] else 0
-            critical = skill_id == 12618 and target["pos"] < 8 or roll(max(0, min(.75, critical_chance)))
+            critical_chance += Fraction(3, 10) if combo_id == 12627 and 9000030 not in target["effects"] else 0
+            critical = (combo_id == 12618 and target["pos"] < 8 or combo_id == 12632 or target["pos"] in critical_targets
+                        or roll(max(0, min(.75, critical_chance))))
             parry = roll(max(0, min(.5, (stat(target, "parry") - stat(actor, "arp")) / 100)))
             multiplier = modifiers(actor, target)
             if skill:
                 multiplier *= 1 + max(0, old_ap - skill["ap"]) * Fraction(str(skill["ap_up"]))
                 coefficient, growth = map(Fraction, skill["atk-param"].split(";")[:2])
-                if skill_id not in (12618, 12622):
+                if not combined:
                     multiplier *= (coefficient + growth * max(0, actor.get("skilllevel", 0) - 1)) / coefficient
+                if combo_id == 12629:
+                    multiplier *= 1 + Fraction(target["hp"] * 5 // target["maxhp"], 5)
+                elif combo_id == 13076:
+                    multiplier *= (coefficient - Fraction(skill["atk-param2"]) * len(selected)) / coefficient
+                elif combo_id == 13122:
+                    multiplier *= 1 + Fraction(dead_count, 4)
+                if target["states"].get("fire", 0) > round_number:
+                    multiplier *= 2
             multiplier *= guard(target)
             if parry:
                 multiplier *= Fraction(3, 10)
             attacker, defender = {**actor, "atk": max(1, stat(actor, "atk"))}, {**target, "def": stat(target, "def"), "hp": target["hp"] + target["cover_d"]}
-            amount = damage(attacker, defender, config, skill_id, critical, multiplier=multiplier,
+            amount = damage(attacker, defender, config, skill_id, critical, multiplier=multiplier, combo=combined,
                             flat=actor["flat_out"] - target["flat_in"],
-                            critical_multiplier=Fraction(3, 2) + Fraction(actor.get("criticaldmg", 0), 100))
+                             critical_multiplier=Fraction(3, 2) + Fraction(actor.get("criticaldmg", 0), 100)
+                            + (Fraction(1, 10) if combo_id == 12627 else 0))
             hit = change_hp(target, amount, "parry" if parry else "C" if critical else "N",
                              skill["count"] if critical and skill else int(critical))
             dealt += hit["m"]["m"]
             killed += int(target["hp"] == 0)
+            amount = hit["m"]["m"] + hit["m"].get("M", 0)
+            if skill and amount > 0 and target["states"].pop("fire", None):
+                destinations.append(state_event(target, "fire", False))
             if amount > 0:
                 hit_targets.append(target)
             if target["hp"] > 0 and amount > 0:
-                dizzy = (skill_id == 12622 and target["hp"] * 5 < target["maxhp"]
-                         or skill_id == 12618 and target["pos"] > 7 and roll(.35)
+                dizzy = (combo_id == 12622 and target["hp"] * 5 < target["maxhp"]
+                         or combo_id == 12618 and target["pos"] > 7 and roll(.35)
                          or skill and skill.get("effect") == "dizzy" and roll(skill["effect-trigger"])
                          or not skill and 9100002 in actor["effects"] and roll(.3))
                 dizzy = dizzy or target["firing"] and roll(effect(actor, 9000483))
@@ -635,10 +792,12 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 if change:
                     destinations.append(change)
         destinations.append(dest(actor, ap=actor["ap"], E=False))
-        if skill and skill["ap_give"]:
+        if skill and skill["ap_give"] and (not followup or not combined):
             actor["ap"] = min(10, actor["ap"] + skill["ap_give"])
             destinations.append(dest(actor, ap=actor["ap"], E=True))
         event(destinations, source)
+        if combo_id in MULTI_COMBOS:
+            combo_effects(actor, skill, hit_targets, killed)
         if skill and skill.get("effect") == "suck" and dealt and actor["hp"] > 0:
             amount = min(actor["maxhp"] - actor["hp"], int(dealt * Fraction(skill["effect-param"])))
             if amount:
@@ -665,6 +824,16 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         for target, amount in recovered:
             if target["hp"] > 0:
                 event([change_hp(target, -amount)])
+        if actor["hp"] > 0 and not actor["dizzy"] and actor["states"].get("skilllock", 0) <= round_number and not finished():
+            if combo_id in (12604, 12943) and all(friends[p]["hp"] > 0 and not friends[p]["dizzy"]
+                and friends[p]["states"].get("skilllock", 0) <= round_number for p in participants):
+                # shortcut: 续击概率用配置trigger，最多5击；拿到官服续击参数后替换。
+                candidates = [u for u in living(enemies) if combo_id != 12943 or u not in selected]
+                if chain < 4 and candidates and roll(skill["trigger"]):
+                    target = selected[0] if combo_id == 12604 and selected[0]["hp"] > 0 else candidates[0]
+                    reactions += act(actor, target, followup=(skill, participants, old_ap), chain=chain + 1)
+            elif combo_id == 13017 and base_skill and roll(Fraction(male_count, 10)):
+                reactions += act(actor, followup=(base_skill, [actor["pos"]], base_skill["ap"]))
         return reactions
 
     def pet_action(direct, pet):
@@ -737,6 +906,12 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             event([])
         if finished():
             break
+        for team in teams.values():
+            for unit in living(team):
+                for kind, until in list(unit["states"].items()):
+                    if until <= round_number:
+                        del unit["states"][kind]
+                        event([state_event(unit, kind, False)])
         for direct, pet in combat_pets.items():
             if pet is not None and not finished():
                 pet_action(direct, pet)

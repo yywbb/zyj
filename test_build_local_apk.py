@@ -333,6 +333,39 @@ class LanBuildTests(unittest.TestCase):
             end
         ''')
 
+    def test_multicombo_missing_visuals_use_explicit_aliases_without_changing_ids(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("合体显示兼容验证需本机已有 lupa.lua51")
+        with zipfile.ZipFile(Path(__file__).parent / "configs_sec5.zip") as archive:
+            config = {name: json.loads(archive.read(f"5/{name}.json"))
+                      for name in ("general", "skill", "combskill", "skillanimation", "generalanimation")}
+        lua = LuaRuntime()
+        lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
+        lua.execute('''print=function() end;printT=print
+            CCFileUtils={sharedFileUtils=function(self) return self end,isFileExist=function() return originalPresent end}
+        ''')
+        code = self.client_scripts()["assets/scripts/battleReportConvert.so"]
+        skill_animation, general_animation = lua.execute(code + "\nreturn localBattleSkillAnimation, localBattleGeneralAnimation")
+        for present in (False, True):
+            lua.globals().originalPresent = present
+            for sid, alias in ((13124, 12989), (13125, 12638), (12281, 12517), (12282, 12523), (12283, 12511), (12284, 12415)):
+                with self.subTest(skill=sid, original=present):
+                    table = "combskill" if sid in (13124, 13125) else "skill"
+                    row = lua.globals().gamedata.config[table][str(sid)]
+                    result = skill_animation(row)
+                    self.assertEqual(result.id, config[table][str(sid if present else alias)]["animationid"])
+                    self.assertEqual(row.id, sid)
+            for cid, alias in ((10853, 10517), (10854, 10524), (10855, 10511), (10856, 10415)):
+                with self.subTest(cid=cid, original=present):
+                    info = lua.table_from({"cid": cid})
+                    result = general_animation(info)
+                    self.assertEqual(result.id, int(config["general"][str(cid if present else alias)]["animationid"]))
+                    self.assertEqual(info.cid, cid)
+        ordinary = lua.globals().gamedata.config.combskill['12990']
+        self.assertEqual(skill_animation(ordinary).id, ordinary.animationid)
+
     def test_pet_rest_control_is_packaged_and_empty_active_tabs_are_safe(self):
         try:
             from lupa.lua51 import LuaRuntime

@@ -186,6 +186,43 @@ def patch_game_server_json(raw_bytes, server_ip, accounts):
     print(f"  [GameServer] {accounts} account slots -> {server_ip}:14600 (no ADB)")
     return json.dumps(servers, ensure_ascii=False, indent=2).encode("utf-8")
 
+def patch_combo_animation_script(code):
+    marker = "local posconfig = {"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''-- 原包缺少两组新增合体及成员资源；仅兼容战斗显示，不改CID、技能或结算。
+local localSkillVisuals = {[13124]=12989,[13125]=12638,[12281]=12517,[12282]=12523,[12283]=12511,[12284]=12415}
+local localGeneralVisuals = {[10853]=10517,[10854]=10524,[10855]=10511,[10856]=10415}
+local function localBattleSkillAnimation(skill, animationid)
+    local animation = skillanimationConfig[tostring(animationid or skill.animationid)]
+    local replacement = localSkillVisuals[skill.id]
+    if replacement and not CCFileUtils:sharedFileUtils():isFileExist(animation.name.."/"..animation.name..".json") then
+        local row = (skill.id==13124 or skill.id==13125) and combskillConfig[tostring(replacement)] or skillConfig[tostring(replacement)]
+        animation = skillanimationConfig[tostring(row.animationid)]
+    end
+    return animation
+end
+local function localBattleGeneralAnimation(info)
+    local row = GeneralConfig[tostring(info.cid)]
+    local animation = animationConfig[tostring(row.animationid)]
+    local replacement = localGeneralVisuals[row.init_cid] or localGeneralVisuals[info.cid]
+    if replacement and not CCFileUtils:sharedFileUtils():isFileExist(animation.name.."/"..animation.name.."_time.json") then
+        animation = animationConfig[tostring(GeneralConfig[tostring(replacement)].animationid)]
+    end
+    return animation
+end
+
+local posconfig = {''')
+    marker = "animation = animationConfig[tostring(GeneralConfig[tostring(generalInfo.cid)].animationid)]"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "animation = localBattleGeneralAnimation(generalInfo)")
+    marker = "local skillanimation =  skillanimationConfig[tostring(_animationid)]"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "local skillanimation = localBattleSkillAnimation(skill, _animationid)")
+    marker = "    local skillanimation =  skillanimationConfig[tostring(skill.animationid)]"
+    assert code.count(marker) == 3
+    return code.replace(marker, "    local skillanimation = localBattleSkillAnimation(skill)")
+
+
 def patch_recharge_script(code):
     start = code.index("function recharge.createlist(self)\n")
     end = code.index("function recharge.setPage_vip(self)\n", start)
@@ -1078,6 +1115,7 @@ end
     assert code.count(marker) == 1
     # 部分群攻只有六份目标时序，第七阵位仍须处理实际伤害和魔罩。
     code = code.replace(marker, 'skilljson and (skilljson.damage[tostring(ccbindex)] or skilljson.damage["1"]) or nil')
+    code = patch_combo_animation_script(code)
     patched["assets/scripts/battleReportConvert.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("GameCopy").decode("utf-8").replace("\r\n", "\n")

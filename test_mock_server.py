@@ -5126,6 +5126,445 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual([a["e"][0]["m"]["m"] for a in combos[:2]], [84, 168])
         self.assertEqual([[d["p"] for d in a["e"] if "ap" in d] for a in combos[:2]], [[8], [10]])
 
+    def combo_teams(self, skill_id, initiator=0, **leader):
+        row = self.role_config["combskill"][str(skill_id)]
+        members = [row[f"cid{i}"] for i in (1, 2, 3) if row[f"cid{i}"]]
+        attack = {battle.POSITIONS[i]: self.combat_unit(cid, initial_ap=4 if i == initiator else 0,
+                  speed=1000 if i == initiator else 50, **(leader if i == initiator else {}))
+                  for i, cid in enumerate(members)}
+        defense = {pos: self.combat_unit(10201, iid=50 + i, atk=1, speed=10, initial_ap=0)
+                   for i, pos in enumerate(battle.POSITIONS)}
+        config = {**self.role_config, "combskillprobability": {**self.role_config["combskillprobability"],
+                  str(skill_id): dict.fromkeys((f"bout{i}" for i in range(1, 11)), 1)}}
+        return attack, defense, config
+
+    def test_multicombo_taoyuan_uses_current_id_and_restores_lowest_shu_ap(self):
+        attack, defense, config = self.combo_teams(12990)
+        attack[4] = self.combat_unit(10201, iid=1, initial_ap=0, speed=1)
+        with patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        first = report["b"]["a"][0]
+        self.assertEqual(first["s"], {"r": True, "p": [2, 8, 10], "t": "x", "S": 12990})
+        self.assertEqual([d["m"]["m"] for d in first["e"] if not d["r"]], [62] * 7)
+        restores = [d for a in report["b"]["a"][:2] for d in a["e"] if d.get("E")]
+        self.assertEqual(restores, [{"r": True, "p": 8, "ap": 4, "E": True}])
+        self.assertFalse(any(a["s"].get("S") == 12605 for a in report["b"]["a"]))
+        self.assert_battle_report(report)
+
+    def test_multicombo_all_current_ids_each_initiator_and_both_sides_replay(self):
+        unchanged = copy.deepcopy(self.role_config)
+        referenced = {row["combskillid"] for row in self.role_config["general"].values()}
+        expected = {row["id"] for row in self.role_config["combskill"].values() if row["cid2"] and row["id"] in referenced}
+        self.assertEqual((len(expected), set(battle.MULTI_COMBOS)), (37, expected))
+        self.assertFalse({12603, 12605} & expected)
+        for sid in sorted(expected):
+            row = self.role_config["combskill"][str(sid)]
+            for initiator in range(3 if row["cid3"] else 2):
+                for direct in (True, False):
+                    with self.subTest(skill=sid, initiator=initiator, direct=direct), patch.object(battle, "MAX_ROUNDS", 1):
+                        attack, defense, config = self.combo_teams(sid, initiator)
+                        before = copy.deepcopy((attack, defense))
+                        report = battle.simulate(attack if direct else defense, defense if direct else attack, config, 7)
+                        self.assertEqual((attack, defense), before)
+                        actions = [a for a in report["b"]["a"] if a["s"].get("S") == sid]
+                        self.assertTrue(actions)
+                        self.assertEqual(actions[0]["s"]["r"], direct)
+                        self.assertEqual(actions[0]["s"]["p"][0], battle.POSITIONS[initiator])
+                        self.assertEqual(set(actions[0]["s"]["p"]), set(attack))
+                        self.assert_battle_report(report)
+        self.assertEqual(self.role_config, unchanged)
+
+    def test_multicombo_missing_partner_insufficient_ap_and_failed_roll_fall_back(self):
+        for problem in ("missing", "ap", "probability", "dizzy", "dead"):
+            attack, defense, config = self.combo_teams(12990, 1)
+            if problem == "missing":
+                del attack[2]
+            elif problem == "ap":
+                attack[8]["initial_ap"] = 3
+            elif problem == "probability":
+                config["combskillprobability"]["12990"] = dict.fromkeys((f"bout{i}" for i in range(1, 11)), 0)
+            else:
+                config = {**config, "skill": {**config["skill"], "12201": {**config["skill"]["12201"],
+                          "effect": "dizzy", "effect-trigger": 1}}}
+                defense[2].update(initial_ap=4, speed=2000, atk=1000000 if problem == "dead" else 1)
+            with self.subTest(problem=problem), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+                self.assertFalse(any(a["s"].get("S") == 12990 for a in report["b"]["a"]))
+                leader = next(a for a in report["b"]["a"] if a["s"].get("r") and a["s"]["p"] == [8])
+                self.assertEqual(leader["s"].get("S"), None if problem == "ap" else 12405)
+                self.assert_battle_report(report)
+
+    def test_multicombo_promoted_identities_use_current_combo_without_duplicates(self):
+        attack, defense, config = self.combo_teams(12990)
+        for unit in attack.values():
+            cid = next(int(cid) for cid, row in config["general"].items()
+                       if row["init_cid"] == unit["cid"] and int(cid) != unit["cid"])
+            unit.update(cid=cid, skill=config["general"][str(cid)]["skillid"])
+        with patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        self.assertEqual(report["b"]["a"][0]["s"]["S"], 12990)
+        self.assertEqual(report["b"]["a"][0]["s"]["p"], [2, 8, 10])
+        self.assert_battle_report(report)
+
+    def test_multicombo_probability_uses_round_table_and_not_effect_trigger(self):
+        attack, defense, config = self.combo_teams(12604)
+        config["combskillprobability"]["12604"] = self.role_config["combskillprobability"]["12604"]
+        base = attack[2]["skill"]
+        config = {**config, "skill": {**config["skill"], str(base): {**config["skill"][str(base)], "ap": 100}}}
+        with patch.object(battle.random.Random, "random", return_value=.32), patch.object(battle, "MAX_ROUNDS", 2):
+            report = battle.simulate(attack, defense, config, 1)
+        round_number, rounds = 1, []
+        for action in report["b"]["a"]:
+            if not action["s"] and not action["e"]:
+                round_number += 1
+            if action["s"].get("S") == 12604:
+                rounds.append(round_number)
+        self.assertTrue(rounds)
+        self.assertEqual(set(rounds), {2})
+
+    def test_multicombo_attack_buffs_defense_debuffs_and_recovery_have_real_values(self):
+        for sid, attr, kind, count in ((12602, "atk", "promote", 2), (12623, "def", "weaken", 3),
+                                       (12630, "def", "weaken", 3), (12632, "atk", "promote", 1),
+                                       (12841, "def", "weaken", 3)):
+            attack, defense, config = self.combo_teams(sid)
+            for unit in defense.values():
+                unit["def"] = 50
+            with self.subTest(skill=sid), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+                applied = [d for d in report["b"]["a"][1]["e"] if d.get("B") == {"R": attr, "u": kind, "w": True}]
+                self.assertEqual(len(applied), count)
+                if sid == 12632:
+                    self.assertEqual(report["b"]["a"][0]["e"][0]["m"]["m"], 157)
+                self.assert_battle_report(report)
+        attack, defense, config = self.combo_teams(12624)
+        defense[2].update(speed=2000, atk=1000)
+        with patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        heals = [d["m"]["m"] for a in report["b"]["a"] for d in a["e"]
+                 if isinstance(d.get("m"), dict) and d["m"]["m"] < 0]
+        self.assertIn(-100, heals)
+        self.assert_battle_report(report)
+
+    def test_multicombo_hp_threshold_stuns_are_post_damage_and_strict(self):
+        for sid, ratio in ((12601, Fraction(1, 2)), (12625, Fraction(4, 5)), (12636, Fraction(1, 2))):
+            for extra in (0, 1):
+                attack, defense, config = self.combo_teams(sid)
+                damage = battle.damage(attack[2], defense[2], config, sid, combo=True)
+                current = int(10000 * ratio) + damage + (extra if sid == 12625 else -extra)
+                before = battle._prepare_teams
+                def prepare(teams, role_config):
+                    before(teams, role_config)
+                    for unit in teams[False].values():
+                        unit["hp"] = current
+                with self.subTest(skill=sid, extra=extra), patch.object(battle, "_prepare_teams", side_effect=prepare), patch.object(battle, "MAX_ROUNDS", 1):
+                    report = battle.simulate(attack, defense, config, 1)
+                    stunned = [d for a in report["b"]["a"][:2] for d in a["e"] if d.get("u") == {"u": "dizzy", "w": True}]
+                    if sid == 12636:
+                        self.assertTrue(all(d["p"] > 7 for d in stunned))
+                    else:
+                        self.assertEqual(any(d["p"] == 2 for d in stunned), bool(extra))
+
+    def test_multicombo_variable_damage_depends_on_target_count_and_precast_hp(self):
+        for count in (1, 4):
+            attack, defense, config = self.combo_teams(13076)
+            defense = dict(list(defense.items())[:count])
+            with self.subTest(targets=count), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+                expected = int(100 * (Fraction(395, 100) - Fraction(45, 100) * count) / 8) * 8
+                self.assertEqual([d["m"]["m"] for d in report["b"]["a"][0]["e"] if not d["r"]], [expected] * count)
+                self.assert_battle_report(report)
+        attack, defense, config = self.combo_teams(12629)
+        with patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        self.assertEqual(report["b"]["a"][0]["e"][0]["m"]["m"], 147)
+
+    def test_multicombo_ap_selection_seals_and_kill_refund(self):
+        for sid, count in ((12836, 2), (12989, 2), (13018, 1), (13124, 2)):
+            attack, defense, config = self.combo_teams(sid)
+            defense[8]["initial_ap"] = 8
+            defense[10]["initial_ap"] = 7
+            defense[10]["atk"] = 500
+            with self.subTest(skill=sid), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+                effects = report["b"]["a"][1]["e"]
+                self.assertEqual(len([d for d in effects if "ap" in d]), count)
+                self.assertEqual([d["p"] for d in effects if "ap" in d], [10] if sid == 13018 else [8, 10])
+                if sid in (12989, 13124):
+                    self.assertEqual(len([d for d in effects if d.get("u", {}).get("u") == "skilllock"]), 2)
+                    self.assertFalse(any(a["s"].get("S") for a in report["b"]["a"] if a["s"].get("r") is False and a["s"]["p"][0] in (8, 10)))
+                self.assert_battle_report(report)
+
+    def test_multicombo_repeats_are_bounded_and_charge_ap_only_once(self):
+        for sid in (12604, 12943):
+            attack, defense, config = self.combo_teams(sid)
+            config = {**config, "combskill": {**config["combskill"], str(sid): {**config["combskill"][str(sid)], "trigger": 1}}}
+            with self.subTest(skill=sid), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+                combos = [a for a in report["b"]["a"] if a["s"].get("S") == sid]
+                self.assertEqual(len(combos), 5)
+                self.assertEqual([d["ap"] for a in combos for d in a["e"] if d["r"] and d["p"] == 2 and "ap" in d],
+                                 [0] * 5 if sid == 12604 else [0, 2, 2, 2, 2, 2])
+                self.assert_battle_report(report)
+
+    def test_multicombo_all_reports_convert_with_actual_apk_animation_assets(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("合体战报转换需本机已有 lupa.lua51")
+        package = Path(server.BASE_DIR) / "zyj_local.apk"
+        if not package.exists():
+            self.skipTest("合体动画验证需要本地APK")
+        with patch.object(apk_builder, "SRC_APK", str(package)):
+            converter = apk_builder.read_script("battleReportConvert").decode("utf-8")
+            abbreviations = apk_builder.read_script("BattleReportAbbToKey").decode("utf-8")
+        converter = converter.replace("\r\n", "\n")
+        if "local function localBattleSkillAnimation" not in converter:
+            converter = apk_builder.patch_combo_animation_script(converter)
+        lua = LuaRuntime()
+        config = dict(self.role_config)
+        with zipfile.ZipFile(Path(server.BASE_DIR) / "configs_sec5.zip") as archive:
+            for name in ("generalanimation", "skillanimation"):
+                config[name] = json.loads(archive.read("5/" + name + ".json"))
+        lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
+        lua.execute('''print=function() end;printT=print;battleScene={slotNum=7}
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            CCFileUtils={sharedFileUtils=function(self) return self end,fullPathForFilename=function(self,p) return p end}
+            ui={Split=function(s,sep) local t={} for v in string.gmatch(s,'[^'..sep..']+') do t[#t+1]=v end return t end}''')
+        with zipfile.ZipFile(package) as archive:
+            assets = {}
+            names = archive.namelist()
+            lua.globals().CCFileUtils.isFileExist = lambda _, path: any(n.endswith("/" + path) for n in names)
+            def load_asset(path):
+                if path not in assets:
+                    matches = [n for n in names if n.endswith("/" + path)]
+                    self.assertEqual(len(matches), 1, path)
+                    assets[path] = json.loads(archive.read(matches[0]))
+                return lua.table_from(assets[path], recursive=True)
+            lua.globals().LoadJsonFileToTable = load_asset
+            lua.execute(converter)
+            lua.execute(abbreviations)
+            for sid in battle.MULTI_COMBOS:
+                for initiator in range(3 if self.role_config["combskill"][str(sid)]["cid3"] else 2):
+                    with self.subTest(skill=sid, initiator=initiator), patch.object(battle, "MAX_ROUNDS", 3):
+                        attack, defense, role_config = self.combo_teams(sid, initiator)
+                        report = battle.simulate(attack, defense, role_config, 3)
+                        native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
+                        atk, enemy = lua.globals().getBattleInitSlotInfo(native)
+                        animations, ext = lua.globals().convertBattleReportToAnimationSub(native, atk, enemy)
+                        self.assertGreater(len(animations), 1)
+                        for side, key in (("attack", "atk"), ("defense", "def")):
+                            for pos, unit in report["endmeta"][side].items():
+                                self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
+                                self.assertEqual(ext.endinfo[key][pos].ap, unit["ap"])
+
+            for sid in (13124, 13125):
+                attack, defense, role_config = self.combo_teams(sid)
+                role_config["combskillprobability"][str(sid)] = dict.fromkeys((f"bout{i}" for i in range(1, 11)), 0)
+                with self.subTest(personal_skills=sid), patch.object(battle, "MAX_ROUNDS", 3):
+                    report = battle.simulate(attack, defense, role_config, 3)
+                    native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
+                    atk, enemy = lua.globals().getBattleInitSlotInfo(native)
+                    for _, unit in atk.items():
+                        name = unit.animation.name
+                        self.assertTrue(any(n.endswith('/' + name + '/' + name + '_time.json') for n in names))
+                    animations, ext = lua.globals().convertBattleReportToAnimationSub(native, atk, enemy)
+                    for side, key in (("attack", "atk"), ("defense", "def")):
+                        for pos, unit in report["endmeta"][side].items():
+                            self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
+
+    def test_multicombo_invulnerability_and_seal_expire_without_losing_turns(self):
+        attack, defense, config = self.combo_teams(12631)
+        defense = {2: self.combat_unit(10201, initial_ap=4, atk=100, speed=100)}
+        with patch.object(battle, "MAX_ROUNDS", 2):
+            report = battle.simulate(attack, defense, config, 1)
+        hits = [d["m"] for a in report["b"]["a"] if a["s"].get("r") is False
+                for d in a["e"] if d["r"] and isinstance(d.get("m"), dict)]
+        self.assertEqual((hits[0]["m"], hits[0]["u"], hits[1]["m"]), (0, "proof", 100))
+        self.assertTrue(any(d.get("u") == {"u": "invincible", "w": False} for a in report["b"]["a"] for d in a["e"]))
+        self.assert_battle_report(report)
+        attack, _, config = self.combo_teams(12990)
+        defense, _, other = self.combo_teams(12989)
+        defense[2]["speed"] = 2000
+        config["combskillprobability"]["12989"] = other["combskillprobability"]["12989"]
+        with patch.object(battle, "MAX_ROUNDS", 2):
+            report = battle.simulate(attack, defense, config, 1)
+        round_number, rounds = 1, []
+        for action in report["b"]["a"]:
+            if not action["s"] and not action["e"]:
+                round_number += 1
+            if action["s"].get("S") == 12990:
+                rounds.append(round_number)
+        self.assertTrue(rounds)
+        self.assertEqual(set(rounds), {2})
+        self.assert_battle_report(report)
+
+    def test_multicombo_xiyin_prevents_stun_only_during_its_duration(self):
+        attack, _, config = self.combo_teams(13078)
+        defense = {2: self.combat_unit(10214, initial_ap=4, speed=100, atk=1)}
+        config = {**config, "skill": {**config["skill"], "12214": {**config["skill"]["12214"], "effect-trigger": 1, "ap_give": 4}}}
+        with patch.object(battle, "MAX_ROUNDS", 2):
+            report = battle.simulate(attack, defense, config, 1)
+        round_number, rounds = 1, []
+        for action in report["b"]["a"]:
+            if not action["s"] and not action["e"]:
+                round_number += 1
+            if any(d.get("u") == {"u": "dizzy", "w": True} for d in action["e"]):
+                rounds.append(round_number)
+        self.assertEqual(rounds, [2])
+        self.assertTrue(any(d.get("B") == {"R": "xiyin", "u": "promote", "w": False} for a in report["b"]["a"] for d in a["e"]))
+        self.assert_battle_report(report)
+
+    def test_multicombo_fire_mark_doubles_next_skill_but_not_normal_attacks(self):
+        attack, defense, config = self.combo_teams(13125)
+        config = {**config, "combskill": {**config["combskill"], "13125": {**config["combskill"]["13125"], "trigger": 1}}}
+        with patch.object(battle, "MAX_ROUNDS", 4):
+            report = battle.simulate(attack, defense, config, 1)
+        actions = [a for a in report["b"]["a"] if a["s"].get("r") and a["s"]["p"][0] == 2]
+        damage = lambda a: next(d["m"]["m"] for d in a["e"] if not d["r"] and isinstance(d.get("m"), dict))
+        self.assertEqual([damage(a) for a in actions[:4]], [84, 100, 100, 180])
+        self.assertTrue(any(d.get("B") == {"R": "fire", "u": "break", "w": False} for d in actions[3]["e"]))
+        self.assert_battle_report(report)
+
+    def test_multicombo_free_personal_skill_does_not_spend_ap_or_recurse(self):
+        attack, defense, config = self.combo_teams(13017)
+        with patch.object(battle.random.Random, "random", return_value=0), patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        actions = [a for a in report["b"]["a"] if a["s"].get("r") and a["s"]["p"][0] == 2]
+        self.assertEqual([a["s"]["S"] for a in actions], [13017, attack[2]["skill"]])
+        self.assertEqual([d["ap"] for a in actions for d in a["e"] if d["r"] and d["p"] == 2 and "ap" in d], [0, 0])
+        self.assert_battle_report(report)
+
+    def test_multicombo_forced_criticals_and_actual_kill_refund(self):
+        attack, defense, config = self.combo_teams(13077)
+        with patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        self.assertEqual(sum(d.get("m", {}).get("u") == "C" for d in report["b"]["a"][0]["e"]), 4)
+        attack, defense, config = self.combo_teams(13018)
+        for pos in (2, 4, 6):
+            defense[pos]["hp"] = 10
+        with patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        self.assertIn({"r": True, "p": 2, "ap": 4, "E": True}, report["b"]["a"][1]["e"])
+        self.assert_battle_report(report)
+
+    def test_multicombo_critical_bonus_is_thirty_percentage_points_not_seventy_five(self):
+        for draw, expected in ((.29, True), (.30, False)):
+            attack, defense, config = self.combo_teams(12627)
+            with self.subTest(draw=draw), patch.object(battle.random.Random, "random", return_value=draw), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+            hits = [d["m"] for d in report["b"]["a"][0]["e"] if not d["r"]]
+            self.assertEqual([d["u"] == "C" for d in hits], [expected] * 7)
+            self.assertEqual([d["m"] for d in hits], [116 if expected else 58] * 7)
+            self.assert_battle_report(report)
+
+        attack, defense, config = self.combo_teams(12627)
+        protected = self.passive_config(10201, 9000030)
+        config = {**config, "general": protected["general"]}
+        for unit in defense.values():
+            unit["advance"] = 1
+        with patch.object(battle.random.Random, "random", return_value=.1), patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        self.assertFalse(any(d.get("m", {}).get("u") == "C" for d in report["b"]["a"][0]["e"]))
+
+    def test_multicombo_damage_uses_combo_table_when_normal_skill_id_collides(self):
+        actor, target = {"atk": 100}, {"def": 0, "hp": 10000}
+        self.assertEqual(battle.damage(actor, target, self.role_config, 12601, combo=True), 85)
+        with self.assertRaisesRegex(ValueError, "伤害技能"):
+            battle.damage(actor, target, self.role_config, 12601)
+        self.assertEqual(battle.damage(actor, target, self.role_config, 12602, combo=True), 72)
+        self.assertNotEqual(battle.damage(actor, target, self.role_config, 12602), 72)
+
+    def test_multicombo_stat_effects_change_following_attacks_not_only_the_icons(self):
+        for sid, expected in ((12602, 82), (12623, 66), (12630, 76), (12841, 66)):
+            attack, defense, config = self.combo_teams(sid)
+            for unit in defense.values():
+                unit["def"] = 50
+            with self.subTest(skill=sid), patch.object(battle.random.Random, "sample", side_effect=lambda population, count: list(population)[:count]), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+            partner = next(a for a in report["b"]["a"] if a["s"].get("r") and a["s"]["p"] == [8])
+            self.assertEqual(partner["e"][0]["m"]["m"], expected)
+            self.assert_battle_report(report)
+
+    def test_multicombo_ranked_stuns_do_not_replace_already_stunned_top_targets(self):
+        for sid, expected in ((12988, []), (13075, [8])):
+            attack, _, config = self.combo_teams(sid)
+            attack[4] = self.combat_unit(10214, initial_ap=4, speed=2000)
+            defense = {pos: self.combat_unit(10201, iid=pos, atk=amount, initial_ap=0, speed=10)
+                       for pos, amount in ((2, 500), (4, 400), (8, 300))}
+            config = {**config, "skill": {**config["skill"], "12214": {**config["skill"]["12214"], "range": "first", "effect-trigger": 1}}}
+            with self.subTest(skill=sid), patch.object(battle, "MAX_ROUNDS", 1):
+                report = battle.simulate(attack, defense, config, 1)
+            actions = report["b"]["a"]
+            index = next(i for i, a in enumerate(actions) if a["s"].get("S") == sid)
+            changed = actions[index + 1]["e"] if index + 1 < len(actions) and not actions[index + 1]["s"] else []
+            self.assertEqual([d["p"] for d in changed if d.get("u") == {"u": "dizzy", "w": True}], expected)
+            self.assert_battle_report(report)
+
+    def test_multicombo_burning_uses_current_debuffed_defense_for_its_tick(self):
+        attack, defense, config = self.combo_teams(12633)
+        for unit in defense.values():
+            unit["def"] = 50
+        prepare = battle._prepare_teams
+        def with_debuff(teams, role_config):
+            prepare(teams, role_config)
+            for unit in teams[False].values():
+                unit["buffs"]["weaken", "def"] = (Fraction(1, 2), 3)
+        with patch.object(battle, "_prepare_teams", side_effect=with_debuff), patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        ticks = [d["m"]["m"] for a in report["b"]["a"] for d in a["e"]
+                 if isinstance(d.get("m"), dict) and d["m"].get("u") == "firing"]
+        self.assertEqual(ticks, [7, 7, 7])
+        self.assert_battle_report(report)
+
+    def test_multicombo_dead_count_is_frozen_before_aoe_not_empty_slots_or_new_kills(self):
+        attack, defense, config = self.combo_teams(13122)
+        attack[10] = self.combat_unit(10201, iid=1, initial_ap=0, speed=2000, atk=10000)
+        defense[2]["hp"] = 10
+        defense[4]["hp"] = 50
+        with patch.object(battle.random.Random, "sample", side_effect=lambda population, count: list(population)[:count]), patch.object(battle, "MAX_ROUNDS", 1):
+            report = battle.simulate(attack, defense, config, 1)
+        action = next(a for a in report["b"]["a"] if a["s"].get("S") == 13122)
+        self.assertEqual([d["m"]["m"] for d in action["e"] if not d["r"]], [50, 224, 224, 224])
+        self.assert_battle_report(report)
+
+    def test_multicombo_campaign_commit_retry_and_save_failure_keep_real_guide(self):
+        saved = self.seed_training_account()
+        saved["role_state"].update(level=20, nextexp=self.role_config["role_exp"]["20"]["nextexp"])
+        world = bytes.fromhex(saved["world_state"]["1002"])
+        slot = self.entity_records(world, 4, 1)[1]
+        saved["world_state"]["1002"] = b"".join(protocol.encode_pb_field(n, w, v) for n, w, v in protocol.iter_pb_fields(world) if (n, w) != (4, 2)).hex()
+        player.record_slot_update(saved, protocol.encode_pb_field(4, 2, slot))
+        for index, cid in enumerate((10404, 10405, 10502), 2):
+            unit = self.combat_unit(cid, iid=2000200 + index, hp=100000, atk=100, speed=200)
+            raw = b"".join(protocol.encode_pb_field(field, 0, unit.get(name, 0)) for name, field in battle.GENERAL_FIELDS.items())
+            raw += protocol.encode_pb_field(20, 0, 10300)
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+            slot = protocol.encode_pb_field(1, 0, index) + protocol.encode_pb_field(2, 0, unit["iid"])
+            player.record_slot_update(saved, protocol.encode_pb_field(4, 2, slot))
+        self.save_path.write_text(json.dumps(saved))
+        config = {**self.role_config, "combskillprobability": {**self.role_config["combskillprobability"],
+                  "12990": dict.fromkeys((f"bout{i}" for i in range(1, 11)), 1)}}
+        body = recharge.ids([42102, 2])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, config)
+            disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1306, 45000, body)
+            self.assertEqual((self.save_path.read_bytes(), session.save, session.random_replies), (disk, memory, {}))
+            session = Session(self.tables, self.save_path, self.step_counts, config)
+            packets = session.handle(1306, 45000, body)
+            committed = self.save_path.read_bytes()
+            self.assertEqual(session.handle(1306, 45000, body), packets)
+            self.assertEqual(self.save_path.read_bytes(), committed)
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1306)
+        fields = {n: v for n, w, v in protocol.iter_pb_fields(packets[0][16:])}
+        report = json.loads(fields[5])
+        self.assertTrue(any(a["s"].get("S") == 12990 for a in report["b"]["a"]))
+        self.assert_battle_report(report)
+        after = json.loads(committed)
+        self.assertEqual(after["guide"], saved["guide"])
+        self.assertEqual(after["role_state"]["stamina"], saved["role_state"]["stamina"] - self.role_config["copy"]["42102"]["2"]["physical"])
+
     def test_live_stun_skips_one_turn_and_then_releases(self):
         config = copy.deepcopy(self.role_config)
         config["skill"]["12214"]["effect-trigger"] = 1
