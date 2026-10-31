@@ -16,6 +16,7 @@ config_overrides.json
 /guilds.json
 /backups/
 /logs/
+/gm_operations/
 
 # Recorded frame data backup
 recorded_frames.json.bak

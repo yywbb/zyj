@@ -145,9 +145,10 @@ class ConfigStore:
             raise ValueError("配置表或查询参数无效")
         with self.lock, zipfile.ZipFile(self.path) as archive:
             overrides = load_overrides(self.path, archive)
-            data = apply_overrides(name, json.loads(archive.read(f"5/{name}.json")), overrides)
+            original = json.loads(archive.read(f"5/{name}.json"))
+            data = apply_overrides(name, copy.deepcopy(original), overrides)
         entries = data.items() if isinstance(data, dict) else enumerate(data)
-        rows = [{"id": str(key), "value": value, "changed": str(key) in overrides.get(name, {})}
+        rows = [{"id": str(key), "value": value, "original": original[key], "changed": str(key) in overrides.get(name, {})}
                 for key, value in entries
                 if not query or query.casefold() in (str(key) + json.dumps(value, ensure_ascii=False)).casefold()]
         if query:
@@ -173,8 +174,12 @@ class ConfigStore:
                 updated.setdefault(name, {}).setdefault(row_id, {}).update(changes)
             validate_overrides(updated, archive)
             base = json.loads(archive.read(f"5/{name}.json"))
+            previous = apply_overrides(name, copy.deepcopy(base), before)[row_id]
             apply_overrides(name, base, updated)
+            backup_id = None
             if before != updated:
-                storage.backup(self.path.parent / "backups" / "configs", json.dumps(before, ensure_ascii=False).encode())
+                backup_id = storage.backup(self.path.parent / "backups" / "configs", json.dumps(before, ensure_ascii=False).encode())
                 storage.atomic_write(overrides_path(self.path), json.dumps(updated, ensure_ascii=False, indent=2).encode())
-            return {"revision": revision(updated), "restart_required": revision(updated) != self.active_revision}
+            return {"revision": revision(updated), "restart_required": revision(updated) != self.active_revision,
+                    "backup_id": backup_id, "changes": [{"name": field, "before": previous.get(field), "after": base[row_id].get(field)}
+                        for field in EDITABLE[name]["fields"] if previous.get(field) != base[row_id].get(field)]}

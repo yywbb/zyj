@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 import secrets
 import threading
+import time
 from urllib.parse import parse_qs, urlsplit
 
 from ..accounts import parse_account_id
-from . import views
+from . import gm, views
 
 STATIC = Path(__file__).with_name("static")
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
@@ -21,6 +22,8 @@ class AdminServer(ThreadingHTTPServer):
     def __init__(self, port, accounts, configs):
         self.accounts = accounts
         self.configs = configs
+        self.gm = gm.Workbench(accounts)
+        self.started_at = time.time()
         self.token = secrets.token_urlsafe(32)
         super().__init__(("127.0.0.1", port), AdminHandler)
 
@@ -63,6 +66,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.connection.settimeout(10)
             self._check_origin()
             route = urlsplit(self.path)
+            query = parse_qs(route.query)
             parts = route.path.strip("/").split("/")
             data = {}
             if writing:
@@ -81,14 +85,33 @@ class AdminHandler(BaseHTTPRequestHandler):
                 filename, mime = ASSETS[route.path]
                 return self._send(200, (STATIC / filename).read_bytes(), mime)
             if not writing and route.path == "/api/status":
-                return self._send(200, {"token": self.server.token, "config": configs.status()})
+                return self._send(200, {"token": self.server.token, "config": configs.status(),
+                                        "started_at": self.server.started_at, "actions": gm.ACTIONS,
+                                        "common_items": [self.server.gm.items[cid] for cid in gm.COMMON_ITEMS if cid in self.server.gm.items]})
+            if not writing and route.path == "/api/catalog":
+                search = query.get("q", [""])[0].casefold()
+                kind = query.get("kind", [""])[0]
+                offset = int(query.get("offset", ["0"])[0])
+                if len(search) > 100 or offset < 0 or kind not in ("", "道具", "武将碎片", "普通装备", "武将"):
+                    raise ValueError("物品查询参数无效")
+                rows = [row for row in self.server.gm.items.values() if (not kind or row["kind"] == kind)
+                        and (not search or search in f'{row["cid"]} {row["name"]}'.casefold())]
+                rows.sort(key=lambda row: str(row["cid"]) != search)
+                return self._send(200, {"rows": rows[offset:offset + 50], "total": len(rows), "offset": offset})
+            if not writing and route.path == "/api/operations":
+                account = query.get("account", [""])[0]
+                return self._send(200, self.server.gm.history(parse_account_id(account) if account else None,
+                    query.get("action", [""])[0], int(query.get("since", ["0"])[0]),
+                    int(query.get("until", ["0"])[0]), int(query.get("offset", ["0"])[0])))
             if not writing and route.path == "/api/accounts":
                 rows = [views.summary(accounts.snapshot(i), accounts.step_counts, accounts.role_config) for i in accounts.account_ids()]
                 return self._send(200, {"accounts": rows})
             if len(parts) in (3, 4) and parts[:2] == ["api", "accounts"]:
                 account = parse_account_id(parts[2])
                 if writing and len(parts) == 3:
-                    return self._send(200, accounts.maintain(account, data.get("action"), data.get("revision"), data.get("backup_id")))
+                    return self._send(200, self.server.gm.logged(data.get("action"), account,
+                        {"revision": data.get("revision"), "backup_id": data.get("backup_id")},
+                        lambda: accounts.maintain(account, data.get("action"), data.get("revision"), data.get("backup_id"))))
                 if not writing and len(parts) == 3:
                     result = views.detail(accounts.snapshot(account), accounts.step_counts, accounts.role_config)
                     result["backups"] = accounts.backups(account)
@@ -96,14 +119,19 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if writing and parts[3:] == ["credentials"]:
                     if set(data) != {"password", "revision"}:
                         raise ValueError("创建账号需要密码和存档版本")
-                    return self._send(200, accounts.register(account, data["password"], data["revision"]))
+                    return self._send(200, self.server.gm.logged("register", account, {"revision": data["revision"]},
+                        lambda: accounts.register(account, data["password"], data["revision"])))
+                if writing and parts[3:] == ["gm"]:
+                    return self._send(200, self.server.gm.apply(account, data))
                 if not writing and parts[3:] == ["download"]:
                     raw = accounts.path(account).read_bytes()
                     return self._send(200, raw, "application/octet-stream", f"account-{account}.json")
             if len(parts) == 3 and parts[:2] == ["api", "configs"]:
                 if writing:
-                    return self._send(200, configs.update(parts[2], data.get("row_id"), data["changes"], data.get("revision")))
-                query = parse_qs(route.query)
+                    changes = data["changes"]
+                    return self._send(200, self.server.gm.logged("config", None,
+                        {"table": parts[2], "row_id": data.get("row_id"), "revision": data.get("revision")},
+                        lambda: configs.update(parts[2], data.get("row_id"), changes, data.get("revision"))))
                 return self._send(200, configs.table(parts[2], query.get("q", [""])[0], int(query.get("offset", ["0"])[0])))
             self._send(404, {"error": "页面或操作不存在"})
         except PermissionError as error:
@@ -113,7 +141,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             self._send(404, {"error": "存档或备份不存在"})
         except OSError as error:
-            self._send(500, {"error": f"读写失败，操作未完成: {error}"})
+            self._send(500, {"error": f"读写失败，请刷新状态或按原操作编号查询结果: {error}"})
 
 
 def start_admin(port, accounts, configs):
