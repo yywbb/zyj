@@ -434,22 +434,26 @@ IDS.fields = {IDS_IDS_FIELD, IDS_HELPERS_FIELD}''')
     code = code.replace(marker, marker + 'local localfriendcopy_pb = require("localfriendcopy_pb")\nlocal friends_pb = require("friends_pb")\n')
     marker = "    local friendcopyData = ids_pb.Ids()"
     assert code.count(marker) == 1
-    code = code.replace(marker, "    local friendcopyData = localfriendcopy_pb.Ids()")
+    code = code.replace(marker, '''    cclog("[LocalFriendCopy] net recv seq=%s bytes=%d", tostring(fd.ser), #fd.rbuf)
+    local friendcopyData = localfriendcopy_pb.Ids()''')
     marker = "\n    gamedata:FriendCopies(friendcopyData)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''
     gamedata.cache.localFriendCopyHelpers = {}
+    local helperCount = 0
     if friendcopyData.local_helpers ~= "" then
         local helpers = friends_pb.Friends()
         helpers:ParseFromString(friendcopyData.local_helpers)
         for _,v in ipairs(helpers.friends) do
             gamedata.cache.localFriendCopyHelpers[v.rid] = {
                 rid=v.rid, name=v.name, level=v.level, profile=v.profile, use=v.use,
-                title=gameConfig.defautTitleId, iconBox=gameConfig.defautIconBoxId,
                 params={{i=v.params.params[1].i}}
             }
+            helperCount = helperCount + 1
         end
     end
+    cclog("[LocalFriendCopy] net ready attempts=%s maps=%d helpers=%d",
+        tostring(gamedata.cache.friendcopy.kill), #gamedata.cache.friendcopy.maps, helperCount)
 ''')
     marker = "\n    local friends = table.copy(gamedata.cache.friends.friends)\n"
     assert code.count(marker) == 1
@@ -467,6 +471,21 @@ IDS.fields = {IDS_IDS_FIELD, IDS_HELPERS_FIELD}''')
     assert code.count(marker) == 1
     code = code.replace(marker, marker + "\n    self.rootItems.button1:setVisible(false)")
     patched["window_friendCopy"] = code
+    code = read_script("UIFriendCopy").decode("utf-8").replace("\r\n", "\n")
+    marker = "\nfunction UIFriendCopyQuery(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    cclog("[LocalFriendCopy] ui recv shown=%s attempts=%s maps=%d",
+        tostring(GameScene.layers["friendcopy"].show), tostring(t.friendcopy.kill),
+        table.getTableLength(t.friendcopy.maps))
+''')
+    patched["UIFriendCopy"] = code
+    code = read_script("Layer_friendcopy2").decode("utf-8").replace("\r\n", "\n")
+    marker = "    self.copydata = data.friendcopy\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    cclog("[LocalFriendCopy] render attempts=%s maps=%d existingView=%s",
+        tostring(self.copydata.kill), table.getTableLength(self.copydata.maps), tostring(self.listTableView ~= nil))
+''')
+    patched["Layer_friendcopy2"] = code
     return patched
 
 

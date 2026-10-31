@@ -267,7 +267,9 @@ class FriendCopyTests(unittest.TestCase):
         except ImportError:
             self.skipTest("实际APK回调验证需要本机已有lupa.lua51")
         lua = LuaRuntime(encoding=None, unpack_returned_tuples=True)
-        lua.execute(b'''print=function() end; printT=print; cclog=print
+        lua.execute(b'''print=function() end; printT=print
+            friendCopyLogs={}
+            cclog=function(fmt,...) table.insert(friendCopyLogs,string.format(fmt,...)) end
             package.preload.protobuf=function() return {
                 Descriptor=function() return {} end, FieldDescriptor=function() return {} end,
                 Message=function(d) return setmetatable({}, {__call=function()
@@ -283,8 +285,7 @@ class FriendCopyTests(unittest.TestCase):
                 r[k]=type(v)=="table" and table.copy(v) or v end return r end
             gamedata={cache={friendcopy={},friends={friends={[123]={use=0}}}},ext={}}
             gamedata.sortData=function(t) table.sort(t,function(a,b) return a.rid<b.rid end) end
-            gamedata.SomethingProcess=function(self,p) return p end
-            gameConfig={defautTitleId=0,defautIconBoxId=0}''')
+            gamedata.SomethingProcess=function(self,p) return p end''')
 
         # 执行真实PB描述符/业务回调；仅把原生pb编解码桥接到标准库实现。
         def decode_message(descriptor, raw):
@@ -340,13 +341,20 @@ class FriendCopyTests(unittest.TestCase):
 
     def test_packaged_callbacks_open_npc_selection_and_keep_the_real_friend_cache_separate(self):
         lua = self.network_lua()
+        self.assertIsNone(lua.globals().gameConfig)
         response = self.call(1323)[0][16:]
-        lua.globals().NetFriendCopyQueryCallback(lua.table_from({b"rbuf": response}))
+        query = lua.globals().NetFriendCopyQueryCallback(lua.table_from({b"rbuf": response}))
+        self.assertEqual(query[b"friendcopy"][b"kill"], 3)
+        self.assertEqual(len(query[b"friendcopy"][b"maps"]), 1)
+        self.assertIn(b"[LocalFriendCopy] net ready attempts=3 maps=1 helpers=3",
+                      list(lua.globals().friendCopyLogs.values()))
         _, opcode, selection = lua.globals().UIFriendCopyFriendSelectCallBack(lua.table())
         self.assertEqual(opcode, 13201)
         self.assertEqual(len(selection[b"data"]), 3)
         self.assertEqual(selection[b"data"][1][b"use"], 1)
         self.assertIn(b"NPC", selection[b"data"][1][b"name"])
+        self.assertIsNone(selection[b"data"][1][b"title"])
+        self.assertIsNone(selection[b"data"][1][b"iconBox"])
         self.strengthen()
         _, opcode, body = lua.globals().UIFriendCopyAttackCallback(lua.table_from({b"map": 43001, b"help": 990000001}))
         self.assertEqual((opcode, body), (1324, recharge.ids([43001, 990000001])))
@@ -356,7 +364,7 @@ class FriendCopyTests(unittest.TestCase):
         self.assertEqual(json.loads(result[b"battlereport1"]), self.report(packets))
         self.assertEqual(result[b"battlereport2"], b"")
         self.assertEqual(lua.globals().gamedata[b"cache"][b"friends"][b"friends"][123][b"use"], 0)
-        lua.globals().NetFriendCopyQueryCallback(lua.table_from({b"rbuf": self.call(1323)[0][16:]}))
+        query = lua.globals().NetFriendCopyQueryCallback(lua.table_from({b"rbuf": self.call(1323)[0][16:]}))
         _, _, selection = lua.globals().UIFriendCopyFriendSelectCallBack(lua.table())
         self.assertEqual(selection[b"data"][1][b"use"], 0)
         self.assertEqual(selection[b"data"][2][b"use"], 1)
@@ -364,14 +372,28 @@ class FriendCopyTests(unittest.TestCase):
         from lupa.lua51 import LuaRuntime
         ui = LuaRuntime(encoding=None)
         ui.execute(b'''print=function() end;printT=print
+            uiLogs={};cclog=function(fmt,...) table.insert(uiLogs,string.format(fmt,...)) end
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            ui={setLabelString=function(node,value) displayedAttempts=value end}
+            GameScene={layers={friendcopy={show=true}}}
             gameWindows={openWindow=function(self,name,data) opened={name=name,data=data} end}
             runGamePrompt=function() error("NPC selection must not be empty") end''')
-        ui.execute(builder.read_script("UIFriendCopy"))
+        patched = builder.patch_friend_copy_scripts()
+        ui.execute(patched["UIFriendCopy"].encode())
+        layer = ui.execute(patched["Layer_friendcopy2"].encode())
+        layer[b"rootItems"] = ui.table_from({b"rest": ui.table()})
+        ui.globals().GameScene[b"layers"][b"friendcopy"][b"module"] = layer
+        ui.execute(b'''GameScene.layers.friendcopy.module.creatList=function(self) createdMaps=self.copydata.maps end''')
         # UI/net是真实的独立Lua状态，队列传输把数组键转成字符串。
         def transfer(value):
             if hasattr(value, "items"):
                 return ui.table_from({str(k).encode() if isinstance(k, int) else k: transfer(v) for k, v in value.items()})
             return value
+        ui.globals().UIFriendCopyQuery(transfer(query))
+        self.assertEqual(ui.globals().displayedAttempts, 2)
+        self.assertEqual(len(list(ui.globals().createdMaps.values())), 2)
+        self.assertIn(b"[LocalFriendCopy] ui recv shown=true attempts=2 maps=2", list(ui.globals().uiLogs.values()))
+        self.assertIn(b"[LocalFriendCopy] render attempts=2 maps=2 existingView=false", list(ui.globals().uiLogs.values()))
         ui.globals().UIFriendCopyFriendSelect(transfer(selection))
         self.assertEqual(ui.globals().opened[b"name"], b"friendcopy")
         self.assertEqual(ui.globals().opened[b"data"][b"type"], b"select")
