@@ -1,6 +1,6 @@
 """主角魔晶培养/进阶与普通伙伴突破；在事务副本上准备属性和消耗。"""
 
-from . import battle, formation
+from . import battle, formation, qiankun
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 QUERIES = (1023, 1056)
@@ -27,6 +27,43 @@ def adjust(raw, changes):
     if not 0 <= power < (1 << 31):
         raise ValueError("培养/突破战力超出范围")
     return pb_set_varint(raw, 20, power), increase
+
+
+def migrate_self_stats(save, config):
+    version = save.get("self_stats_version", 0)
+    if type(version) is not int or version not in (0, 1):
+        raise ValueError("自身突破属性版本无效")
+    if version == 1:
+        return b""
+    world = bytes.fromhex(save["world_state"]["1002"])
+    generals, slots = formation.records(world, 1, 2), formation.records(world, 4, 2)
+    updates, receipts, increase = [], [], 0
+    for iid, raw in generals.items():
+        cid, level, advance = (pb_get_varint(raw, n) or 0 for n in (1, 3, 4))
+        row = config["general"][str(cid)]
+        # shortcut: 旧档只补本地普通IID；外部导入须有来源标记后再迁移。
+        if (iid <= 2000000 or not row["battle"] or not row["init_cid"] or row["quality"] not in (3, 4, 5, 6)
+                or advance > 10 or any(pb_get_varint(raw, n) for n in range(21, 41))):
+            continue
+        changes = battle.self_stats(row, level, advance, config)
+        if not any(changes.values()):
+            continue
+        changed, delta = adjust(raw, changes)
+        updates.append(encode_pb_field(1, 2, changed))
+        if iid in slots:
+            increase += delta
+        receipt = qiankun.get_state(save)["receipts"].get(f"general:{iid}")
+        if receipt and receipt["after"] == raw.hex():
+            receipts.append((receipt, changed.hex()))
+    state = save["role_state"]
+    if any(not 0 <= state[key] + increase < (1 << 31) for key in ("power", "power_all")):
+        raise ValueError("补算突破后的战力超出范围")
+    for key in ("power", "power_all"):
+        state[key] += increase
+    for receipt, after in receipts:
+        receipt["after"] = after
+    save["self_stats_version"] = 1
+    return b"".join(updates)
 
 
 def grow_protagonist(raw, row, cid, trained, slot, members, equips, config):
@@ -163,8 +200,10 @@ def prepare(opcode, save, body, config):
         new, _ = formation.bonuses(changed, slots.get(iid, b""), members, equips, config)
         changes = {battle.GENERAL_FIELDS[name]: int(battle.general_base(general, name, level, target, config))
                    - int(battle.general_base(general, name, level, previous, config)) for name in ("atk", "def", "hp", "speed")}
+        old_self = battle.self_stats(general, level, previous, config)
+        new_self = battle.self_stats(general, level, target, config)
         for field in new:
-            changes[field] = changes.get(field, 0) + new[field] - old[field]
+            changes[field] = changes.get(field, 0) + new[field] - old[field] + new_self[field] - old_self[field]
         changed, increase = adjust(changed, changes)
         reply = encode_pb_field(1, 2, changed)
         if opcode == 1023:

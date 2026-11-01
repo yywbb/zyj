@@ -304,6 +304,16 @@ def record_slot_update(save, body):
     world["1002"] = merge_pb_records(bytes.fromhex(world["1002"]), body, SLOT_RECORD_KEYS).hex()
 
 
+def settle_self_stats(save, role_config):
+    if not save.get("has_role"):
+        return b""
+    get_role_state(save, role_config)
+    update = development.migrate_self_stats(save, role_config)
+    if update:
+        record_slot_update(save, update)
+    return update
+
+
 def change_item_count(save, cid, delta, role_config, now=None):
     if cid in (1000, 1001, 1003):
         field = {1000: 1, 1001: 2, 1003: 4}[cid]
@@ -873,6 +883,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
 def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at):
     before = copy.deepcopy(save)
     now = int(time.time())
+    self_update = settle_self_stats(save, role_config)
     online_rewards.settle(save, role_config, connected_at, now)
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
@@ -915,12 +926,12 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
-    if pet_update:
+    if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
                                                          *development.MUTATIONS, *pets.MUTATIONS) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
-    if local_update or break_comb or pet_update:
+    if local_update or break_comb or pet_update or self_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
         if any(state[key] != previous[key] for key in ("power", "g_power", "power_all")):
             power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
@@ -953,6 +964,7 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
 def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config, connected_at, *, opcode=1306):
     before = copy.deepcopy(save)
     now = int(time.time())
+    self_update = settle_self_stats(save, role_config)
     online_rewards.settle(save, role_config, connected_at, now)
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
@@ -1021,6 +1033,9 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
             + (encode_pb_field(5, 2, json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) if report is not None else b"")
              + b"".join(generals))
     packets = [pack_frame(opcode, seq, body)]
+    if self_update:
+        packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
+    power_delta = state["power"] - get_role_state(before, role_config)["power"]
     if power_delta:
         power = b"".join(encode_pb_field(1, 0, value) for value in
                          (power_delta, state["power"], 0, state["g_power"], power_delta, state["power_all"]))

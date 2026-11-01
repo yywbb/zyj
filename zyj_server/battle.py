@@ -974,14 +974,35 @@ def general_base(row, name, level, advance, config):
     return value
 
 
+def self_stats(row, level, advance, config):
+    values = {field: Fraction(0) for field in range(6, 17)}
+    ids = {row.get(f"break{i}", 0) for i in range(1, advance + 1)} - {0}
+    for pid in sorted(ids):
+        passive = config["breakskill"][str(pid)]
+        name = passive["attr"]
+        if passive["type"] != 0 or passive["target"] != "3" or GENERAL_FIELDS.get(name) not in values:
+            continue
+        if passive["method"] not in ("value", "percent") or passive["kind"] not in ("0", "1"):
+            raise ValueError("自身突破属性配置无效")
+        value = Fraction(str(passive["value"])) * (-1 if passive["kind"] == "1" else 1)
+        # 四围百分比只乘通用突破后的基础成长；概率属性使用配置百分点。
+        if passive["method"] == "percent" and name in ("atk", "def", "hp", "speed"):
+            value *= int(general_base(row, name, level, advance, config))
+        values[GENERAL_FIELDS[name]] += value
+    return {field: int(value) for field, value in values.items()}
+
+
 def grown_general(unit, gained, config, maximum=None):
     level, experience, up = general_experience(unit, gained, config, maximum)
     values = {3: level, 5: experience}
     row = config["general"][str(unit["cid"])]
+    previous = self_stats(row, unit["level"], unit.get("advance", 0), config)
+    current = self_stats(row, level, unit.get("advance", 0), config)
     deltas = {}
     for name in ("atk", "def", "hp", "speed"):
         delta = (int(general_base(row, name, level, unit.get("advance", 0), config))
-                 - int(general_base(row, name, unit["level"], unit.get("advance", 0), config)))
+                 - int(general_base(row, name, unit["level"], unit.get("advance", 0), config))
+                 + current[GENERAL_FIELDS[name]] - previous[GENERAL_FIELDS[name]])
         values[GENERAL_FIELDS[name]] = unit[name] + delta
         deltas[name] = delta
     # 自研战力仅用于显示：保留旧基值，新增成长按四围增量计分，不参与胜负。

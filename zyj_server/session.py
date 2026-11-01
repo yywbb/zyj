@@ -332,7 +332,7 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (204, 300, 4016, 1304, 1350, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (204, 300, 4016, 1304, 1350, *player.WORLD_QUERY_IDS, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
                       *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES):
             working = copy.deepcopy(self.save)
@@ -347,9 +347,7 @@ class Session:
             self.save = working
             return packets
 
-        if opcode in player.WORLD_QUERY_IDS:
-            responses = [{"opcode": opcode, "seq": seq, "hex": self.save["world_state"][str(opcode)]}]
-        elif opcode in activities.OPCODES or opcode == 999905:
+        if opcode in activities.OPCODES or opcode == 999905:
             responses = [{"opcode": opcode, "seq": seq, "hex": ""}]
         elif opcode == 1032:
             ids = activities.parse_hint_ids(body)
@@ -399,6 +397,8 @@ class Session:
         if (opcode == 999900 and any(mid in (1007, 1109) for mid in get_comb_ids(body))
                 and self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2):
             return unavailable_response(opcode, seq, body, "教程装备录制已过期，请使用当前阵容单独装备或强化。")
-        packets = player.prepare_recorded_responses(seq, responses, self.save, body,
+        working = copy.deepcopy(self.save)
+        packets = player.prepare_recorded_responses(seq, responses, working, body,
                                                     self.save_path, self.step_counts, self.role_config, self.connected_at)
+        self.save = working
         return packets

@@ -241,6 +241,7 @@ class Workbench:
                 save = Session(store.tables, store.path(account), store.step_counts, store.role_config).save
                 before = copy.deepcopy(save)
                 now = int(time.time())
+                player.settle_self_stats(save, store.role_config)
                 player.settle_stamina(save, store.role_config, now)
                 state = player.get_role_state(save, store.role_config)
                 for key, delta in data.get("resources", {}).items():

@@ -2344,6 +2344,210 @@ class ReplayRoutingTests(unittest.TestCase):
         raw = self.entity_records(reply, 1, 2)[iid]
         self.assertEqual([protocol.pb_get_varint(raw, n) for n in (6, 7, 8, 9)], [1290, 508, 2959, 114])
 
+    def test_development_self_stat_passives_are_added_on_breakthrough_and_preview(self):
+        for cid, level, target, field, bonus in ((10595, 20, 2, 6, 1000), (10596, 30, 3, 6, None),
+                                                  (10213, 30, 3, 10, 10)):
+            with self.subTest(cid=cid):
+                config = copy.deepcopy(self.role_config)
+                if cid == 10213:
+                    config["general"][str(cid)].update(break1=0, break2=0)
+                    config["general"][str(cid)]["break3"] = 9000112
+                row = config["general"][str(cid)]
+                raw = recruit.new_general(cid, 2000001, config)
+                raw = protocol.pb_set_varint(protocol.pb_set_varint(raw, 3, level), 4, target - 1)
+                for name, number in (("atk", 6), ("def", 7), ("hp", 8), ("speed", 9)):
+                    raw = protocol.pb_set_varint(raw, number, int(battle.general_base(row, name, level, target - 1, config)))
+                saved = {"has_role": True, "role_state": {"level": 23},
+                         "world_state": {"1002": protocol.encode_pb_field(1, 2, raw).hex()}}
+                original = copy.deepcopy(saved)
+                preview, _, update = development.prepare(1023, saved, protocol.encode_pb_field(1, 0, 2000001), config)
+                self.assertEqual((saved, update), (original, b""))
+                reply, _, update = development.prepare(1017, saved, protocol.encode_pb_field(1, 0, cid), config)
+                self.assertEqual(reply, preview)
+                changed = self.entity_records(update, 1, 2)[2000001]
+                expected = int(battle.general_base(row, "atk", level, target, config)) if field == 6 else row["critical"]
+                expected += int(battle.general_base(row, "atk", level, target, config) * 15 / 100) if bonus is None else bonus
+                self.assertEqual(protocol.pb_get_varint(changed, field), expected)
+                actor = {name: protocol.pb_get_varint(changed, number) or 0 for name, number in battle.GENERAL_FIELDS.items()}
+                actor["skill"] = row["skillid"]
+                teams = {True: {2: actor}, False: {2: self.combat_unit(10213)}}
+                battle._prepare_teams(teams, config)
+                self.assertEqual(teams[True][2]["atk" if field == 6 else "critical"], expected)
+
+    def test_self_stat_percentage_growth_preserves_training_and_batch_rounding(self):
+        row = self.role_config["general"]["10596"]
+        raw = recruit.new_general(10596, 2000001, self.role_config)
+        raw = protocol.pb_set_varint(protocol.pb_set_varint(raw, 3, 30), 4, 3)
+        for name, field in (("atk", 6), ("def", 7), ("hp", 8), ("speed", 9)):
+            value = int(battle.general_base(row, name, 30, 3, self.role_config))
+            raw = protocol.pb_set_varint(raw, field, value + (value * 15 // 100 if field == 6 else 0) + 37)
+        quality = row["quality"]
+        gains = [self.role_config["general_exp"][str(level)][f"{quality}exp"] for level in range(30, 34)]
+        batch, _, _ = training.grow_general(raw, sum(gains), b"", set(), {}, self.role_config)
+        split = raw
+        for gain in gains:
+            split, _, _ = training.grow_general(split, gain, b"", set(), {}, self.role_config)
+        self.assertEqual(batch, split)
+        base = int(battle.general_base(row, "atk", 34, 3, self.role_config))
+        self.assertEqual(protocol.pb_get_varint(batch, 6), base + base * 15 // 100 + 37)
+
+    def test_self_stats_use_rate_points_and_ignore_combat_only_passives(self):
+        config = copy.deepcopy(self.role_config)
+        row = dict(config["general"]["10213"])
+        ids = (9000139, 9000094, 9000112, 9000112, 9000009, 9000014, 9000024)
+        row.update({f"break{i}": pid for i, pid in enumerate(ids, 1)})
+        values = battle.self_stats(row, 30, len(ids), config)
+        self.assertEqual(values[6], 200)
+        self.assertEqual(values[7], int(int(battle.general_base(row, "def", 30, len(ids), config)) * Fraction(1, 10)))
+        self.assertEqual(values[10], 10)
+        self.assertEqual(sum(values[field] for field in values if field not in (6, 7, 10)), 0)
+        config["breakskill"]["9000139"]["method"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "配置"):
+            battle.self_stats(row, 30, len(ids), config)
+
+    def seed_legacy_self_stat_account(self):
+        saved = self.seed_training_account(coin=2000000000)
+        saved["role_state"].update(level=23, gold=100000)
+        for cid, iid, advance in ((10595, 2000001, 2), (10596, 2000002, 3)):
+            row = self.role_config["general"][str(cid)]
+            raw = recruit.new_general(cid, iid, self.role_config)
+            raw = protocol.pb_set_varint(protocol.pb_set_varint(raw, 3, 30), 4, advance)
+            for name, field in (("atk", 6), ("def", 7), ("hp", 8), ("speed", 9)):
+                raw = protocol.pb_set_varint(raw, field, int(battle.general_base(row, name, 30, advance, self.role_config)))
+            raw += protocol.encode_pb_field(50, 2, b"keep-self-stat")
+            player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+        update = formation.change(saved, 1003, protocol.encode_pb_field(1, 0, 2) + protocol.encode_pb_field(3, 0, 2000001), self.role_config)
+        player.record_slot_update(saved, update)
+        saved.pop("self_stats_version", None)
+        self.save_path.write_text(json.dumps(saved))
+        return saved
+
+    def test_legacy_self_stats_migrate_once_commit_before_push_and_preserve_progress(self):
+        before = self.seed_legacy_self_stat_account()
+        old = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(1002, 31000, b"")
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [1002, 1027, 205])
+            self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+            changed = self.entity_records(packets[0][16:], 1, 2)
+            self.assertEqual(changed, self.entity_records(packets[1][16:], 1, 2))
+            self.assertEqual(protocol.pb_get_varint(changed[2000001], 6), protocol.pb_get_varint(old[2000001], 6) + 1000)
+            extra = int(battle.general_base(self.role_config["general"]["10596"], "atk", 30, 3, self.role_config)) * 15 // 100
+            self.assertEqual(protocol.pb_get_varint(changed[2000002], 6), protocol.pb_get_varint(old[2000002], 6) + extra)
+            for iid in (2000001, 2000002):
+                self.assertIn((50, 2, b"keep-self-stat"), list(protocol.iter_pb_fields(changed[iid])))
+            after = copy.deepcopy(session.save)
+            self.assertEqual(after["self_stats_version"], 1)
+            self.assertEqual(after["role_state"]["power"], before["role_state"]["power"] + 1000)
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in session.handle(1002, 31001, b"")], [1002])
+            again = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in again.handle(1002, 31002, b"")], [1002])
+        for key in ("guide", "last_battle"):
+            self.assertEqual(after.get(key), before.get(key))
+        for key in ("1200", "1012", "1107", "1300"):
+            self.assertEqual(after["world_state"][key], before["world_state"][key])
+        for key in ("coin", "gold", "level", "exp", "energy"):
+            self.assertEqual(after["role_state"][key], before["role_state"][key])
+        self.assertEqual(again.save["world_state"]["1002"], after["world_state"]["1002"])
+
+    def test_legacy_self_stats_failures_do_not_leak_migration_or_charge(self):
+        before = self.seed_legacy_self_stat_account()
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            self.assertEqual(struct.unpack(">IIII", session.handle(1017, 31003, b"\x08\x00")[0][:16])[2], 999999)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1002, 31004, b"")
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+        for problem in ("overflow", "version"):
+            saved = copy.deepcopy(before)
+            if problem == "overflow":
+                raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[2000001]
+                player.record_slot_update(saved, protocol.encode_pb_field(1, 2, protocol.pb_set_varint(raw, 6, (1 << 31) - 500)))
+            else:
+                saved["self_stats_version"] = "1"
+            self.save_path.write_text(json.dumps(saved))
+            with self.subTest(problem=problem), redirect_stdout(io.StringIO()):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                self.assertEqual(struct.unpack(">IIII", session.handle(1002, 31005, b"")[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_legacy_self_stats_keep_receipted_rebirth_and_skip_recorded_iids(self):
+        saved = self.seed_legacy_self_stat_account()
+        raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[2000002]
+        baseline = recruit.new_general(10596, 2000002, self.role_config)
+        saved["qiankun_state"]["receipts"]["general:2000002"] = {"before": baseline.hex(), "after": raw.hex(), "costs": [[20017, 10]]}
+        recorded = protocol.pb_set_varint(raw, 2, 1500)
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, recorded))
+        self.save_path.write_text(json.dumps(saved))
+        with redirect_stdout(io.StringIO()):
+            Session(self.tables, self.save_path, self.step_counts, self.role_config).handle(1002, 31006, b"")
+        after = json.loads(self.save_path.read_text())
+        generals = self.entity_records(bytes.fromhex(after["world_state"]["1002"]), 1, 2)
+        self.assertEqual(generals[1500], recorded)
+        receipt = after["qiankun_state"]["receipts"]["general:2000002"]
+        self.assertEqual(receipt, {"before": baseline.hex(), "after": generals[2000002].hex(), "costs": [[20017, 10]]})
+        reward, _, _ = qiankun.prepare(1035, after, protocol.encode_pb_field(1, 0, 2000002), self.role_config)
+        self.assertEqual(self.entity_records(reward, 8, 2)[2000002], baseline)
+
+    def test_migrated_self_stats_survive_formation_changes_and_queries_stay_read_only(self):
+        from zyj_server.admin import views
+        saved = self.seed_legacy_self_stat_account()
+        original = copy.deepcopy(saved)
+        snapshot = {"id": 1, "save": saved, "error": None}
+        views.detail(snapshot, self.step_counts, self.role_config)
+        self.assertEqual(saved, original)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.handle(1002, 31007, b"")
+            before = copy.deepcopy(session.save)
+            for seq, iid in ((31008, 2000002), (31009, 2000001)):
+                body = protocol.encode_pb_field(1, 0, 2) + protocol.encode_pb_field(3, 0, iid)
+                self.assertEqual(struct.unpack(">IIII", session.handle(1003, seq, body)[0][:16])[2], 1003)
+            for iid, raw in self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2).items():
+                changed = self.entity_records(bytes.fromhex(session.save["world_state"]["1002"]), 1, 2)[iid]
+                self.assertEqual(changed, raw)
+            self.assertEqual(session.save["role_state"], before["role_state"])
+
+    def test_legacy_self_stats_are_settled_before_live_battle_and_cached_once(self):
+        before = self.seed_legacy_self_stat_account()
+        raw = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)[2000001]
+        body = protocol.encode_pb_field(1, 0, 42102) + protocol.encode_pb_field(1, 0, 1)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            with patch.object(battle, "simulate", wraps=battle.simulate) as simulate:
+                packets = session.handle(1306, 31010, body)
+            self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1306)
+            attack = simulate.call_args.args[0]
+            queen = next(unit for unit in attack.values() if unit["iid"] == 2000001)
+            self.assertEqual(queen["atk"], protocol.pb_get_varint(raw, 6) + 1000)
+            self.assertIn(1027, [struct.unpack(">IIII", packet[:16])[2] for packet in packets])
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            self.assertEqual(session.handle(1306, 31010, body), packets)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_legacy_self_stats_initialization_rewrites_role_and_roster_atomically(self):
+        before = self.seed_legacy_self_stat_account()
+        request = bytes.fromhex(self.by_seq[12]["hex"])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(999900, 31011, request)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(999900, 31012, request)
+        initial = dict(protocol.get_comb_messages(packets[0][16:]))
+        world = bytes.fromhex(session.save["world_state"]["1002"])
+        self.assertEqual(initial[1002], world)
+        self.assertEqual(protocol.pb_get_varint(initial[1001], 14), before["role_state"]["power"] + 1000)
+        self.assertEqual(protocol.parse_ids_pb(next(packet[16:] for packet in packets if struct.unpack(">IIII", packet[:16])[2] == 205))[1],
+                         session.save["role_state"]["power"])
+        self.assertEqual(json.loads(self.save_path.read_text()), session.save)
+
     def test_development_rejects_bad_parameters_and_save_failures_without_cost(self):
         self.seed_break_account()
         self.give_props({20161: 100})
