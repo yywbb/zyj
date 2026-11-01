@@ -102,6 +102,7 @@ def pick(config, group, rng):
 
 def build_reward(save, gets, config):
     """招募和礼包共用武将去重，预览不调用此函数发放。"""
+    from . import favorite
     roster = [v for n, w, v in iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])) if n == 1 and w == 2]
     owned = {config["general"][str(pb_get_varint(v, 1))]["init_cid"] for v in roster}
     iid = max([2000000, *(pb_get_varint(v, 2) for v in roster)])
@@ -117,7 +118,7 @@ def build_reward(save, gets, config):
                     props[fragment["id"]] = props.get(fragment["id"], 0) + fragment["recruit"]
                 else:
                     iid += 1
-                    generals.append(encode_pb_field(8, 2, new_general(cid, iid, config)))
+                    generals.append(encode_pb_field(8, 2, favorite.add_bonus(new_general(cid, iid, config), save, config)))
                     owned.add(cid)
         else:
             props[cid] = props.get(cid, 0) + count

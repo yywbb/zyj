@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, activity_copy, arena, blackmarket, daily_events, development, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -54,6 +54,8 @@ class Session:
         secret_shop.get_state(self.save, role_config)
         guild.daily_state(self.save)
         pets.get_state(self.save, role_config)
+        favorite.get_state(self.save, role_config)
+        cornucopia.get_state(self.save, role_config)
         for gift_id in timebag.GIFTS:
             timebag.get_state(self.save, gift_id)
         if self.save.get("has_role"):
@@ -151,9 +153,6 @@ class Session:
 
         if opcode in (1346, 1348):
             return unavailable_response(opcode, seq, body, "活动副本扫荡暂未接入，请选择实际挑战，未消耗次数或资源。")
-
-        if opcode in favorite.UNSUPPORTED:
-            return unavailable_response(opcode, seq, body, "客栈暂只接通引导与查询，送礼、成就领取和好感转移尚未实现，未扣除资源。")
 
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
@@ -284,7 +283,7 @@ class Session:
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
                                   *daily_events.CLAIMS,
-                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS):
+                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:
@@ -334,7 +333,7 @@ class Session:
 
         if opcode in (204, 300, 4016, 1304, 1350, *player.WORLD_QUERY_IDS, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
-                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES):
+                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900

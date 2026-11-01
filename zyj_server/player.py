@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, configuration, daily_events, development, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -66,7 +66,7 @@ def load_role_config(config_path):
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
-                             "favorable", "favorable_task",
+                             "favorable", "favorable_level", "favorable_task", "shake_param",
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
@@ -187,8 +187,8 @@ def get_role_state(save, role_config):
     defaults = {"vip": recharge.vip(save.get("recharge_state", {"rmb": 0}), role_config),
                 "exp": 0, "nextexp": config["nextexp"], "coin": save.get("silver", 0),
                 "gold": save.get("gold", 0), "stamina": config["maxstamina"],
-                "maxstamina": config["maxstamina"], "energy": save.get("energy", 20),
-                "maxenergy": config["maxenergy"], "power": 0, "g_power": 0, "power_all": 0}
+                "maxstamina": config["maxstamina"] + favorite.capacity_bonus(save, role_config, "maxstamina"), "energy": save.get("energy", 20),
+                "maxenergy": config["maxenergy"] + favorite.capacity_bonus(save, role_config, "maxenergy"), "power": 0, "g_power": 0, "power_all": 0}
     for name, value in defaults.items():
         state.setdefault(name, value)
     if any(type(value) is not int or value < 0 for name, value in state.items() if name in ROLE_FIELD_MAP):
@@ -557,8 +557,28 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode in world_boss.QUERIES:
         body = world_boss.query(opcode, save, request_body, role_config)
-    elif opcode in favorite.QUERIES:
-        body = favorite.query(opcode, save, request_body, role_config)
+    elif opcode in favorite.OPCODES:
+        body, costs, update = favorite.prepare(opcode, save, request_body, role_config, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        previous = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)
+        for iid, raw in formation.records(update, 1, 2).items():
+            receipt = qiankun.get_state(save)["receipts"].get(f"general:{iid}")
+            if receipt and receipt["after"] == previous[iid].hex():
+                baseline = bytes.fromhex(receipt["before"])
+                if all(pb_get_varint(baseline, field) == pb_get_varint(raw, field) for field in (1, 2)):
+                    changes = {field: pb_get_varint(raw, field) - pb_get_varint(previous[iid], field) for field in (6, 7, 8)}
+                    baseline, _ = development.adjust(baseline, changes)
+                    receipt.update(before=baseline.hex(), after=raw.hex())
+            record_protagonist_general(save, raw)
+        if update:
+            record_slot_update(save, update)
+    elif opcode in cornucopia.OPCODES:
+        body, costs, reward = cornucopia.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode in welfare.OPCODES:
         body, costs = welfare.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
@@ -573,7 +593,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             if opcode == 1017:
                 raw = next(v for n, w, v in iter_pb_fields(update) if (n, w) == (1, 2))
                 before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
-                qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config))
+                qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config, save))
             record_slot_update(save, update)
     elif opcode in (*daily_events.QUERIES, *daily_events.CLAIMS):
         body = daily_events.prepare(opcode, save, request_body, role_config, now)
@@ -806,7 +826,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                     change_item_count(save, cid, -count, role_config, now)
                 raw = next(v for n, w, v in iter_pb_fields(body) if (n, w) == (8, 2))
                 before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
-                qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config))
+                qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config, save))
             elif opcode in (1118, 1210):
                 body, costs, power_delta = training.strengthen_treasure(save, opcode, request_body, role_config)
                 for cid, count in costs:
@@ -923,13 +943,13 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         for mid in WORLD_QUERY_IDS:
             if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
-    if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065):
+    if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
-                                                         *development.MUTATIONS, *pets.MUTATIONS) and not responses[0]["hex"])
+                                                         *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb or pet_update or self_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
@@ -997,7 +1017,9 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
             gained += reward["gained"]
             state.update(level=reward["level"], exp=reward["exp"])
         level_config = role_config["role_exp"][str(state["level"])]
-        state.update(nextexp=level_config["nextexp"], maxstamina=level_config["maxstamina"], maxenergy=level_config["maxenergy"])
+        state.update(nextexp=level_config["nextexp"],
+                     maxstamina=level_config["maxstamina"] + favorite.capacity_bonus(save, role_config, "maxstamina"),
+                     maxenergy=level_config["maxenergy"] + favorite.capacity_bonus(save, role_config, "maxenergy"))
         world = bytes.fromhex(save["world_state"]["1002"])
         records = formation.records(world, 1, 2)
         slots = formation.records(world, 4, 2)

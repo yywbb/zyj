@@ -602,6 +602,19 @@ def patch_arena_scripts():
     return patched
 
 
+def patch_cornucopia_scripts():
+    code = read_script("GameActivityCornucopia").decode("utf-8").replace("\r\n", "\n")
+    marker = '    local reward, used, ext = gamedata:SomethingProcess(SomeThings,"cornucopia")\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    ext = {}
+    local state = SomeThings.pext1 and SomeThings.pext1[1]
+    if state then
+        for i=6,#state.ids do table.insert(ext,state.ids[i]) end
+    end
+''')
+    return {"GameActivityCornucopia": code}
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -1455,6 +1468,9 @@ end"""
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     for name, code in patch_arena_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_cornucopia_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched

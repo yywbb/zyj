@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from . import activities, fashion, formation, recharge, recruit
+from . import activities, fashion, favorite, formation, recharge, recruit
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 QUERIES = (3704, 3850, 7030, 3780)
@@ -77,11 +77,11 @@ def record_training(save, kind, before, after, costs, clean):
     get_state(save)
 
 
-def pristine_general(raw, config):
+def pristine_general(raw, config, save=None):
     cid, iid = pb_get_varint(raw, 1), pb_get_varint(raw, 2)
     if str(cid) not in config["general"]:
         return False
-    expected = recruit.new_general(cid, iid, config)
+    expected = favorite.add_bonus(recruit.new_general(cid, iid, config), save or {}, config)
     return (all((pb_get_varint(raw, n) or 0) == (pb_get_varint(expected, n) or 0) for n in range(1, 41))
             and not any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2)))
 
@@ -165,7 +165,7 @@ def prepare(opcode, save, body, config):
                 if not receipt or receipt["after"] != raw.hex():
                     raise ValueError("此伙伴缺少完整消耗记录，安全保护：未扣款、未重生")
                 baseline = bytes.fromhex(receipt["before"])
-                if not pristine_general(baseline, config):
+                if not pristine_general(baseline, config, save):
                     raise ValueError("伙伴重生基线无效")
                 gets.update(dict(receipt["costs"]))
                 costs.append((1001, config["renascence"][str(pb_get_varint(raw, 3))]["generallvcost"]
@@ -173,7 +173,7 @@ def prepare(opcode, save, body, config):
                 updates += encode_pb_field(8, 2, baseline)
                 del state["receipts"][f"general:{iid}"]
             else:
-                if not pristine_general(raw, config):
+                if not pristine_general(raw, config, save):
                     raise ValueError("强化过的伙伴请先安全重生，炼化未执行")
                 fragment = next((v for v in config["general_fragment"].values() if v["general"] == row["init_cid"]), None)
                 if not fragment:
