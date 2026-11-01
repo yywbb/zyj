@@ -1,4 +1,4 @@
-"""商城、固定礼包与配置权重钥匙箱；消耗由 player 整组保存。"""
+"""商城与固定、随机、自选、钥匙箱；消耗由 player 整组保存。"""
 
 import random
 from datetime import datetime, timedelta, timezone
@@ -48,28 +48,35 @@ def fixed_box(row):
 
 
 def openable_box(row):
-    return fixed_box(row) or (row.get("type") == "keybox" and row.get("function") == "box99")
+    return (fixed_box(row) or row.get("type") == "box" and row.get("function") in ("box2", "box4")
+            or row.get("type") == "keybox" and row.get("function") == "box99")
 
 
 def open_box(save, values, config, seed):
     if not save.get("has_role"):
         raise ValueError("角色尚未创建")
-    if len(values) != 2 or not 1 <= values[1] <= 100:
+    if len(values) not in (2, 3) or not 1 <= values[1] <= 100:
         raise ValueError("礼包使用数量无效")
-    cid, count = values
+    cid, count = values[:2]
     row = config["props"][str(cid)]
     if not openable_box(row) or row["use_limit"]:
         raise ValueError("此礼包开启条件暂不支持")
+    if len(values) != (3 if row["function"] == "box4" else 2):
+        raise ValueError("礼包使用参数无效，自选箱须指定一项奖励")
     inventory = {pb_get_varint(v, 1): pb_get_varint(v, 2) for n, w, v in
                  iter_pb_fields(bytes.fromhex(save["world_state"]["1200"])) if (n, w) == (1, 2)}
     if inventory.get(cid, 0) < count:
         raise ValueError("箱子数量不足")
-    if row["type"] == "keybox":
-        if inventory.get(int(row["param1"]), 0) < count:
+    if row["type"] == "keybox" or row["function"] == "box2":
+        if row["type"] == "keybox" and inventory.get(int(row["param1"]), 0) < count:
             raise ValueError("对应钥匙数量不足")
-        entries = [tuple(map(int, entry.split(","))) for entry in row["param2"].split(";") if entry]
-        if not entries or any(len(e) != 3 or min(e) <= 0 for e in entries):
+        specification = row["param2" if row["type"] == "keybox" else "param1"]
+        entries = [tuple(map(int, entry.split(","))) for entry in specification.split(";") if entry]
+        if (not entries or any(len(e) != 3 or min(e[:2]) <= 0 or e[2] < 0 for e in entries)
+                or not sum(e[2] for e in entries)):
             raise ValueError("箱子奖励权重无效")
+        # 未支持的奖品须整箱拒绝，不能靠失败重试把它们排除出实际卡池。
+        recruit.build_reward(save, [(cid, num) for cid, num, weight in entries if weight], config)
         gets = random.Random(seed).choices(entries, weights=[e[2] for e in entries], k=count)
         return recruit.build_reward(save, [(cid, num) for cid, num, _ in gets], config)
     vip_box = row["type"] == "vipbox"
@@ -78,6 +85,10 @@ def open_box(save, values, config, seed):
     specification = row["param2" if vip_box else "param1"]
     gets = [(int(cid), int(num) * count) for entry in specification.split(";") if entry
             for cid, num in [entry.split(",")]]
+    if row["function"] == "box4":
+        gets = [(cid, num) for cid, num in gets if cid == values[2]]
+        if len(gets) != 1:
+            raise ValueError("请选择箱内的一项有效奖励")
     if not gets:
         raise ValueError("礼包缺少奖励配置")
     return recruit.build_reward(save, gets, config)
