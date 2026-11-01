@@ -317,8 +317,8 @@ python3 build_local_apk.py --server-ip 10.66.0.12 --accounts 3
 ### 服务端回归验证
 
 ```bash
-python3 -B -m unittest -v test_mock_server test_build_local_apk test_admin
-python3 -m compileall -q -x "[.]_" mock_server.py zyj_server build_local_apk.py build_download_tool.py test_mock_server.py test_build_local_apk.py test_admin.py
+python3 -B -m unittest -v test_mock_server test_build_local_apk test_admin test_friend_copy test_activity_copy
+python3 -m compileall -q -x "[.]_" mock_server.py zyj_server build_local_apk.py build_download_tool.py test_mock_server.py test_build_local_apk.py test_admin.py test_friend_copy.py test_activity_copy.py
 ```
 
 多账号适配专项可运行：
@@ -474,6 +474,17 @@ python3 -B -m unittest -v test_mock_server.LanAccountTests test_mock_server.Entr
 旧存档从未保存过的阵容、物品和关卡明细无法凭空找回：缺失的 `world_state` 缓存仅以录制的新号基础建立，并打印告警，不会冒充完整恢复。已有的空缓存会保留；升级前请备份 `role_save.json`，不要为补明细直接重置进度。
 
 状态按整组回包准备，原子保存成功后才发送；保存失败、余额/道具不足或存档解析失败时不会返回操作成功或覆盖原进度。礼包/宝箱/活动重复领取、未满足条件的活动请求、重复录制招募和过期的选将/战斗/培养/进阶会被拒绝，避免旧回包覆盖新状态。当前支持已录制教程、上述首日活动及其红点、本地模拟充值、普通/封神招募、自由上阵、一键装备、经验丹升级、普通装备强化、恢复丹与限定范围的自研战斗；范围外战斗、任意关卡宝箱/全三星奖励、逐件换装/脱下/洗炼/注灵、精力随时间恢复、其他功能的动态红点和异步推送仍需继续补齐。关卡挑战次数仍无每日重置。
+
+### 活动副本与23级引导
+
+- 补齐S64的两步入口/展示引导及断点续接；只有客户端真实201上报推进，不代替玩家完成引导。
+- 接通经验丹、银币、锻造石、升星石、阵符、注灵石六类共147档实际挑战，按配置等级、前档通关和每周开放日校验。使用当前阵容、魔宠及已有v2战斗，不固定胜利或复用教程战报。
+- 每类每天有配置的2次基础机会，经验/材料本仅胜利扣次；银币/升星石/阵符Boss按配置5回合和实际伤害档发奖、每次扣次，击杀才解锁下一档。周六按配置双倍产出。只在北京时间日期向前变化时重置次数，保留通关历史，不消耗体力/精力、不发角色或武将经验。
+- 奖励、次数和历史整组保存后回复，重登可恢复；活动页每次进入、战报结束后重新查询，避免旧缓存遮蔽次数和难度。仍须更新服务端与APK；购买次数、单次/批量扫荡暂不支持，明确报错且不扣资源。
+
+Boss伤害档、随机掉落数量与NPC等级处理的本地规则及验证边界见 [战斗规则](battle_rules.md#2026-11-01-活动副本与s64引导)。离线Lua/动画验证不等于手机实测，未修改真实账号进度。
+
+本轮639项全量回归通过，无跳过；补充伤害档边界后，16项活动副本专项再次通过。临时构建APK的80份补丁Lua5.1编译、签名及对齐检查通过；没有覆盖现有安装包、重启服务或操作真实账号。
 
 ### 在线奖励
 

@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, battle, blackmarket, configuration, daily_events, development, fashion, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, battle, blackmarket, configuration, daily_events, development, fashion, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -65,7 +65,8 @@ def load_role_config(config_path):
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
-                             "godstone", "godstonestrengthening", *sign_tables))
+                             "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
+                             *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
 
 def get_default_save():
@@ -567,6 +568,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             activities.record_liveness(save, 3, 1, role_config, now)
     elif opcode == 1350:
         body = star_copy.query(save, request_body, role_config, now)
+    elif opcode in (*activity_copy.QUERIES, *activity_copy.BATTLES):
+        body, reward = activity_copy.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode == 1351:
         body, reward = star_copy.fight(save, request_body, role_config, now, random.getrandbits(64))
         apply_reward(save, reward, role_config, now)

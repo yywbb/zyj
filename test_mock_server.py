@@ -5444,7 +5444,7 @@ class ReplayRoutingTests(unittest.TestCase):
         lua = LuaRuntime()
         config = dict(self.role_config)
         with zipfile.ZipFile(Path(server.BASE_DIR) / "configs_sec5.zip") as archive:
-            for name in ("generalanimation", "skillanimation"):
+            for name in ("generalanimation", "skillanimation", "personalboss_att"):
                 config[name] = json.loads(archive.read("5/" + name + ".json"))
         lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
         lua.execute('''print=function() end;printT=print;battleScene={slotNum=7}
@@ -6574,7 +6574,7 @@ class ReplayRoutingTests(unittest.TestCase):
             abbreviations = apk_builder.read_script("BattleReportAbbToKey").decode("utf-8")
         config = dict(self.role_config)
         with zipfile.ZipFile(Path(server.BASE_DIR) / "configs_sec5.zip") as archive:
-            for name in ("generalanimation", "skillanimation"):
+            for name in ("generalanimation", "skillanimation", "personalboss_att"):
                 config[name] = json.loads(archive.read("5/" + name + ".json"))
         lua = LuaRuntime()
         lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)

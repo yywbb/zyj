@@ -489,6 +489,39 @@ IDS.fields = {IDS_IDS_FIELD, IDS_HELPERS_FIELD}''')
     return patched
 
 
+def patch_activity_copy_scripts():
+    patched = {}
+    code = read_script("Layer_copy_chapter").decode("utf-8").replace("\r\n", "\n")
+    marker = '''        if self.activitydata ~= nil then
+        else
+            UIRequest({type = 1340})
+        end'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, "        UIRequest({type = 1340})")
+    patched["Layer_copy_chapter"] = code
+
+    code = read_script("UICopyActivity").decode("utf-8").replace("\r\n", "\n")
+    start = code.index('    if t.temptype and t.temptype == "coin" then\n')
+    end = code.index("\nend", start)
+    assert code[start:end].count("activityReload(v)") == 6
+    code = code[:start] + '''    local window = gameWindows.windows.copyacivity
+    if window.show then
+        for _,row in pairs(t.data) do
+            if row.aid == window.module.data.aid then
+                window.module:activityReload(row)
+                return
+            end
+        end
+        gameWindows:closeWindow("copyacivity")
+    end
+''' + code[end:]
+    marker = '    end\n    RunbattleCallBack('
+    assert code.count(marker) == 6
+    code = code.replace(marker, '        UIRequest({type = 1340})\n' + marker)
+    patched["UICopyActivity"] = code
+    return patched
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -1194,6 +1227,9 @@ end
     # 部分群攻只有六份目标时序，第七阵位仍须处理实际伤害和魔罩。
     code = code.replace(marker, 'skilljson and (skilljson.damage[tostring(ccbindex)] or skilljson.damage["1"]) or nil')
     code = patch_combo_animation_script(code)
+    marker = "    if not GeneralConfig or not next(GeneralConfig) then loadBattleConfig() end"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    loadBattleConfig()")
     patched["assets/scripts/battleReportConvert.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("GameCopy").decode("utf-8").replace("\r\n", "\n")
@@ -1430,6 +1466,9 @@ end
     d = d.replace(old_net, new_net, 1)
     patched["assets/scripts/gameserver.so"] = xxtea_encrypt(d, XXTEA_KEY)
     print("  [Lua] Patched gameserver.so (registered 999898 role state report)")
+
+    for name, code in patch_activity_copy_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched
 

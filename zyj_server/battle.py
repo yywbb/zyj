@@ -214,7 +214,8 @@ def _prepare_teams(teams, config):
                 raise ValueError("战斗突破或技能等级无效")
             general = config["general"][str(unit["cid"])]
             skill = config["skill"].get(str(unit["skill"]))
-            if not skill and not (unit["cid"] in QUEENS and unit["skill"] == 0):
+            if not skill and not (unit["cid"] in QUEENS and unit["skill"] == 0
+                                  or str(unit["cid"]) in config.get("huodong_monster", {}) and unit["skill"] == 12858):
                 raise ValueError("武将技能不存在")
             if skill and (skill["kind"] not in ("attack", "gain") or skill["range"] not in ("single", "all", "first", "second", "random", "three")
                           or skill["effect"] not in ("once", "dizzy", "dot", "firing", "suck", "promote", "weaken")):
@@ -343,8 +344,11 @@ def targets(actor, enemies, skill, rng):
     raise ValueError(f"战斗 v2 尚不支持技能范围 {scope}")
 
 
-def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None):
+def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None, max_rounds=None):
     """不改变输入；同一输入/配置/seed 生成完全相同的行动及终局。"""
+    max_rounds = MAX_ROUNDS if max_rounds is None else max_rounds
+    if type(max_rounds) is not int or not 1 <= max_rounds <= MAX_ROUNDS:
+        raise ValueError("战斗回合上限无效")
     teams = {True: copy.deepcopy(attack), False: copy.deepcopy(defense)}
     _prepare_teams(teams, config)
     rng = random.Random(seed)
@@ -640,6 +644,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             event(changes)
 
     def act(actor, forced_target=None, reaction=False, followup=None, chain=0):
+        if actor["skill"] == 12858:
+            return []  # 活动Boss配置的空技能，不退化成普通攻击。
         enemies, friends = teams[not actor["direct"]], teams[actor["direct"]]
         skill, participants = None, [actor["pos"]]
         base_skill = config["skill"].get(str(actor["skill"]))
@@ -902,7 +908,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if unit["cid"] in QUEENS:
                 event([dest(u, m={"m": 0, "f": 0, "u": "N", "U": 0}) for _, u in sorted(team.items())],
                       {"r": unit["direct"], "p": [unit["pos"]], "t": "x", "S": 12859})
-    for round_number in range(1, MAX_ROUNDS + 1):
+    for round_number in range(1, max_rounds + 1):
         if round_number > 1:
             event([])
         if finished():

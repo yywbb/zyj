@@ -410,7 +410,7 @@ class FriendCopyTests(unittest.TestCase):
         lua = LuaRuntime()
         config = dict(self.config)
         with zipfile.ZipFile(ROOT / "configs_sec5.zip") as archive:
-            for name in ("generalanimation", "skillanimation"):
+            for name in ("generalanimation", "skillanimation", "personalboss_att"):
                 config[name] = json.loads(archive.read("5/" + name + ".json"))
         lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
         lua.execute('''print=function() end;printT=print;battleScene={slotNum=7}
