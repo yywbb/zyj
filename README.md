@@ -43,6 +43,7 @@ zyj/
 │   ├── online_rewards.py    # 每日在线计时、四档奖励及领取状态
 │   ├── shop.py              # 商城道具、VIP/周礼包购买与固定礼包开启
 │   ├── resource_purchase.py # 体力/精力购买、报价与每日次数
+│   ├── arena.py             # 配置NPC竞技榜、真实挑战、积分与兑换
 │   ├── qiankun.py           # 乾坤炉炼化、实际消耗收据与安全重生
 │   ├── secret_shop.py       # 神魂商店货架、购买与刷新
 │   ├── fashion.py           # 主角时装拥有、穿戴、隐藏与强化
@@ -317,8 +318,8 @@ python3 build_local_apk.py --server-ip 10.66.0.12 --accounts 3
 ### 服务端回归验证
 
 ```bash
-python3 -B -m unittest -v test_mock_server test_build_local_apk test_admin test_friend_copy test_activity_copy
-python3 -m compileall -q -x "[.]_" mock_server.py zyj_server build_local_apk.py build_download_tool.py test_mock_server.py test_build_local_apk.py test_admin.py test_friend_copy.py test_activity_copy.py
+python3 -B -m unittest -v test_mock_server test_build_local_apk test_admin test_friend_copy test_activity_copy test_arena
+python3 -m compileall -q -x "[.]_" mock_server.py zyj_server build_local_apk.py build_download_tool.py test_mock_server.py test_build_local_apk.py test_admin.py test_friend_copy.py test_activity_copy.py test_arena.py
 ```
 
 多账号适配专项可运行：
@@ -485,6 +486,18 @@ python3 -B -m unittest -v test_mock_server.LanAccountTests test_mock_server.Entr
 Boss伤害档、随机掉落数量与NPC等级处理的本地规则及验证边界见 [战斗规则](battle_rules.md#2026-11-01-活动副本与s64引导)。离线Lua/动画验证不等于手机实测，未修改真实账号进度。
 
 本轮639项全量回归通过，无跳过；补充伤害档边界后，16项活动副本专项再次通过。临时构建APK的80份补丁Lua5.1编译、签名及对齐检查通过；没有覆盖现有安装包、重启服务或操作真实账号。
+
+### NPC竞技场
+
+- 12级开放，`1610/1613/1615`查询榜单、兑换次数和九档首次排名奖励。采用`athletics_copy2`的5363名原配置NPC，每个账号从5364名独立爬榜，不读取或挑战其他账号。
+- `1611`按当前阵容与魔宠真实战斗，胜利替换目标名次并获得配置20积分；低排名重打仍有真实胜负，失败不降名次或发奖。胜负均扣一次机会，不消耗体力/精力、不发经验、不改普通主线。跨过首次排名门槛时随战斗一次性发配置元宝，查询不会另行发奖。
+- 每日5次基础机会；原生购买窗口按VIP上限、逐次配置价格及完整报价购买，每份增加配置3次。牛魔王`1616`仅前五名开放，按配置的5/4/3/2/1次日上限及共享挑战机会校验；胜利发银币、100积分并独立判30%魂魄掉落，失败仍扣次。
+- `1614 [兑换ID,数量]`支持全部17项配置奖品，校验积分、显示/购买等级和日限购。紫薇令及混沌令碎片只支持获得和持久化，未开放其合成、装备或培养。
+- **本地日奖规则**：UTC+8跨日首次进行竞技场请求时，按上次保存名次自动结算一份`athletics_rewards.day`，同步银币与积分；首次进入无历史日奖，未上榜无日奖，离线多日不累计。仅清当天挑战、购买、Boss和兑换计数，保留名次、积分和首次奖励，时钟回拨不能重复结算。
+
+需要服务端和APK一起更新：原生战后/兑换的未实现Comb改为独立查询，页签与商店重新取实时状态，Boss次数随榜单同步，购买窗口先刷新贵族状态。当前账号进度未用于测试；真实手机播放、跨日和长期平衡仍需实机验收。候选对手与日奖的自研规则见[battle_rules.md](battle_rules.md#2026-11-01-npc竞技场)。
+
+本轮656项全量回归通过，无跳过；剥离原有未提交修改后的17项竞技场/报价回归也通过。`zyj_arena_20261101.apk`已构建，84份实际包内补丁Lua5.1编译、两份配置、局域网地址、签名与对齐校验通过；未覆盖原安装包、重启服务或操作真实账号。
 
 ### 在线奖励
 

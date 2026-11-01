@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, activity_copy, blackmarket, daily_events, development, fashion, friend_copy, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, blackmarket, daily_events, development, fashion, friend_copy, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -45,6 +45,7 @@ class Session:
         star_copy.get_state(self.save, role_config)
         friend_copy.get_state(self.save, role_config)
         activity_copy.get_state(self.save, role_config)
+        arena.get_state(self.save, role_config)
         mieshendian.get_state(self.save, role_config)
         blackmarket.get_state(self.save, role_config)
         watchstar.get_state(self.save, role_config)
@@ -275,7 +276,7 @@ class Session:
         local_development = (opcode in development.MUTATIONS and (opcode != 1057
                              or self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2))
         if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 1130, 2038, *welfare.CLAIMS,
-                                  *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS, *activity_copy.BATTLES,
+                                  *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS, *activity_copy.BATTLES, *arena.MUTATIONS,
                                   *watchstar.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
@@ -330,7 +331,7 @@ class Session:
 
         if opcode in (204, 300, 4016, 1304, 1350, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
-                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES):
+                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900

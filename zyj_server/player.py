@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, battle, blackmarket, configuration, daily_events, development, fashion, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, configuration, daily_events, development, fashion, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -66,6 +66,7 @@ def load_role_config(config_path):
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
+                             "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
 
@@ -313,6 +314,12 @@ def change_item_count(save, cid, delta, role_config, now=None):
             raise ValueError("灭神殿积分不足或超出范围")
         state["points"] += delta
         return
+    if cid == 1005:
+        state = arena.get_state(save, role_config)
+        if not 0 <= state["points"] + delta < (1 << 31):
+            raise ValueError("竞技场积分不足或超出范围")
+        state["points"] += delta
+        return
     if str(cid) in role_config["redl_awake_item"]:
         fragments = qiankun.get_state(save)["red_fragments"]
         value = fragments.get(str(cid), 0) + delta
@@ -336,7 +343,8 @@ def change_item_count(save, cid, delta, role_config, now=None):
     query = "1012" if fragment else "1107" if equip_fragment else "1200"
     if fragment:
         cid = fragment["general"]
-    elif not equip_fragment and str(cid) not in role_config["props"] and str(cid) not in role_config["pet3_fragment"]:
+    elif (not equip_fragment and str(cid) not in role_config["props"] and str(cid) not in role_config["pet3_fragment"]
+          and str(cid) not in role_config["token"] and str(cid) not in role_config["token_fragment"]):
         raise ValueError(f"未实现的物品类型: {cid}")
     world = save["world_state"]
     body = bytes.fromhex(world[query])
@@ -566,6 +574,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             apply_reward(save, reward, role_config, now)
         if opcode in mieshendian.BATTLES or opcode == 3624 and reward:
             activities.record_liveness(save, 3, 1, role_config, now)
+    elif opcode in arena.OPCODES:
+        body, costs, reward = arena.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode == 1350:
         body = star_copy.query(save, request_body, role_config, now)
     elif opcode in (*activity_copy.QUERIES, *activity_copy.BATTLES):
@@ -583,6 +597,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if request_body:
             raise ValueError("贵族状态查询不接受参数")
         body = welfare.rewrite_vip(body, save, resource_purchase.settle(save, now))
+        body = arena.rewrite_vip(body, save, role_config, now)
     elif opcode == 301:
         price = resource_purchase.prepare(save, request_body, role_config, now)
         change_item_count(save, 1001, -price, role_config, now)
@@ -859,6 +874,11 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
     automatic_reward = b""
+    if responses and (responses[0]["opcode"] in arena.OPCODES
+                      or responses[0]["opcode"] == 301 and pb_get_varint(request_body, 1) == 1):
+        automatic_reward = arena.daily_reward(save, role_config, now)
+        if automatic_reward:
+            apply_reward(save, automatic_reward, role_config, now)
     starter = pets.starter(save, role_config) if responses and responses[0]["opcode"] == 1040 and not request_body else 0
     if starter:
         change_item_count(save, 91001, starter, role_config, now)

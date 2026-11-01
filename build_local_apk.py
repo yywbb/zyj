@@ -522,6 +522,80 @@ def patch_activity_copy_scripts():
     return patched
 
 
+def patch_arena_scripts():
+    code = read_script("GameAthletics").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function UIAthleticsRewardsQuery3Callback(uireq)\n")
+    end = code.index("\nend", start) + len("\nend")
+    assert "return 1, 1613, nil" in code[start:end]
+    code = code[:start] + "function UIAthleticsRewardsQuery3Callback(uireq)\n    return 1, 1613, nil\nend" + code[end:]
+    start = code.index("function NetAthleticsList2Callback(fd)\n")
+    marker = "    local ranklist,top10 = Athletics(athleticsData)\n"
+    pos = code.index(marker, start) + len(marker)
+    code = code[:pos] + '''    local boss = athleticsData.my.params and athleticsData.my.params.params[3]
+    gamedata.cache.vipstatus.athletics_boss = boss and boss.i or 0
+''' + code[pos:]
+    patched = {"GameAthletics": code}
+
+    code = read_script("UIAthletics").decode("utf-8").replace("\r\n", "\n")
+    marker = "UIRequest({type = 999900,reqs = {1610,1613}})"
+    assert code.count(marker) == 2
+    code = code.replace(marker, "UIRequest({type = 1610})\n        UIRequest({type = 1613})")
+    marker = '    RunbattleCallBack("sports", t)'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    RunbattleCallBack("sports", t, function()
+        UIRequest({type = 1610})
+    end)''')
+    marker = "    UIRequest({type = 1001})\n    UIRequest({type = 1610})\nend"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    UIRequest({type = 1001})\nend")
+    patched["UIAthletics"] = code
+
+    code = read_script("Layer_sports").decode("utf-8").replace("\r\n", "\n")
+    marker = """    local status = 0
+    if not isTop10 then
+        status = data.status
+    end"""
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    local status = data.status")
+    marker = "            isPlayFight = 0;"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "            -- 本地低排名重打仍是真实战斗，保留胜负播放。")
+    marker = 'items.buttontext:setString(gameConfig.strings:string_common("sports",21))'
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'items.buttontext:setString(gameConfig.strings:string_common("sports",4))')
+    start = code.index('    if self.selectpage == "rank" then\n', code.index("function sports.shiftPage(self,type)\n"))
+    end = code.index("\nend", start)
+    assert "self.firstrewardListTableView:reloadData()" in code[start:end]
+    code = code[:start] + '''    if type == "rank" or type == "top10" then
+        UIRequest({type = 1610})
+    elseif type == "reward" then
+        UIRequest({type = 1613})
+    elseif type == "first" then
+        UIRequest({type = 1615})
+    end''' + code[end:]
+    patched["Layer_sports"] = code
+
+    code = read_script("window_buyProperty").decode("utf-8").replace("\r\n", "\n")
+    marker = "function buy.open(self,touchPriority,data,callback)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localVipPending = true\n")
+    marker = "        if self.buynum >0 then\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''        if self.localVipPending then
+            runGamePrompt({msg = "正在刷新购买次数，请稍候"})
+            return
+        end
+''' + marker)
+    marker = "    self:reload(data,callback)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    UIRequest({type = 300, update = true})\n")
+    marker = "function buy.reloadData(self,data)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localVipPending = false\n")
+    patched["window_buyProperty"] = code
+    return patched
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -876,6 +950,11 @@ end
     assert all(f"type = {opcode}," in code[start:end] for opcode in (3680, 3684, 5531))
     # 保留月卡缓存/页面刷新，移除未实现活动的间接预加载。
     code = code[:start] + "end\n" + code[end:]
+    marker = "    GameScene.vipstatus= t.vipstatus\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    local window = gameWindows.windows.buyProperty
+    if window and window.show then window.module:reloadData(window.module.data) end
+''')
     patched["assets/scripts/UIRecharge.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched UIRecharge.so (local simulated payment and persisted entitlement refresh)")
 
@@ -913,7 +992,7 @@ end
         table.insert(UserBuyData.ids, uireq.count)
     end'''
             assert buy.count(marker) == 1
-            buy = buy.replace(marker, '''    if uireq.cid == 2 or uireq.cid == 3 then
+            buy = buy.replace(marker, '''    if uireq.cid == 1 or uireq.cid == 2 or uireq.cid == 3 then
         table.insert(UserBuyData.ids, uireq.count or 1)
         table.insert(UserBuyData.ids, uireq.gold or 0)
     elseif uireq.count then
@@ -1367,6 +1446,9 @@ end"""
     print("  [Lua] Patched Layer_activity.so (query activities only when selected)")
 
     for name, code in patch_friend_copy_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_arena_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched

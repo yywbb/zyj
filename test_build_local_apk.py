@@ -869,7 +869,7 @@ class LanBuildTests(unittest.TestCase):
             assert(reply.order==2 and gamedata.cache.role.stamina==103 and gamedata.cache.role.gold==0)
             assert(gamedata.cache.vipstatus.b_physical==2)
             remote,opcode,body=UIUserBuyCallBack({cid=1,count=1,gold=50})
-            assert(#body==2 and body[1]==1 and body[2]==1)
+            assert(#body==3 and body[1]==1 and body[2]==1 and body[3]==50)
         ''')
         lua.execute('''
             CCControlEventTouchUpInside=1
