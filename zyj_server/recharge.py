@@ -36,7 +36,7 @@ def get_state(save):
         if not isinstance(state.get(key), list) or any(type(v) is not int or v <= 0 for v in state[key]):
             raise ValueError("充值领取记录无效")
     if (type(state.setdefault("bagid", 0)) is not int
-            or not (state["bagid"] in (0, 2, 7, 8, timebag.PET_GIFT) or 190000 <= state["bagid"] < 192000)):
+            or not (state["bagid"] in (0, 2, 7, 8, *timebag.GIFTS) or 190000 <= state["bagid"] < 192000)):
         raise ValueError("充值商品类型无效")
     if (not isinstance(state.get("card_days"), dict) or set(state["card_days"]) != {"1", "2"}
             or any(type(v) is not int or v < 0 for v in state["card_days"].values())):
@@ -64,8 +64,8 @@ def prepare(opcode, save, body, config, now):
         if bagid == 2 and (cid != config["chengzhangplan_money"]["1"]["recharge_id"]
                            or welfare.get_state(save)["growth_bought"]):
             raise ValueError("成长计划档位无效或已购买")
-        if bagid == timebag.PET_GIFT:
-            timebag.validate_purchase(save, cid, config, now)
+        if bagid in timebag.GIFTS:
+            timebag.validate_purchase(save, cid, config, now, bagid)
         elif bagid not in (0, 2):
             daily_events.validate_purchase(save, cid, bagid, config, now)
         row = config["recharge"].get(str(cid))
@@ -94,9 +94,9 @@ def prepare(opcode, save, body, config, now):
             return recruit.build_reward(save, [], config)
         row = config["recharge"][str(state["cid"])]
         cid = row["id"]
-        if state["bagid"] == timebag.PET_GIFT:
-            timebag.validate_purchase(save, cid, config, now)
-            timebag.get_state(save)["paid"] = True
+        if state["bagid"] in timebag.GIFTS:
+            timebag.validate_purchase(save, cid, config, now, state["bagid"])
+            timebag.get_state(save, state["bagid"])["paid"] = True
         elif state["bagid"] not in (0, 2):
             daily_events.validate_purchase(save, cid, state["bagid"], config, now)
         benefits = welfare.get_state(save)

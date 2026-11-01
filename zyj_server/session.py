@@ -52,7 +52,8 @@ class Session:
         secret_shop.get_state(self.save, role_config)
         guild.daily_state(self.save)
         pets.get_state(self.save, role_config)
-        timebag.get_state(self.save)
+        for gift_id in timebag.GIFTS:
+            timebag.get_state(self.save, gift_id)
         if self.save.get("has_role"):
             player.get_role_state(self.save, role_config)
         player.validate_stamina_clock(self.save)
@@ -269,7 +270,7 @@ class Session:
 
         local_development = (opcode in development.MUTATIONS and (opcode != 1057
                              or self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2))
-        if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1007, 1009, 1130, 2038, *welfare.CLAIMS,
                                   *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS,
                                   *watchstar.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,

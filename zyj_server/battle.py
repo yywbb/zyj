@@ -4,7 +4,7 @@ import copy
 import random
 from fractions import Fraction
 
-from . import pets
+from . import godstone, pets
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -100,8 +100,9 @@ def rosters(save, point, config):
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
             raise ValueError("阵位或上阵武将重复")
         unit["skill"] = config["general"][str(unit["cid"])]["skillid"]
-        unit["pet_rates"] = {name: pet_bonus[field] - int(pet_bonus[field])
-                             for name, field in pets.ATTR_FIELDS.items() if name in ("dodge", "resilience", "arp")}
+        stone = godstone.attributes(slot, config)
+        unit["pet_rates"] = {name: pet_bonus.get(field, 0) - int(pet_bonus.get(field, 0)) + stone[field] - int(stone[field])
+                             for name, field in godstone.ATTR_FIELDS.items() if field in godstone.RATE_FIELDS}
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")

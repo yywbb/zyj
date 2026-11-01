@@ -3677,6 +3677,127 @@ class ReplayRoutingTests(unittest.TestCase):
         body = protocol.encode_pb_field(1, 0, sid) + protocol.encode_pb_field(3, 0, iid)
         return {"opcode": 1003, "seq": 20000, "hex": body.hex()}
 
+    def seed_godstone_account(self, fragments=10000):
+        saved = self.seed_training_account()
+        saved["role_state"]["level"] = 22
+        self.save_path.write_text(json.dumps(saved))
+        self.give_props({20223: fragments})
+        return json.loads(self.save_path.read_text())
+
+    def test_godstone_single_upgrade_commits_cost_stats_protagonist_and_retry_once(self):
+        before = self.seed_godstone_account()
+        raw = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)[7059]
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            packets = session.handle(1130, 34000, recharge.ids([1, 0]))
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [1130, 205])
+            self.assertEqual(session.handle(1130, 34000, recharge.ids([1, 0])), packets)
+        changed = self.entity_records(packets[0][16:], 1, 2)[7059]
+        slot = self.entity_records(packets[0][16:], 4, 1)[1]
+        self.assertEqual([protocol.pb_get_varint(slot, n) or 0 for n in range(18, 26)], [1] + [0] * 7)
+        self.assertEqual(protocol.pb_get_varint(changed, 6), protocol.pb_get_varint(raw, 6) + 150)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["power"], before["role_state"]["power"] + 150)
+        self.assertEqual(after["guide"], before["guide"])
+        snapshot = bytes.fromhex(after["protagonist_snapshot"])
+        self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(snapshot) if (n, w) == (10, 2)), changed)
+        props = self.entity_records(self.query_world(1200), 1, 1)
+        self.assertEqual(protocol.pb_get_varint(props[20223], 2), 10000 - 13)
+        self.assertEqual(self.entity_records(self.query_world(1002), 1, 2)[7059], changed)
+
+    def test_godstone_quick_upgrade_finishes_one_cycle_and_stops_at_material_or_level_cap(self):
+        self.seed_godstone_account(20)
+        self.assertEqual(self.replay([self.activity_request(1130, [1, 1])])[0]["opcode"], 1130)
+        slots = self.entity_records(self.query_world(1002), 4, 1)
+        self.assertEqual([protocol.pb_get_varint(slots[1], n) or 0 for n in range(18, 26)], [1, 1] + [0] * 6)
+        self.assertNotIn(20223, self.entity_records(self.query_world(1200), 1, 1))
+        self.give_props({20223: 10000})
+        for levels in ([1] * 8, [2] * 8):
+            self.assertEqual(self.replay([self.activity_request(1130, [1, 1])])[0]["opcode"], 1130)
+            slot = self.entity_records(self.query_world(1002), 4, 1)[1]
+            self.assertEqual([protocol.pb_get_varint(slot, n) or 0 for n in range(18, 26)], levels)
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(1130, [1, 0])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        attack, _ = battle.rosters(json.loads(disk), self.role_config["copy"]["42102"]["1"], self.role_config)
+        self.assertEqual(attack[2]["pet_rates"]["dodge"], Fraction(2, 5))
+        self.assertEqual(attack[2]["pet_rates"]["arp"], Fraction(3, 5))
+
+    def test_godstone_bad_requests_and_save_failure_are_atomic(self):
+        self.seed_godstone_account()
+        bodies = [recharge.ids(v) for v in ([], [1], [1, 0, 0], [0, 0], [8, 0], [7, 0], [1, 2])]
+        bodies += [b"\x08", recharge.ids([1, 0]) + b"\x10\x00"]
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            for body in bodies:
+                self.assertEqual(struct.unpack(">IIII", session.handle(1130, 34001, body)[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(1130, 34002, recharge.ids([1, 0]))
+            self.assertEqual((session.save, self.save_path.read_bytes(), session.random_replies), (memory, disk, {}))
+
+    def test_godstone_bonus_follows_slot_replacement_without_stacking(self):
+        before = self.seed_godstone_account()
+        player.apply_reward(before, recruit.build_reward(before, [(10401, 1)], self.role_config), self.role_config, self.now)
+        self.save_path.write_text(json.dumps(before))
+        self.replay([self.activity_request(1130, [3, 0])])
+        original = json.loads(self.save_path.read_text())
+        old = self.entity_records(bytes.fromhex(original["world_state"]["1002"]), 1, 2)
+        slot = self.entity_records(bytes.fromhex(original["world_state"]["1002"]), 4, 1)[3]
+        old_iid = protocol.pb_get_varint(slot, 2)
+        iid = next(k for k, raw in old.items() if protocol.pb_get_varint(raw, 1) == 10401)
+        for target in (iid, old_iid):
+            self.assertEqual(self.replay([self.change_general_request(3, target)])[0]["opcode"], 1003)
+        restored = self.entity_records(self.query_world(1002), 1, 2)
+        for key in old:
+            self.assertEqual(dict((n, v) for n, w, v in protocol.iter_pb_fields(restored[key])),
+                             dict((n, v) for n, w, v in protocol.iter_pb_fields(old[key])))
+
+    def test_godstone_all_configured_levels_charge_in_order_and_keep_fractional_rates(self):
+        from zyj_server import godstone
+        slot = recharge.ids([1])
+        for level in range(1, 76):
+            row = self.role_config["godstonestrengthening"][str(level)]
+            for index in range(8):
+                slot, cost = godstone.strengthen(slot, 0, row["teamlv"], 100000, self.role_config)
+                name = self.role_config["godstone"][str(index + 1)]["attribute"]
+                self.assertEqual(cost, row[name + "_number"])
+                self.assertEqual(godstone.levels(slot, self.role_config), [level] * (index + 1) + [level - 1] * (7 - index))
+                amount = godstone.attributes(slot, self.role_config)[godstone.ATTR_FIELDS[name]]
+                self.assertEqual(amount, Fraction(str(row[name])) * (100 if name in ("dodge", "parry", "resilience", "hit", "arp") else 1))
+        with self.assertRaises(ValueError):
+            godstone.strengthen(slot, 0, 150, 100000, self.role_config)
+
+    def test_godstone_native_callback_deducts_only_the_actual_changed_stones(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("神石回调验证需本机已有 lupa.lua51")
+        self.seed_godstone_account()
+        lua = LuaRuntime()
+        lua.globals().gamedata = lua.table_from({"config": self.role_config}, recursive=True)
+        lua.execute('''print=function() end
+            table.copy=function(t) local n={} for k,v in pairs(t) do n[k]=v end return n end
+            gamedata.cache={slots={[1]={}},props={[20223]={num=10000}}}
+            gamedata.ext={MagicstoneUp={sid=1}}
+            for i=1,8 do gamedata.cache.slots[1]["g"..i]=0 end
+            function gamedata:SlotInfoProcess(info) self.cache.slots[1]=info.slot end
+            function gamedata:updateprops(data) self.cache.props[data.cid].num=self.cache.props[data.cid].num+data.num end
+            slots_pb={SlotS=function() return {ParseFromString=function(self,raw) self.slot=decodeSlot(raw) end} end}''')
+        def decode_slot(raw):
+            slot = self.entity_records(bytes.fromhex(raw), 4, 1)[1]
+            return lua.table_from({"g" + str(i): protocol.pb_get_varint(slot, 17 + i) or 0 for i in range(1, 9)})
+        lua.globals().decodeSlot = decode_slot
+        code = apk_builder.read_script("GameSlots").decode().replace("\r\n", "\n")
+        lua.execute(code[code.index("function NetMagicstoneUpCallBack("):code.index("function UIChangeSlotCallBack(")])
+        for method in (0, 1, 1):
+            reply = self.replay([self.activity_request(1130, [1, method])])[0]
+            lua.globals().NetMagicstoneUpCallBack(lua.table_from({"rbuf": reply["hex"]}))
+            props = self.entity_records(self.query_world(1200), 1, 1)
+            self.assertEqual(lua.globals().gamedata.cache.props[20223].num, protocol.pb_get_varint(props[20223], 2))
+        self.assertIsNone(lua.globals().gameConfig)
+
     def test_quick_equip_uses_owned_inventory_and_survives_reconnect(self):
         self.complete_tutorial()
         saved = json.loads(self.save_path.read_text())
@@ -6187,6 +6308,74 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual(self.replay([self.activity_request(2881, [130012])])[0]["opcode"], 999999)
         self.assertEqual(self.save_path.read_bytes(), disk)
 
+    def test_stone_gift_payment_claim_preserves_pet_gift_and_never_grants_regular_gold(self):
+        self.seed_godstone_account()
+        self.replay([{"opcode": 201, "seq": 34010, "hex": "08681001"}])
+        before = json.loads(self.save_path.read_text())
+        self.clock.return_value += 1
+        trigger = self.replay([self.activity_request(2882, [130013])])[0]
+        self.assertEqual(trigger["opcode"], 2882)
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(trigger["hex"])), [130013, 0, 43200])
+        request = protocol.encode_pb_field(1, 2, recharge.ids([3])) + protocol.encode_pb_field(1, 2, recharge.ids([130013]))
+        order_reply = self.replay([{"opcode": 115, "seq": 34011, "hex": request.hex()}])[0]
+        order = protocol.pb_get_varint(next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(order_reply["hex"])) if (n, w) == (1, 2)), 1)
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(116, 34011, recharge.ids([order]))
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+        replies = self.replay([self.activity_request(116, [order])])
+        push = next(r for r in replies if r["opcode"] == 2882)
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(push["hex"]))[:2], [130013, 1])
+        paid = json.loads(self.save_path.read_text())
+        self.assertEqual(paid["pet_gift_state"], before["pet_gift_state"])
+        self.assertEqual(paid["role_state"]["gold"], before["role_state"]["gold"])
+        self.assertEqual(paid["recharge_state"]["bought"], before["recharge_state"]["bought"])
+        self.clock.return_value += 43201
+        self.replay([self.activity_request(116, [order])])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(2881, 34011, recharge.ids([130013]))
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+        reply = self.replay([self.activity_request(2881, [130013])])[0]
+        self.assertEqual(reply["opcode"], 2881)
+        after = json.loads(self.save_path.read_text())
+        self.assertEqual(after["role_state"]["coin"], before["role_state"]["coin"] + 100000)
+        props = self.entity_records(bytes.fromhex(after["world_state"]["1200"]), 1, 1)
+        old_props = self.entity_records(bytes.fromhex(before["world_state"]["1200"]), 1, 1)
+        for cid, count in ((20223, 300), (20262, 5), (20014, 1)):
+            self.assertEqual(protocol.pb_get_varint(props[cid], 2), (protocol.pb_get_varint(old_props.get(cid, b""), 2) or 0) + count)
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2881, [130013])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+
+    def test_stone_gift_rejects_locked_expired_unknown_and_failed_save_without_mutation(self):
+        self.seed_godstone_account()
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([self.activity_request(2882, [130013])])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.replay([{"opcode": 201, "seq": 34010, "hex": "08681001"}])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(2882, 34012, recharge.ids([130013]))
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+        self.replay([self.activity_request(2882, [130013])])
+        request = protocol.encode_pb_field(1, 2, recharge.ids([4])) + protocol.encode_pb_field(1, 2, recharge.ids([130013]))
+        disk = self.save_path.read_bytes()
+        self.assertEqual(self.replay([{"opcode": 115, "seq": 34013, "hex": request.hex()}])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), disk)
+        self.clock.return_value += 43200
+        expired = self.replay([self.activity_request(2882, [130013])])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(expired["hex"])), [130013, (1 << 64) - 2, 0])
+        self.clock.return_value -= 1
+        expired = self.replay([self.activity_request(2882, [130013])])[0]
+        self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(expired["hex"]))[1:], [(1 << 64) - 2, 0])
+
     def test_pet_advancement_and_collection_charge_config_and_restore_on_reconnect(self):
         saved = self.seed_level21_pet()
         self.give_props({91001: 100, 20166: 100})
@@ -6487,7 +6676,7 @@ class ReplayRoutingTests(unittest.TestCase):
         disk = self.save_path.read_bytes()
         self.assertEqual(self.replay([{"opcode": 115, "seq": 31961, "hex": request.hex()}])[0]["opcode"], 999999)
         self.assertEqual(self.save_path.read_bytes(), disk)
-        for values in ([130012, 130012], [130013], []):
+        for values in ([130012, 130012], [130014], []):
             self.assertEqual(self.replay([self.activity_request(2882, values)])[0]["opcode"], 999999)
             self.assertEqual(self.save_path.read_bytes(), disk)
 

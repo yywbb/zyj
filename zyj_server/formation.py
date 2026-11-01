@@ -2,7 +2,7 @@
 
 from fractions import Fraction
 
-from . import battle, pets
+from . import battle, godstone, pets
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -14,6 +14,8 @@ def bonuses(raw, slot, members, equips, config):
     row = config["general"][str(pb_get_varint(raw, 1))]
     level = pb_get_varint(raw, 3)
     values = {field: 0 for field in range(6, 17)}
+    if slot:
+        values.update({field: int(value) for field, value in godstone.attributes(slot, config).items()})
     equipped, relations = set(), b""
     for field in range(4, 10):
         iid = pb_get_varint(slot, field)
@@ -129,6 +131,32 @@ def change(save, opcode, body, config):
                 slots[origin] = pb_set_varint(old.get(dest, b""), 1, origin)
             else:
                 slots[dest] = pb_set_varint(pb_set_varint(old.get(dest, b""), 1, dest), 2, iid)
+    return apply_slots(save, slots, config)
+
+
+def strengthen_stones(save, body, config):
+    fields = list(iter_pb_fields(body))
+    if (len(fields) != 2 or any(n != 1 or w != 0 for n, w, v in fields)
+            or fields[1][2] not in (0, 1)):
+        raise ValueError("神石强化需要阵位及单次/一键方式")
+    sid, method = [v for n, w, v in fields]
+    if (not save.get("has_role") or save["role_state"]["level"] < config["build"]["3"]["level"]
+            or save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2):
+        raise ValueError("阵容神石尚未解锁")
+    world = bytes.fromhex(save["world_state"]["1002"])
+    slots, generals = records(world, 4, 1), records(world, 1, 2)
+    if (not 1 <= sid <= min(7, config["role_exp"][str(save["role_state"]["level"])]["slotnum"])
+            or pb_get_varint(slots.get(sid, b""), 2) not in generals):
+        raise ValueError("请选择已解锁且有武将的阵位")
+    props = records(bytes.fromhex(save["world_state"]["1200"]), 1, 1)
+    slots[sid], cost = godstone.strengthen(slots[sid], method, save["role_state"]["level"],
+                                          pb_get_varint(props.get(20223, b""), 2) or 0, config)
+    return apply_slots(save, slots, config), [(20223, cost)]
+
+
+def apply_slots(save, slots, config):
+    world = bytes.fromhex(save["world_state"]["1002"])
+    generals, old, equips = records(world, 1, 2), records(world, 4, 1), records(world, 2, 1)
     before = {pb_get_varint(v, 2): v for v in old.values() if pb_get_varint(v, 2)}
     after = {pb_get_varint(v, 2): v for v in slots.values() if pb_get_varint(v, 2)}
     protagonist = pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
