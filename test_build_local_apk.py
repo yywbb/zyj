@@ -464,6 +464,7 @@ class LanBuildTests(unittest.TestCase):
             print,printT,cclog=function() end,function() end,function() end
             package.preload.BattleReportAbbToKey=function() return {} end
             events={}; requests={}; notices={}; confirmed=nil
+            wallClock=1000;os.time=function() return math.floor(wallClock) end
             local function event(kind,value) table.insert(events,{kind=kind,value=value}) end
             UIRequest=function(req) table.insert(requests,req) end
             runGamePrompt=function(t) table.insert(notices,t.msg) end
@@ -478,7 +479,10 @@ class LanBuildTests(unittest.TestCase):
             local function scheduler()
                 return {stopAllActions=function(self) self.action=nil end,
                     runAction=function(self,action) self.action=action end,
-                    fire=function(self) local action=self.action;self.action=nil;if action then action.callback() end end}
+                    fire=function(self,seconds)
+                        local action=self.action;self.action=nil
+                        if action then wallClock=wallClock+(seconds or math.ceil(action.delay)+1);action.callback() end
+                    end}
             end
             CCNode={create=function() return scheduler() end}
             CCDelayTime={create=function(_,delay) return delay end}
@@ -612,6 +616,81 @@ class LanBuildTests(unittest.TestCase):
             for _,req in ipairs(requests) do assert(req.type==1306 or req.type==1001) end
             layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
             AutoCopyDetach(layer);assert(not AutoCopyIsRunning())
+        ''')
+        network = LuaRuntime()
+        network.execute('''print,cclog,cctrace=function() end,function() end,function() end
+            package.preload.network=function() return {} end
+            package.preload.uiqueue=function() return {
+                getrequestfromui=function() local t=request;request=nil;return t end,
+                setresponsetoui=function() end,
+                autorelease=function() coroutine.yield() end} end
+            os.time=function() return math.floor(wallClock) end
+            __G_TRACKBACK__=tostring
+            UIReqeustClear=function() end;UIRequest_=function() end
+            checkNetSatus=function() return true end
+            ConnectToServer=function() return {sock={close=function() end}} end
+            TCPSelect1conn=function() return true end
+            accepted=0
+            local runner=coroutine.create(function()
+                GameLoop2({}, {[1306]=function()
+                    accepted=accepted+1;return 0,1306,{type=1306}
+                end},{},{})
+            end)
+            function pump(t)
+                request=t;local before=accepted
+                local ok,err=coroutine.resume(runner)
+                assert(ok and coroutine.status(runner)=='suspended',err)
+                return accepted>before
+            end''')
+        network.execute(scripts["assets/scripts/gameloop2.so"])
+
+        def accepts_request(request):
+            network.globals().wallClock = lua.globals().wallClock
+            return network.globals().pump(network.table_from(dict(request.items())))
+
+        lua.globals().networkAcceptsRequest = accepts_request
+        lua.execute('''
+            UICopyAttack2(dataFor(42101,1,42101,2))
+            local enqueue=UIRequest
+            UIRequest=function(t)
+                enqueue(t)
+                if t.type==1306 then assert(networkAcceptsRequest(t),'native throttle dropped automatic challenge') end
+            end
+            local function fireScaled(speed) layer.autoCopyTimer:fire(layer.autoCopyTimer.action.delay/speed) end
+            for _,speed in ipairs({1,3,10}) do
+                wallClock=wallClock+100
+                assert(networkAcceptsRequest({type=1306})) -- 刚完成一场手动挑战。
+                layer=makeLayer();AutoCopyAttach(layer,1500)
+                layer.autoCopyButton.callback();confirmed()
+                for point=1,2 do
+                    local started=wallClock;local count=#requests
+                    for i=1,500 do
+                        fireScaled(speed)
+                        if #requests>count then break end
+                    end
+                    assert(#requests==count+1 and requests[#requests].type==1306 and requests[#requests].point==point)
+                    assert(wallClock-started>=3.1-1e-6,'scaled timer sent challenge before real-time cooldown')
+                    if point==1 then UICopyAttack2(dataFor(42101,1,42101,2)) end
+                end
+                local waiting=wallClock;local count=#requests
+                for i=1,1000 do
+                    fireScaled(speed)
+                    if not AutoCopyIsRunning() then break end
+                end
+                assert(not AutoCopyIsRunning() and wallClock-waiting>=20-1e-6,'scaled timer timed out too early')
+                assert(AutoCopyBlockManual() and #requests==count) -- 结果未知时仍不可重试。
+                UICopyAttack2(dataFor(42101,2,42102,1))
+                assert(not AutoCopyBlockManual() and events[#events].kind=='battle')
+                AutoCopyDetach(layer)
+            end
+            layer=makeLayer();AutoCopyAttach(layer,1500)
+            layer.autoCopyButton.callback();confirmed()
+            local count=#requests
+            layer.autoCopyTimer:fire(0.1)
+            assert(AutoCopyIsRunning() and #requests==count)
+            layer.autoCopyButton.callback()
+            assert(not AutoCopyIsRunning() and not AutoCopyBlockManual() and layer.autoCopyTimer.action==nil)
+            AutoCopyDetach(layer)
         ''')
 
     def test_auto_copy_network_handoff_keeps_real_stamina_and_manual_behavior(self):

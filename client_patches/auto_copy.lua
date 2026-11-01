@@ -49,7 +49,17 @@ local function autoCopySchedule(seconds, callback)
     local timer = autoCopy.layer and autoCopy.layer.autoCopyTimer
     if not timer then return end
     timer:stopAllActions()
-    timer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(seconds), CCCallFunc:create(callback)))
+    -- 全局加速会缩短CCDelayTime；按真实整秒检查，并留一秒取整余量。
+    local deadline = os.time() + math.ceil(seconds) + 1
+    local function checkTime()
+        local remaining = deadline - os.time()
+        if remaining > 0 then
+            timer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(remaining), CCCallFunc:create(checkTime)))
+        else
+            callback()
+        end
+    end
+    timer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(seconds), CCCallFunc:create(checkTime)))
 end
 
 local function autoCopyReady()
