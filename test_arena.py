@@ -462,6 +462,20 @@ class ArenaTests(unittest.TestCase):
             lua.execute("requests={}")
             getattr(lua.globals(), name)(lua.table_from(data))
             self.assertEqual([req.type for _, req in lua.globals().requests.items()], expected)
+        with zipfile.ZipFile(builder.SRC_APK) as archive:
+            self.assertIn(b"descText", archive.read("assets/UI/tanchuang/sports_shop.ccbi"))
+        lua.execute('''gameConfig.originSize={width=1080};CCSizeMake=function() end
+            CCBReaderLoad=function()
+                local items=widgetTable()
+                items.topnode.setPositionY=function() end
+                items.rewardScroll.setContentSize=function() end
+                items.gotoSportsBtn.setSwallowsTouch=function() end
+                return {},items
+            end
+            ui.setLabelString=function(node,text) node.text=text end''')
+        shop = lua.execute(scripts["assets/scripts/Layer_sports_shop.so"])
+        shop.init(shop, lua.table_from({"x": 1080, "y": 1500}))
+        self.assertEqual(shop.rootItems.descText.text, "跨日进入结算日奖，离线不累积")
 
     def test_packaged_attempt_purchase_waits_for_live_vip_status_before_quoting(self):
         try:

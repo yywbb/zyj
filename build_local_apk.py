@@ -575,6 +575,12 @@ def patch_arena_scripts():
     end''' + code[end:]
     patched["Layer_sports"] = code
 
+    code = read_script("Layer_sports_shop").decode("utf-8").replace("\r\n", "\n")
+    marker = '    self.rootNode,self.rootItems = CCBReaderLoad("tanchuang/sports_shop", nil, true, "sports_shop")\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '    ui.setLabelString(self.rootItems.descText,"跨日进入结算日奖，离线不累积",13)\n')
+    patched["Layer_sports_shop"] = code
+
     code = read_script("window_buyProperty").decode("utf-8").replace("\r\n", "\n")
     marker = "function buy.open(self,touchPriority,data,callback)\n"
     assert code.count(marker) == 1
