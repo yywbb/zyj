@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, configuration, daily_events, development, fashion, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, configuration, daily_events, development, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -66,6 +66,7 @@ def load_role_config(config_path):
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
+                             "favorable", "favorable_task",
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
@@ -546,6 +547,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode in world_boss.QUERIES:
         body = world_boss.query(opcode, save, request_body, role_config)
+    elif opcode in favorite.QUERIES:
+        body = favorite.query(opcode, save, request_body, role_config)
     elif opcode in welfare.OPCODES:
         body, costs = welfare.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:

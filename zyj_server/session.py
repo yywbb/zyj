@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, activity_copy, arena, blackmarket, daily_events, development, fashion, friend_copy, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, blackmarket, daily_events, development, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -151,6 +151,9 @@ class Session:
 
         if opcode in (1346, 1348):
             return unavailable_response(opcode, seq, body, "活动副本扫荡暂未接入，请选择实际挑战，未消耗次数或资源。")
+
+        if opcode in favorite.UNSUPPORTED:
+            return unavailable_response(opcode, seq, body, "客栈暂只接通引导与查询，送礼、成就领取和好感转移尚未实现，未扣除资源。")
 
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
@@ -331,7 +334,7 @@ class Session:
 
         if opcode in (204, 300, 4016, 1304, 1350, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
-                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES):
+                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900
