@@ -14,7 +14,8 @@ from . import views
 RESOURCES = {"gold": "元宝", "coin": "银币", "stamina": "体力", "energy": "精力"}
 ACTIONS = {"grant": "GM 调整与发放", "register": "创建登录账号", "backup": "创建备份",
            "restore": "恢复备份", "reset": "重置账号", "reset-guide": "重置引导", "config": "修改配置",
-           "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将"}
+           "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将",
+           "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件"}
 PLAYER_ACTIONS = {"grant": {"resources", "items"}, "inventory": {"cid", "count"},
                   "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
 COMMON_ITEMS = (20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
@@ -304,3 +305,55 @@ class Workbench:
             except OSError:
                 result = {**result, "audit_warning": "操作已完成，但流水未完成落盘，请核对当前状态。"}
             return result
+
+    def list_mails(self, account=None, offset=0, limit=50):
+        from .. import mail
+        return mail.list_mails(self.accounts.save_path.with_name("mails.json"), account, offset, limit)
+
+    def send_mail(self, data):
+        from .. import mail
+        if not isinstance(data, dict):
+            raise ValueError("邮件数据必须为对象")
+        title = data.get("title", "")
+        content = data.get("content", "")
+        target = data.get("target", 0)
+        if target in ("all", "0", 0):
+            target = 0
+        else:
+            target = int(target)
+            self.accounts.path(target)
+
+        resources = data.get("resources", {})
+        items = data.get("items", [])
+        recharge_info = data.get("recharge", {})
+        card = int(recharge_info.get("card", 0)) if isinstance(recharge_info, dict) else 0
+        reason = (data.get("reason") or "GM 发送邮件").strip()
+
+        attachments = {}
+        for key, cid in (("gold", 1001), ("coin", 1000), ("stamina", 1002), ("energy", 1003)):
+            if key in resources and int(resources[key]) > 0:
+                attachments[str(cid)] = int(resources[key])
+
+        for item in items:
+            cid = int(item["cid"])
+            count = int(item["count"])
+            if count > 0:
+                attachments[str(cid)] = attachments.get(str(cid), 0) + count
+
+        mail_path = self.accounts.save_path.with_name("mails.json")
+        details = {
+            "target": target or "all",
+            "title": title,
+            "attachments": attachments,
+            "recharge": recharge_info,
+            "reason": reason
+        }
+        return self.logged("mail", target if target else None, details,
+                           lambda: mail.send_mail(mail_path, target, title, content, attachments, recharge_info, card=card, sender="GM"))
+
+    def delete_mail(self, mail_id, reason="GM 撤回邮件"):
+        from .. import mail
+        mail_path = self.accounts.save_path.with_name("mails.json")
+        details = {"mail_id": mail_id, "reason": reason}
+        return self.logged("mail-delete", None, details,
+                           lambda: {"deleted": mail.delete_mail(mail_path, mail_id), "mail_id": mail_id})

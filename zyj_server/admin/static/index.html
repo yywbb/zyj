@@ -17,6 +17,7 @@
         <a id="nav-overview" href="#overview">工作台总览</a>
         <a id="nav-accounts" href="#accounts">玩家管理</a>
         <a id="nav-gm" href="#gm">GM 调整与发放</a>
+        <a id="nav-mails" href="#mails">系统邮件</a>
         <a id="nav-configs" href="#configs">游戏配置</a>
         <a id="nav-operations" href="#operations">操作记录</a>
       </nav>
@@ -71,6 +72,152 @@
             <div class="submit-bar"><span>提交前自动备份，全部变更一次保存。</span><button id="gm-submit" class="primary" disabled>执行 GM 操作</button></div>
           </form>
           <section id="gm-result" class="panel" aria-live="polite" hidden></section>
+        </section>
+
+        <section id="mails-page" aria-labelledby="mails-title" hidden>
+          <div class="page-heading">
+            <div>
+              <h1 id="mails-title">系统邮件</h1>
+              <p>向全服或指定玩家发送系统邮件，支持金币/元宝/体力等资源、道具装备武将，以及充值与月卡发放；玩家在线或离线均可领取。</p>
+            </div>
+            <a href="#operations" class="button">查看操作流水</a>
+          </div>
+
+          <form id="mail-form" class="panel">
+            <h2>撰写新邮件</h2>
+            <div class="filters">
+              <div>
+                <label for="mail-target-type">发送对象</label>
+                <select id="mail-target-type">
+                  <option value="all">全服所有玩家 (全服邮件)</option>
+                  <option value="single">指定单一账号</option>
+                </select>
+              </div>
+              <div id="mail-target-account-box" hidden>
+                <label for="mail-target-account">目标账号编号</label>
+                <input id="mail-target-account" type="number" min="1" max="1000" placeholder="1–1000">
+              </div>
+              <div class="grow">
+                <label for="mail-title">邮件标题</label>
+                <input id="mail-title" type="text" maxlength="50" required placeholder="例如：GM系统福利发放 / 更新补偿">
+              </div>
+            </div>
+
+            <div class="form-field">
+              <label for="mail-content">邮件正文说明</label>
+              <textarea id="mail-content" maxlength="500" placeholder="填写玩家查阅邮件时显示的详细说明内容（可留空）"></textarea>
+            </div>
+
+            <section class="panel sub-panel">
+              <div class="panel-heading">
+                <h3>充值与月卡发放 (包括充值)</h3>
+                <span class="muted">自动累计玩家充值额度、VIP等级与今日充值</span>
+              </div>
+              <div class="filters">
+                <div>
+                  <label for="mail-recharge-preset">快捷充值档位</label>
+                  <select id="mail-recharge-preset">
+                    <option value="0">不发放充值</option>
+                    <option value="25_card1">25元月卡 (激活30天月卡 + 250元宝 + 25充值)</option>
+                    <option value="98_card2">98元终身卡 (永久激活终身卡 + 980元宝 + 98充值)</option>
+                    <option value="6">6元档 (6充值 + 66元宝)</option>
+                    <option value="30">30元档 (30充值 + 330元宝)</option>
+                    <option value="68">68元档 (68充值 + 750元宝)</option>
+                    <option value="128">128元档 (128充值 + 1280元宝)</option>
+                    <option value="198">198元档 (198充值 + 2280元宝)</option>
+                    <option value="328">328元档 (328充值 + 3780元宝)</option>
+                    <option value="648">648元档 (648充值 + 7780元宝)</option>
+                    <option value="custom">自定义充值金额</option>
+                  </select>
+                </div>
+                <div id="mail-recharge-custom-box" hidden>
+                  <label for="mail-recharge-rmb">自定义充值金额 (RMB)</label>
+                  <input id="mail-recharge-rmb" type="number" min="0" max="1000000" placeholder="例如 100">
+                </div>
+                <div id="mail-recharge-gold-box" hidden>
+                  <label for="mail-recharge-gold">附赠元宝数量</label>
+                  <input id="mail-recharge-gold" type="number" min="0" max="10000000" placeholder="例如 1000">
+                </div>
+              </div>
+            </section>
+
+            <section class="panel sub-panel">
+              <div class="panel-heading">
+                <h3>基础游戏资源</h3>
+                <span class="muted">留空或 0 为不发放</span>
+              </div>
+              <div class="resource-inputs">
+                <div><label for="mail-res-gold">元宝</label><input id="mail-res-gold" type="number" min="0" placeholder="0"></div>
+                <div><label for="mail-res-coin">银币</label><input id="mail-res-coin" type="number" min="0" placeholder="0"></div>
+                <div><label for="mail-res-stamina">体力</label><input id="mail-res-stamina" type="number" min="0" placeholder="0"></div>
+                <div><label for="mail-res-energy">精力</label><input id="mail-res-energy" type="number" min="0" placeholder="0"></div>
+              </div>
+            </section>
+
+            <div class="gm-grid">
+              <section class="panel sub-panel">
+                <div class="panel-heading">
+                  <h3>添加附件物品</h3>
+                  <span class="muted">常用道具快速添加</span>
+                </div>
+                <div id="mail-common-items" class="actions"></div>
+                <div class="filters">
+                  <div class="grow">
+                    <label for="mail-catalog-query">物品名称 / ID</label>
+                    <input id="mail-catalog-query" type="search" placeholder="输入名称或编号搜索…">
+                  </div>
+                  <div>
+                    <label for="mail-catalog-kind">类型</label>
+                    <select id="mail-catalog-kind">
+                      <option value="">全部</option>
+                      <option>道具</option>
+                      <option>武将碎片</option>
+                      <option>普通装备</option>
+                      <option>武将</option>
+                    </select>
+                  </div>
+                  <button id="mail-catalog-search" type="button">搜索</button>
+                </div>
+                <div id="mail-catalog-rows"></div>
+                <div class="pager">
+                  <span id="mail-catalog-count"></span>
+                  <button id="mail-catalog-previous" type="button">上一页</button>
+                  <button id="mail-catalog-next" type="button">下一页</button>
+                </div>
+              </section>
+
+              <section class="panel sub-panel">
+                <div class="panel-heading">
+                  <h3>本次邮件附件清单</h3>
+                  <span id="mail-cart-count" class="muted">0 种物品</span>
+                </div>
+                <div id="mail-cart"></div>
+              </section>
+            </div>
+
+            <div class="form-field">
+              <label for="mail-reason">发送原因 / 审计备注</label>
+              <textarea id="mail-reason" required maxlength="200" placeholder="例如：开服狂欢全服礼包 / 玩家补发充值"></textarea>
+            </div>
+
+            <div class="submit-bar">
+              <span>邮件将保存到系统邮件箱，玩家无论在线或离线打开邮件均可领取。</span>
+              <button id="mail-submit" class="primary" type="submit">发送系统邮件</button>
+            </div>
+          </form>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>已发送邮件记录</h2>
+              <button id="mail-refresh-list" type="button">刷新邮件列表</button>
+            </div>
+            <div id="mail-list-rows" aria-live="polite"></div>
+            <div class="pager">
+              <span id="mail-list-count"></span>
+              <button id="mail-list-previous" type="button">上一页</button>
+              <button id="mail-list-next" type="button">下一页</button>
+            </div>
+          </section>
         </section>
 
         <section id="configs-page" aria-labelledby="configs-title" hidden>

@@ -124,6 +124,9 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .resource-inputs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .resource-inputs small { display: block; margin: 5px 0; }
 .gm-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 20px; }
+.sub-panel { background: #fafbfc; border-color: #e5e9f0; margin-top: 14px; }
+#mail-catalog-rows { max-height: 390px; overflow: auto; }
+#mail-catalog-rows thead { position: sticky; top: 0; }
 #catalog-rows { max-height: 390px; overflow: auto; }
 #catalog-rows thead { position: sticky; top: 0; }
 #gm-form h2 + label { margin-top: 16px; }

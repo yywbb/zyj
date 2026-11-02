@@ -484,7 +484,16 @@ def apply_reward(save, body, role_config, now=None):
                     if cid is None or count is None:
                         raise ValueError("道具变更缺少 ID/数量")
                     count = (count & 0xffffffff) - (1 << 32) if count & (1 << 31) else count
-                    if str(cid) in role_config["fashioncoat"]:
+                    if cid == 1008:
+                        if field == 5 and count > 0:
+                            current_time = int(time.time()) if now is None else now
+                            rstate = recharge.get_state(save)
+                            rstate["rmb"] += count
+                            save["role_state"]["vip"] = recharge.vip(rstate, role_config)
+                            welfare.get_state(save)["daily_rmb"] += count
+                            if 1 <= activities.begin7day_day(save, current_time) <= 7:
+                                activities.get_state(save)["begin7day_rmb"] += count
+                    elif str(cid) in role_config["fashioncoat"]:
                         if field != 5 or count != 1:
                             raise ValueError("时装奖励数量无效")
                         if str(cid) not in fashion.get_state(save, role_config)["levels"]:

@@ -103,6 +103,18 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return self._send(200, self.server.gm.history(parse_account_id(account) if account else None,
                     query.get("action", [""])[0], int(query.get("since", ["0"])[0]),
                     int(query.get("until", ["0"])[0]), int(query.get("offset", ["0"])[0])))
+            if not writing and route.path == "/api/mails":
+                account = query.get("account", [""])[0]
+                offset = int(query.get("offset", ["0"])[0])
+                limit = int(query.get("limit", ["50"])[0])
+                if offset < 0 or limit <= 0 or limit > 100:
+                    raise ValueError("邮件分页参数无效")
+                return self._send(200, self.server.gm.list_mails(parse_account_id(account) if account else None, offset, limit))
+            if writing and route.path == "/api/mails":
+                return self._send(200, self.server.gm.send_mail(data))
+            if writing and len(parts) == 4 and parts[:2] == ["api", "mails"] and parts[3] == "delete":
+                mail_id = int(parts[2])
+                return self._send(200, self.server.gm.delete_mail(mail_id, data.get("reason", "GM 撤回邮件")))
             if not writing and route.path == "/api/accounts":
                 rows = [views.summary(accounts.snapshot(i), accounts.step_counts, accounts.role_config) for i in accounts.account_ids()]
                 return self._send(200, {"accounts": rows})

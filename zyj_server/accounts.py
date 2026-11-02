@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, guild, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, guild, mail, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -235,7 +235,8 @@ class AccountStore:
         if opcode == 3625:
             return ranking.temple_query(body, saves, viewer, self.role_config)
         if opcode in (3100, 3101, 3102):
-            return ranking.prepare_mail(opcode, save, body, self.observe_rankings(), viewer, self.role_config)
+            return mail.prepare(opcode, save, body, self.save_path.with_name("mails.json"),
+                                self.observe_rankings(), viewer, self.role_config, int(time.time()))
         if opcode in (5602, 5603):
             if body:
                 raise ValueError("成长基线查询不接受参数")
