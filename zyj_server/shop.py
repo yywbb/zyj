@@ -48,7 +48,7 @@ def fixed_box(row):
 
 
 def openable_box(row):
-    return (fixed_box(row) or row.get("type") == "box" and row.get("function") in ("box2", "box4")
+    return (fixed_box(row) or row.get("type") == "box" and row.get("function") in ("box2", "box3", "box4")
             or row.get("type") == "keybox" and row.get("function") == "box99")
 
 
@@ -61,7 +61,8 @@ def open_box(save, values, config, seed):
     row = config["props"][str(cid)]
     if not openable_box(row) or row["use_limit"]:
         raise ValueError("此礼包开启条件暂不支持")
-    if len(values) != (3 if row["function"] == "box4" else 2):
+    choice = row["function"] in ("box3", "box4")
+    if len(values) != (3 if choice else 2):
         raise ValueError("礼包使用参数无效，自选箱须指定一项奖励")
     inventory = {pb_get_varint(v, 1): pb_get_varint(v, 2) for n, w, v in
                  iter_pb_fields(bytes.fromhex(save["world_state"]["1200"])) if (n, w) == (1, 2)}
@@ -83,9 +84,12 @@ def open_box(save, values, config, seed):
     if vip_box and int(row["param1"] or 0) > save["role_state"].get("vip", 0):
         raise ValueError("贵族等级不足")
     specification = row["param2" if vip_box else "param1"]
-    gets = [(int(cid), int(num) * count) for entry in specification.split(";") if entry
-            for cid, num in [entry.split(",")]]
-    if row["function"] == "box4":
+    if row["function"] == "box3":
+        gets = [(int(cid), count) for cid in specification.split(";") if cid]
+    else:
+        gets = [(int(cid), int(num) * count) for entry in specification.split(";") if entry
+                for cid, num in [entry.split(",")]]
+    if choice:
         gets = [(cid, num) for cid, num in gets if cid == values[2]]
         if len(gets) != 1:
             raise ValueError("请选择箱内的一项有效奖励")

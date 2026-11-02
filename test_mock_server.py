@@ -1240,39 +1240,43 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_choice_boxes_grant_only_the_configured_selection_with_unique_equipment_iids(self):
         self.seed_shop_account()
-        entries = [tuple(map(int, entry.split(","))) for entry in self.role_config["props"]["20666"]["param1"].split(";") if entry]
-        for index, (chosen, quantity) in enumerate(entries):
-            count = 100 if index == len(entries) - 1 else 1
-            self.give_props({20666: count})
-            before = self.entity_records(self.query_world(1002), 2, 1)
-            request = self.activity_request(1201, [20666, count, chosen])
-            replies = self.replay([request, request])
-            self.assertEqual([reply["opcode"] for reply in replies], [1201, 1201])
-            self.assertEqual(replies[0], replies[1])
-            reward = bytes.fromhex(replies[0]["hex"])
-            equipment = [protocol.parse_ids_pb(v) for n, w, v in protocol.iter_pb_fields(reward) if (n, w) == (6, 2)]
-            self.assertEqual([row[1] for row in equipment], [chosen] * (count * quantity))
-            self.assertEqual(len({row[0] for row in equipment}), count * quantity)
-            self.assertFalse(any(n == 10 and v for n, w, v in protocol.iter_pb_fields(reward)))
-            stored = self.entity_records(self.query_world(1002), 2, 1)
-            self.assertEqual(set(stored) - set(before), {row[0] for row in equipment})
-            for row in equipment:
-                self.assertGreater(row[0], 1000000)
-                self.assertEqual(protocol.parse_ids_pb(stored[row[0]]), row)
-            self.assertNotIn(20666, self.entity_records(self.query_world(1200), 1, 1))
+        for cid in (20623, 20666):
+            specification = self.role_config["props"][str(cid)]["param1"]
+            entries = ([(int(entry), 1) for entry in specification.split(";") if entry] if cid == 20623 else
+                       [tuple(map(int, entry.split(","))) for entry in specification.split(";") if entry])
+            for index, (chosen, quantity) in enumerate(entries):
+                count = 100 if index == len(entries) - 1 else 1
+                self.give_props({cid: count})
+                before = self.entity_records(self.query_world(1002), 2, 1)
+                request = self.activity_request(1201, [cid, count, chosen])
+                replies = self.replay([request, request])
+                self.assertEqual([reply["opcode"] for reply in replies], [1201, 1201])
+                self.assertEqual(replies[0], replies[1])
+                reward = bytes.fromhex(replies[0]["hex"])
+                equipment = [protocol.parse_ids_pb(v) for n, w, v in protocol.iter_pb_fields(reward) if (n, w) == (6, 2)]
+                self.assertEqual([row[1] for row in equipment], [chosen] * (count * quantity))
+                self.assertEqual(len({row[0] for row in equipment}), count * quantity)
+                self.assertFalse(any(n == 10 and v for n, w, v in protocol.iter_pb_fields(reward)))
+                stored = self.entity_records(self.query_world(1002), 2, 1)
+                self.assertEqual(set(stored) - set(before), {row[0] for row in equipment})
+                for row in equipment:
+                    self.assertGreater(row[0], 1000000)
+                    self.assertEqual(protocol.parse_ids_pb(stored[row[0]]), row)
+                self.assertNotIn(cid, self.entity_records(self.query_world(1200), 1, 1))
 
     def test_random_and_choice_boxes_reject_bad_quantities_selections_and_comb_requests(self):
         self.seed_shop_account()
-        self.give_props({20350: 1, 20666: 1})
+        self.give_props({20350: 1, 20623: 1, 20666: 1})
         original = self.save_path.read_bytes()
         for values in ([20350, 2], [20350, 101], [20350, 1, 27051], [20666, 1],
-                       [20666, 2, 26417], [20666, 101, 26417], [20666, 1, 20100], [20666, 1, 1001]):
+                       [20666, 2, 26417], [20666, 101, 26417], [20666, 1, 20100], [20666, 1, 1001],
+                       [20623, 1], [20623, 2, 26402], [20623, 101, 26402], [20623, 1, 25403], [20623, 1, 1001]):
             with self.subTest(values=values):
                 self.assertEqual(self.replay([self.activity_request(1201, values)])[0]["opcode"], 999999)
                 self.assertEqual(self.save_path.read_bytes(), original)
-        for values in ([20350, 0], [20666, 1, 0], [20666, 1, 26417, 1]):
+        for values in ([20350, 0], [20666, 1, 0], [20666, 1, 26417, 1], [20623, 1, 0], [20623, 1, 26402, 1]):
             self.assert_rejected(self.activity_request(1201, values), "道具使用请求格式错误")
-        for values in ([20350, 1], [20666, 1, 26417]):
+        for values in ([20350, 1], [20666, 1, 26417], [20623, 1, 26402]):
             body = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 1201)
                                             + protocol.encode_pb_field(2, 2, bytes.fromhex(self.activity_request(1201, values)["hex"])))
             self.assertEqual(self.replay([{"opcode": 999900, "seq": 20000, "hex": body.hex()}])[0]["opcode"], 999999)
@@ -1280,13 +1284,16 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_random_boxes_allow_disabled_weights_but_reject_invalid_reward_configuration(self):
         self.seed_shop_account()
-        self.give_props({20350: 10, 20666: 1})
+        self.give_props({20350: 10, 20623: 1, 20666: 1})
         original = self.save_path.read_bytes()
         cases = [(20350, specification, [20350, 1]) for specification in
                  ("", "27051,1,-1", "27051,1,0", "27051,0,1", "27051,1", "27051,1,1,1", "bad", "999999,1,1",
                   "20274,5,10000000;999999,1,1")]
         cases += [(20666, specification, [20666, 1, 26417]) for specification in
                   ("", "26417,0", "26417,1;26417,2", "26417,1,1", "bad")]
+        cases += [(20623, specification, [20623, 1, 26402]) for specification in
+                  ("", "26402,1", "26402;26402;", "bad")]
+        cases += [(20623, "999999;", [20623, 1, 999999])]
         for cid, specification, values in cases:
             with self.subTest(cid=cid, specification=specification), patch.dict(self.role_config["props"][str(cid)], param1=specification):
                 self.assertEqual(self.replay([self.activity_request(1201, values)])[0]["opcode"], 999999)
@@ -1299,9 +1306,9 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_random_and_choice_box_save_failures_and_overflow_do_not_publish_partial_rewards(self):
         self.seed_shop_account()
-        self.give_props({20350: 1, 20666: 1})
+        self.give_props({20350: 1, 20623: 1, 20666: 1})
         original = self.save_path.read_bytes()
-        for values in ([20350, 1], [20666, 1, 26417]):
+        for values in ([20350, 1], [20666, 1, 26417], [20623, 1, 26402]):
             with redirect_stdout(io.StringIO()):
                 session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
                 memory = copy.deepcopy(session.save)
@@ -1314,27 +1321,29 @@ class ReplayRoutingTests(unittest.TestCase):
         saved["role_state"]["coin"] = (1 << 31) - 1
         self.save_path.write_text(json.dumps(saved))
         original = self.save_path.read_bytes()
-        for cid, values in ((20350, [20350, 1]), (20666, [20666, 1, 1000])):
-            with patch.dict(self.role_config["props"][str(cid)], param1="1000,1,1" if cid == 20350 else "1000,1"):
+        for cid, specification, values in ((20350, "1000,1,1", [20350, 1]), (20666, "1000,1", [20666, 1, 1000]),
+                                           (20623, "1000;", [20623, 1, 1000])):
+            with patch.dict(self.role_config["props"][str(cid)], param1=specification):
                 self.assertEqual(self.replay([self.activity_request(1201, values)])[0]["opcode"], 999999)
                 self.assertEqual(self.save_path.read_bytes(), original)
 
     def test_actual_apk_box_callbacks_send_choice_cids_and_deduct_boxes_once(self):
         import test_activity_copy
         self.seed_shop_account()
-        self.give_props({20350: 11, 20666: 2})
+        self.give_props({20350: 11, 20623: 11, 20666: 2})
         self.config = self.role_config
         lua = test_activity_copy.ActivityCopyTests.network_lua(self)
         lua.execute(apk_builder.read_script("idnums_pb", "pb"))
         lua.execute(b'''table.copy=function(t) local c={} for k,v in pairs(t) do c[k]=v end return c end
-            gamedata.cache.props={[20350]={cid=20350,num=11},[20666]={cid=20666,num=2}}
+            gamedata.cache.props={[20350]={cid=20350,num=11},[20623]={cid=20623,num=11},[20666]={cid=20666,num=2}}
             gamedata.sortData=function() end
             function gamedata:updateprops(t)
                 local row=self.cache.props[t.cid];row.num=row.num+t.num
             end''')
         lua.execute(apk_builder.read_script("GamePropList"))
-        remaining = {20350: 11, 20666: 2}
-        for values in ([20350, 1], [20350, 10], [20666, 1, 26417], [20666, 1, 26420]):
+        remaining = {20350: 11, 20623: 11, 20666: 2}
+        for values in ([20350, 1], [20350, 10], [20666, 1, 26417], [20666, 1, 26420],
+                       [20623, 1, 26402], [20623, 10, 26406]):
             request = {b"cid": values[0], b"num": values[1]}
             if len(values) == 3:
                 request[b"choose"] = values[2]
@@ -1347,7 +1356,7 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(reply[b"propscachedata"][values[0]][b"num"], remaining[values[0]])
             self.assertEqual(len(reply[b"rewards"][b"usedcidnums"]), 0)
             if len(values) == 3:
-                self.assertEqual([row[b"ids"][2] for _, row in reply[b"rewards"][b"equips"].items()], [values[2]])
+                self.assertEqual([row[b"ids"][2] for _, row in reply[b"rewards"][b"equips"].items()], [values[2]] * values[1])
 
     def test_key_boxes_use_configured_weights_and_consume_matching_keys_once(self):
         self.seed_shop_account()
