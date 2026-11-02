@@ -118,6 +118,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not writing and route.path == "/api/accounts":
                 rows = [views.summary(accounts.snapshot(i), accounts.step_counts, accounts.role_config) for i in accounts.account_ids()]
                 return self._send(200, {"accounts": rows})
+            if not writing and route.path == "/api/players/top":
+                sort_by = query.get("sort", ["power"])[0]
+                limit = min(100, max(1, int(query.get("limit", ["50"])[0])))
+                from .. import db
+                db_path = db.get_db_path(accounts.save_path)
+                return self._send(200, {"rows": db.list_top_players(db_path, sort_by, limit)})
             if len(parts) in (3, 4) and parts[:2] == ["api", "accounts"]:
                 account = parse_account_id(parts[2])
                 if writing and len(parts) == 3:

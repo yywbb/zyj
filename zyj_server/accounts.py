@@ -58,6 +58,8 @@ class AccountStore:
         self.lock = threading.RLock()
         # shortcut: 限流仅在本进程内保留；支持多进程部署时再共享计数。
         self.failed_logins = {}
+        from . import db
+        self.db_path = db.get_db_path(self.save_path)
 
     def path(self, account):
         if type(account) is not int or not 1 <= account <= 1000:
@@ -83,6 +85,12 @@ class AccountStore:
             record = {"algorithm": "pbkdf2_sha256", "iterations": PASSWORD_ITERATIONS,
                       "salt": salt.hex(), "hash": digest.hex()}
             storage.atomic_write(path, json.dumps(record).encode("utf-8"))
+            try:
+                from . import db
+                if self.db_path.exists():
+                    db.save_credentials(self.db_path, account, record)
+            except Exception:
+                pass
             return {"account": account, "registered": True}
 
     def authenticate(self, account, password):
@@ -319,6 +327,12 @@ class AccountStore:
             previous = storage.backup(directory, path.read_bytes()) if path.exists() else None
             if action == "reset":
                 path.unlink()
+                try:
+                    from . import db
+                    if self.db_path.exists():
+                        db.delete_player(self.db_path, account)
+                except Exception:
+                    pass
             elif restored is not None and not player.save_role(restored, path, self.step_counts):
                 raise OSError("保存失败，原存档已保留")
             return {"backup_id": previous, "account": account, "action": action}

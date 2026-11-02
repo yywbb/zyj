@@ -15,6 +15,9 @@ config_overrides.json
 /rankings.json
 /guilds.json
 /mails.json
+*.db
+*.db-shm
+*.db-wal
 /backups/
 /logs/
 /gm_operations/

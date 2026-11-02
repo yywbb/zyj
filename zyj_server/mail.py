@@ -94,6 +94,13 @@ def send_mail(path, target, title, content, attachments=None, recharge_info=None
     }
     state["mails"].append(entry)
     save_mails(path, state)
+    try:
+        from . import db
+        db_path = db.get_db_path(path)
+        if db_path.exists():
+            db.save_mail(db_path, entry)
+    except Exception:
+        pass
     return entry
 
 
@@ -103,6 +110,12 @@ def delete_mail(path, mail_id):
     state["mails"] = [m for m in state["mails"] if m["id"] != mail_id]
     if len(state["mails"]) != initial_len:
         save_mails(path, state)
+        try:
+            from . import db
+            db_path = db.get_db_path(path)
+            db.delete_mail(db_path, mail_id)
+        except Exception:
+            pass
         return True
     return False
 

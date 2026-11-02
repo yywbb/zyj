@@ -158,6 +158,12 @@ def validate(state):
 def write(path, state):
     validate(state)
     storage.atomic_write(path, json.dumps(state, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+    try:
+        from . import db
+        db_path = db.get_db_path(path)
+        db.save_guild(db_path, state)
+    except Exception:
+        pass
 
 
 def recover(state, saves):

@@ -4,6 +4,7 @@ import copy
 import functools
 import json
 import os
+from pathlib import Path
 import random
 import tempfile
 import time
@@ -98,6 +99,15 @@ def load_save(save_path, step_counts):
         except Exception as e:
             print_flush(f"[!] 读取存档失败 ({e})，保留原文件并停止加载")
             raise ValueError("存档读取失败，拒绝用空进度覆盖") from e
+    try:
+        from . import db
+        p = Path(save_path)
+        aid = int(p.parent.name) if p.parent.name.isdigit() and 1 <= int(p.parent.name) <= 1000 else 1
+        data = db.load_player(db.get_db_path(save_path), aid)
+        if data is not None:
+            return migrate_guide(data, step_counts)
+    except Exception:
+        pass
     return get_default_save()
 
 
@@ -106,6 +116,16 @@ def save_role(save_data, save_path, step_counts):
     try:
         save_data["last_login"] = time.time()
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # 同步写入 SQLite (若数据库存在则同步)
+        try:
+            from . import db
+            db_path = db.get_db_path(save_path)
+            if db_path.exists():
+                p = Path(save_path)
+                aid = int(p.parent.name) if p.parent.name.isdigit() and 1 <= int(p.parent.name) <= 1000 else 1
+                db.save_player(db_path, aid, save_data)
+        except Exception:
+            pass
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(save_path), delete=False) as f:
             temporary_path = f.name
             json.dump(save_data, f, ensure_ascii=False, indent=2)

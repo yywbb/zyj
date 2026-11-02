@@ -181,6 +181,13 @@ class Workbench:
     def _write(self, row):
         storage.atomic_write(self.directory / (row["id"] + ".json"),
                              json.dumps(row, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        try:
+            from .. import db
+            db_path = db.get_db_path(self.accounts.save_path)
+            if db_path.exists():
+                db.save_gm_operation(db_path, row)
+        except Exception:
+            pass
 
     def _read(self, path):
         row = json.loads(path.read_bytes())
@@ -204,10 +211,17 @@ class Workbench:
     def history(self, account=None, action="", since=0, until=0, offset=0):
         if (action and action not in ACTIONS) or offset < 0 or since < 0 or until < 0 or (until and since > until):
             raise ValueError("操作记录筛选参数无效")
-        # shortcut: 本机流水按文件扫描；记录量明显增加时改用索引存储。
         with self.accounts.lock:
             rows = [self._read(path) for path in self.directory.glob("*.json")
                     if re.fullmatch(r"[a-f0-9]{32}\.json", path.name)]
+        if not rows:
+            try:
+                from .. import db
+                db_path = db.get_db_path(self.accounts.save_path)
+                if db_path.exists():
+                    return db.list_gm_operations(db_path, account, action, since, until, offset, 50)
+            except Exception:
+                pass
         rows = [row for row in rows if (account is None or row["account"] == account)
                 and (not action or row["action"] == action) and row["at"] >= since and (not until or row["at"] < until)]
         rows.sort(key=lambda row: (row["at"], row["id"]), reverse=True)

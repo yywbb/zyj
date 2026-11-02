@@ -1703,5 +1703,118 @@ class AdminHttpTests(AdminFixture):
             self.store.close_session(2)
 
 
+class DatabaseHybridJsonTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.root = Path(self.temp_dir)
+        self.db_path = self.root / "zyj.db"
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_sqlite_hybrid_json_player_save_load_and_indexing(self):
+        from zyj_server import db
+        db.init_db(self.db_path)
+
+        p1 = {
+            "role_name": "玩家甲", "has_role": True, "level": 30,
+            "role_state": {"level": 30, "power": 300000, "vip": 5, "coin": 50000, "gold": 1000},
+            "created_at": 1700000000, "last_login": 1700005000
+        }
+        p2 = {
+            "role_name": "玩家乙", "has_role": True, "level": 50,
+            "role_state": {"level": 50, "power": 800000, "vip": 8, "coin": 90000, "gold": 5000},
+            "created_at": 1700001000, "last_login": 1700006000
+        }
+        db.save_player(self.db_path, 1, p1)
+        db.save_player(self.db_path, 2, p2)
+
+        # 验证读取完整存档
+        loaded1 = db.load_player(self.db_path, 1)
+        self.assertEqual(loaded1["role_name"], "玩家甲")
+        self.assertEqual(loaded1["role_state"]["power"], 300000)
+
+        # 验证轻量索引摘要
+        summary = db.get_player_summary(self.db_path, 2)
+        self.assertEqual(summary["level"], 50)
+        self.assertEqual(summary["power"], 800000)
+        self.assertEqual(summary["vip"], 8)
+
+        # 验证按战力排名查询 (B-Tree 索引)
+        top_power = db.list_top_players(self.db_path, "power", 10)
+        self.assertEqual(len(top_power), 2)
+        self.assertEqual(top_power[0]["account_id"], 2)
+        self.assertEqual(top_power[1]["account_id"], 1)
+
+        # 验证按等级排名查询
+        top_level = db.list_top_players(self.db_path, "level", 10)
+        self.assertEqual(top_level[0]["account_id"], 2)
+
+        # 验证删除
+        db.delete_player(self.db_path, 1)
+        self.assertIsNone(db.load_player(self.db_path, 1))
+
+    def test_sqlite_credentials_and_mails_persistence(self):
+        from zyj_server import db
+        db.init_db(self.db_path)
+
+        # 凭据存储测试
+        cred = {"algorithm": "pbkdf2_sha256", "iterations": 600000, "salt": "11"*16, "hash": "22"*32}
+        db.save_credentials(self.db_path, 5, cred)
+        self.assertTrue(db.has_credentials(self.db_path, 5))
+        self.assertFalse(db.has_credentials(self.db_path, 6))
+        self.assertEqual(db.load_credentials(self.db_path, 5)["salt"], "11"*16)
+
+        # 邮件存储测试
+        m1 = {"id": 800000001, "target": 0, "title": "全服通告", "content": "内容", "attachments": {"1001": 100}, "created_at": 100}
+        m2 = {"id": 800000002, "target": 5, "title": "专属奖励", "content": "奖励", "attachments": {"1000": 500}, "created_at": 200}
+        db.save_mail(self.db_path, m1)
+        db.save_mail(self.db_path, m2)
+
+        # 账号 5 可查到 m1 和 m2
+        res5 = db.list_mails(self.db_path, 5)
+        self.assertEqual(res5["total"], 2)
+        self.assertEqual(res5["rows"][0]["id"], 800000002)
+
+        # 账号 1 只能查到全服邮件 m1
+        res1 = db.list_mails(self.db_path, 1)
+        self.assertEqual(res1["total"], 1)
+        self.assertEqual(res1["rows"][0]["id"], 800000001)
+
+        # 删除邮件
+        self.assertTrue(db.delete_mail(self.db_path, 800000001))
+        self.assertEqual(db.list_mails(self.db_path, 1)["total"], 0)
+
+    def test_sqlite_migration_from_disk_files(self):
+        from zyj_server import db
+        # 1. 预先在磁盘写入 JSON 文件
+        p1 = {"role_name": "磁盘老角色", "has_role": True, "level": 15, "role_state": {"level": 15, "power": 88888}}
+        (self.root / "role_save.json").write_text(json.dumps(p1), encoding="utf-8")
+
+        acc2_dir = self.root / "accounts" / "2"
+        acc2_dir.mkdir(parents=True)
+        p2 = {"role_name": "二号角色", "has_role": True, "level": 20, "role_state": {"level": 20, "power": 120000}}
+        (acc2_dir / "role_save.json").write_text(json.dumps(p2), encoding="utf-8")
+        (acc2_dir / "credentials.json").write_text(json.dumps({
+            "algorithm": "pbkdf2_sha256", "iterations": 600000, "salt": "aa"*16, "hash": "bb"*32
+        }), encoding="utf-8")
+
+        # 2. 调用 init_db 并指定 base_dir 触发自动迁移
+        db.init_db(self.db_path, self.root)
+
+        # 3. 验证数据已成功导入 SQLite
+        loaded1 = db.load_player(self.db_path, 1)
+        self.assertIsNotNone(loaded1)
+        self.assertEqual(loaded1["role_name"], "磁盘老角色")
+
+        loaded2 = db.load_player(self.db_path, 2)
+        self.assertIsNotNone(loaded2)
+        self.assertEqual(loaded2["role_name"], "二号角色")
+
+        cred2 = db.load_credentials(self.db_path, 2)
+        self.assertIsNotNone(cred2)
+        self.assertEqual(cred2["hash"], "bb"*32)
+
+
 if __name__ == "__main__":
     unittest.main()
