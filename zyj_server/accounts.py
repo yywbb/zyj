@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, guild, guild_chat, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, guild, guild_chat, guild_games, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -128,6 +128,7 @@ class AccountStore:
                            lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body))
             with self.lock:
                 self.active[account]["identity"] = session.save["created_at"]
+            session.guild_profit = lambda now: self.guild_profit(account, now)
             return session
         except Exception as error:
             self.close_session(account)
@@ -174,7 +175,8 @@ class AccountStore:
             if session.save.get("has_role"):
                 guild.validate_role(session.save)
                 saves[account] = session.save
-            now = max(int(time.time()), state["checked_at"])
+            moment = time.time()
+            now = max(int(moment), state["checked_at"])
             for row in state["guilds"].values():
                 for key, member in row["members"].items():
                     identity, seen = self.guild_disconnects.get(int(key), (None, 0))
@@ -193,6 +195,9 @@ class AccountStore:
                     state["checked_at"] = now
                     guild.write(path, state)
                 packets = [protocol.pack_frame(opcode, seq, reply)]
+                if opcode == 3010 and not body and getattr(session, "guild_chat_cursor", None):
+                    if any(b"&&&" in value for n, w, value in protocol.iter_pb_fields(reply) if (n, w) == (2, 2)):
+                        packets.append(protocol.pack_frame(2291, 0, reply))
                 session.guild_chat_cursor = cursor
                 if opcode == 3011:
                     session.guild_chat_reply = ((seq, body), tuple(packets), gid)
@@ -203,11 +208,16 @@ class AccountStore:
                         and (now + 28800) // 86400 == cached[4]):
                     return list(cached[1])
                 raise ValueError("公会状态已变化，请刷新后重新操作")
-            if opcode in (*guild.DAILY_OPCODES, *guild.FEATURE_OPCODES):
+            if opcode in (*guild.DAILY_OPCODES, *guild.FEATURE_OPCODES, *guild_games.OPCODES):
                 working = copy.deepcopy(session.save)
                 settled = copy.deepcopy(state)
-                prepare = guild.prepare_feature if opcode in guild.FEATURE_OPCODES else guild.prepare_daily
-                reply, costs, reward = prepare(opcode, body, state, working, account, self.role_config, now)
+                if opcode in guild_games.OPCODES:
+                    working["guild_profit"] = guild_games.guild_war.benefit(state, account, self.role_config, now)
+                    reply, costs, reward = guild_games.prepare(opcode, body, state, working, saves, account, self.role_config,
+                                                             now, self.active, max(int(moment * 1000), now * 1000))
+                else:
+                    prepare = guild.prepare_feature if opcode in guild.FEATURE_OPCODES else guild.prepare_daily
+                    reply, costs, reward = prepare(opcode, body, state, working, account, self.role_config, now)
                 online_rewards.settle(working, self.role_config, session.connected_at, now)
                 welfare.settle(working, now)
                 player.settle_stamina(working, self.role_config, now)
@@ -216,12 +226,19 @@ class AccountStore:
                 if reward:
                     player.apply_reward(working, reward, self.role_config, now)
                 packets = [protocol.pack_frame(opcode, seq, reply)]
-                if opcode in guild.MUTATIONS:
+                if opcode in guild.MUTATIONS or working != session.save or reward:
                     packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
                     for mid in (1200, 1012, 1107, 1027):
                         key = "1002" if mid == 1027 else str(mid)
                         if working["world_state"][key] != session.save["world_state"][key]:
                             packets.append(protocol.pack_frame(mid, 0, bytes.fromhex(working["world_state"][key])))
+                    current, previous = working["role_state"], session.save["role_state"]
+                    if any(current[k] != previous[k] for k in ("power", "g_power", "power_all")):
+                        packets.append(protocol.pack_frame(205, 0, guild.ids([v & ((1 << 64) - 1) for v in
+                            (current["power"] - previous["power"], current["power"], current["g_power"] - previous["g_power"], current["g_power"],
+                             current["power_all"] - previous["power_all"], current["power_all"])])))
+                    if opcode in guild_games.OPCODES:
+                        packets.append(protocol.pack_frame(2230, 0, guild.status(state, account, {**saves, account: working}, self.role_config, now)))
                 if opcode == 2251:
                     activities.record_liveness(working, 23, 1, self.role_config, now)
                     state["checked_at"] = now
@@ -266,6 +283,13 @@ class AccountStore:
                 state["checked_at"] = now
                 guild.write(path, state)
             return packets
+
+    def guild_profit(self, account, now):
+        with self.lock:
+            saves = self.rank_saves()
+            state = guild.load(self.save_path.with_name("guilds.json"), saves)
+            guild.recover(state, saves)
+            return guild_games.guild_war.benefit(state, account, self.role_config, now)
 
     def growth_buyers(self):
         """只统计已原子落盘的本地购买账号；损坏存档不能虚增全服人数。"""

@@ -119,14 +119,16 @@ def strengthen(save, opcode, body, config, seed):
     deck = [entry.split(",") for i in (1, 2, 3) for entry in vip[f"p_equipex_{i}"].split(";") if entry]
     rng = random.Random(seed)
     coin, spent, critical, actual_costs = save["role_state"]["coin"], 0, {}, {}
+    from . import guild_war
+    discount = 100 - guild_war.effect(save, config, 3)
     while True:
         available = [i for i in items if items[i][2] < targets[i]
-                     and config["equip_strengthen"][str(items[i][2])][prices[i]] <= coin - spent]
+                      and config["equip_strengthen"][str(items[i][2])][prices[i]] * discount // 100 <= coin - spent]
         if not available:
             break
         # 自研：一键优先补最低等级装备；五级按钮以原等级+5为目标。
         iid = min(available, key=lambda i: (items[i][2], i))
-        cost = config["equip_strengthen"][str(items[iid][2])][prices[iid]]
+        cost = config["equip_strengthen"][str(items[iid][2])][prices[iid]] * discount // 100
         if cost <= 0:
             raise ValueError("强化费用配置无效")
         rolled = rng.choices([int(v) for v, weight in deck], [float(weight) for v, weight in deck])[0]

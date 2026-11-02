@@ -6,14 +6,14 @@ import math
 import re
 import secrets
 
-from . import activities, guild_chat, storage
+from . import activities, guild_chat, guild_games, storage
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
 DAILY_OPCODES = (2250, 2251, 2260)
 FEATURE_OPCODES = (2252, 2253, 2256, 2257, 2258, 2259)
-MUTATIONS = (2251, 2253, 2257, 2258, 2259, 2260)
-OPCODES = (*range(2230, 2244), *DAILY_OPCODES, *FEATURE_OPCODES, 2254, 2255, 2261, 2265, 2266, 2267)
+MUTATIONS = (2251, 2253, 2257, 2258, 2259, 2260, *guild_games.MUTATIONS)
+OPCODES = (*range(2230, 2244), *DAILY_OPCODES, *FEATURE_OPCODES, 2254, 2255, 2261, 2265, 2266, 2267, *guild_games.OPCODES)
 
 
 def ids(values):
@@ -113,6 +113,7 @@ def validate(state):
         raise ValueError("公会格式无效")
     integer(state["next_id"], 1)
     integer(state["checked_at"])
+    guild_games.guild_war.validate(state)
     names, members = set(), set()
     for key, row in state["guilds"].items():
         if not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key:
@@ -128,6 +129,7 @@ def validate(state):
         integer(row.get("experience", 0), high=(1 << 63) - 1)
         fishpond_state(row)
         guild_chat.validate(row)
+        guild_games.validate(row)
         events = row.get("events", [])
         integer(row.get("next_event", 1), 1)
         if not isinstance(events, list) or len(events) > 200:
@@ -193,6 +195,8 @@ def validate(state):
             raise ValueError("公会事务收据无效")
         candidate = copy.deepcopy(state)
         candidate["guilds"][key] = after
+        if "war_after" in action:
+            candidate["war"] = action["war_after"]
         validate(candidate)
 
 
@@ -209,6 +213,8 @@ def recover(state, saves):
             saved = saves.get(int(action["account"]), {})
             if saved.get("created_at") == action["identity"] and saved.get("guild_action_receipt") == action["token"]:
                 row = state["guilds"][gid] = action["after"]
+                if "war_after" in action:
+                    state["war"] = action["war_after"]
         pending = row.get("pending")
         if pending:
             saved = saves.get(int(pending["account"]), {})
@@ -282,12 +288,16 @@ def log(row, now, opt, name, other="", content="", status="", param=""):
 def stage_action(state, before, account, save):
     """共享变化先作草稿；只有随个人扣款/奖励保存的收据才能发布。"""
     gid, row = membership(state, account)
-    if row == before["guilds"][gid]:
+    if row == before["guilds"][gid] and state.get("war") == before.get("war"):
         return
     token = secrets.token_hex(16)
     save["guild_action_receipt"] = token
     pending = copy.deepcopy(before["guilds"][gid])
     pending["pending_action"] = {"account": str(account), "identity": save["created_at"], "token": token, "after": row}
+    if state.get("war") != before.get("war"):
+        pending["pending_action"]["war_after"] = state.pop("war")
+        if "war" in before:
+            state["war"] = copy.deepcopy(before["war"])
     state["guilds"][gid] = pending
 
 
@@ -566,6 +576,8 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
             g["applications"].pop(str(account), None)
 
     def leave(account):
+        if guild_games.member_busy(row, account, now):
+            raise ValueError("请先结束公会活动并领取待结算奖励，再退出或移除成员")
         log(row, now, 2 if account == viewer else 10, saves[account]["role_name"])
         del row["members"][str(account)]
         state["cooldowns"][str(account)] = {"identity": saves[account]["created_at"], "left_at": now}

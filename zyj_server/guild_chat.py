@@ -26,7 +26,7 @@ def validate(row):
         previous = chat["id"]
 
 
-def request_text(body, own_rid):
+def request_text(body, own_rid, invitation=False):
     fields = list(iter_pb_fields(body))
     if len(fields) != 1 or fields[0][:2] != (2, 2):
         raise ValueError("聊天需要一条公会消息")
@@ -42,12 +42,12 @@ def request_text(body, own_rid):
         raise ValueError("聊天文字编码无效") from None
     if not 1 <= len(text) <= 200 or not text.isprintable() or not text.strip():
         raise ValueError("聊天内容须为 1–200 个可显示字符")
-    if "&&&" in text or "<" in text or ">" in text:
+    if not invitation and "&&&" in text or "<" in text or ">" in text:
         raise ValueError("请使用活动页面的邀请按钮")
     return text
 
 
-def prepare(opcode, body, state, saves, viewer, config, now, cursor):
+def prepare(opcode, body, state, saves, viewer, config, now, cursor, *, invitation=False):
     from . import guild
 
     gid, row = guild.membership(state, viewer)
@@ -69,7 +69,7 @@ def prepare(opcode, body, state, saves, viewer, config, now, cursor):
                 or role["power"] < int(config["global_kv"]["guild_chat_power"]["value"])):
             raise ValueError("等级或战力未达到公会发言要求")
         raw = bytes.fromhex(save["role_snapshot"])
-        text = request_text(body, pb_get_varint(raw, 1))
+        text = request_text(body, pb_get_varint(raw, 1), invitation)
         previous = next((c for c in reversed(row.get("chats", []))
                          if c["account"] == viewer and c["identity"] == save["created_at"]), None)
         if previous and now - previous["at"] < 5:

@@ -9,6 +9,7 @@ import struct
 import tempfile
 import threading
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from zyj_server import accounts, guide, guild, player, protocol, replay, storage
@@ -524,6 +525,506 @@ class GuildFeatureTests(unittest.TestCase):
             UIGangUserGang2({gang2status={id=1}})
             assert(shifted==1 and reloaded==1)
         ''')
+
+
+    def aged(self):
+        self.level(15)
+        state = self.shared()
+        row = state["guilds"]["1"]
+        row["created_at"] = self.now - 4 * 86400
+        for member in row["members"].values():
+            member["joined_at"] = self.now - 3 * 86400
+        guild.write(self.root / "guilds.json", state)
+
+    def test_technology_applies_real_stats_and_fixed_damage_without_double_application(self):
+        from zyj_server import battle, guild_skill
+        self.aged()
+        self.contribution(1000000)
+        before, _ = battle.rosters(self.sessions[1].save, CONFIG["copy"]["42101"]["1"], CONFIG)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2262)), [0] * 4)
+        for index in range(1, 5):
+            self.success(1, 2263, values=[index])
+        after, _ = battle.rosters(self.sessions[1].save, CONFIG["copy"]["42101"]["1"], CONFIG)
+        for pos in before:
+            self.assertEqual(after[pos]["hp"] - before[pos]["hp"], CONFIG["gang2_skill_level"]["1"]["hp"])
+            self.assertEqual(after[pos]["atk"] - before[pos]["atk"], CONFIG["gang2_skill_level"]["1"]["atk"])
+            self.assertEqual(after[pos]["flat_out"] - before[pos]["flat_out"], CONFIG["gang2_skill_level"]["1"]["adddmg"])
+        self.reconnect()
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 2262)), [1] * 4)
+        self.assertEqual(guild_skill.bonuses(self.sessions[1].save, CONFIG)[1], 125)
+        self.assert_rejected_unchanged(1, 2263, values=[5])
+
+    def test_boss_real_damage_shared_hp_and_personal_limits(self):
+        self.aged()
+        status = self.success(1, 4840)
+        self.assertTrue(status)
+        initial = self.shared()["guilds"]["1"]["boss"]["hp"]
+        self.success(1, 4843)
+        self.assertEqual(self.shared()["guilds"]["1"]["boss"]["inspire"], 1)
+        result = self.success(1, 4844)
+        battle_raw = next(v for n, w, v in protocol.iter_pb_fields(result) if (n, w) == (6, 2))
+        report = json.loads(next(v for n, w, v in protocol.iter_pb_fields(battle_raw) if (n, w) == (5, 2)))
+        remaining = sum(u["h"] for u in report["endmeta"]["defense"].values())
+        self.assertEqual(self.shared()["guilds"]["1"]["boss"]["hp"], remaining)
+        self.assertEqual(self.sessions[1].save["last_guild_boss"]["damage"], initial - remaining)
+        for _ in range(2):
+            self.success(2, 4844)
+        self.assertEqual(self.sessions[2].save["guild_boss"]["used"], 2)
+        self.success(2, 4841)
+        self.success(2, 4842)
+
+    def test_guard_server_targets_timing_repeated_hits_and_forged_totals(self):
+        self.aged()
+        # 周二、四、六开放；固定到下一个周二。
+        day = (self.now + 28800) // 86400
+        self.clock.return_value += (2 - ((day + 3) % 7 + 1)) % 7 * 86400
+        self.success(1, 5151, values=[0])
+        data = protocol.parse_ids_pb(self.success(1, 5152))
+        self.assertEqual(data[1], 1)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 5152))[1], 0)
+        pos, kind, token = data[2:5]
+        self.success(1, 5153, values=[pos, 1, token])
+        score = self.sessions[1].save["guild_guard"]["run"]["score"]
+        self.success(1, 5153, values=[pos, 1, token])
+        self.assertEqual(self.sessions[1].save["guild_guard"]["run"]["score"], score)
+        self.assert_rejected_unchanged(1, 5156, values=[99999999, 4, 4, 4, 4, 4])
+        self.success(1, 5156)
+        self.assertEqual(self.sessions[1].save["guild_guard"]["total"], score)
+        self.reconnect()
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 5150))[1], score)
+
+    def test_feast_and_bonfire_real_members_elapsed_rewards_and_no_repeat_claim(self):
+        self.aged()
+        for base, cid, count in ((2270, 20073, 10), (2280, 20073, 5)):
+            with self.subTest(base=base):
+                self.give(cid, count)
+                self.success(1, base + 2, values=[1, 2, 0])
+                self.success(2, base + 2, values=[1, 1, 0])
+                self.clock.return_value += 60
+                self.success(1, base + 5)
+                before = copy.deepcopy(self.sessions[1].save)
+                self.clock.return_value += 5
+                self.success(1, base + 4)
+                self.success(1, base + 3)
+                if base == 2270:
+                    self.assertGreater(self.sessions[1].save["role_state"]["exp"], before["role_state"]["exp"])
+                else:
+                    self.assertGreater(self.sessions[1].save["guild_daily_state"]["contribution"], before["guild_daily_state"]["contribution"])
+                after = copy.deepcopy(self.sessions[1].save)
+                self.success(1, base + 3)
+                self.assertEqual(self.sessions[1].save["role_state"], after["role_state"])
+                self.success(2, base + 7)
+                self.clock.return_value += 30
+                self.success(2, base + 3)
+
+    def test_activity_invitation_validates_room_type_and_sender_membership(self):
+        self.aged()
+        self.assert_rejected_unchanged(1, 2290, values=[1, 1, 1])
+        self.give(20073, 10)
+        self.success(1, 2272, values=[1, 2, 0])
+        self.assertTrue(self.success(1, 2290, values=[1, 1, 1]))
+        self.assertIn("&&&1", self.chats(self.success(2, 3010, values=[0]))[0][1])
+        self.assert_rejected_unchanged(2, 2290, values=[1, 1, 1])
+        self.assert_rejected_unchanged(1, 2290, values=[6, 1, 1])
+
+    def war_time(self, hour):
+        from zyj_server import guild_war
+        day, base = guild_war.schedule(CONFIG, self.now)
+        if base + hour * 3600 < self.now:
+            base += 7 * 86400
+        self.clock.return_value = base + hour * 3600
+        return base
+
+    def test_war_signup_roster_real_npc_reports_ownership_and_persisted_rewards(self):
+        self.aged()
+        base = self.war_time(9)
+        self.success(1, 2130)
+        self.success(1, 2132, values=[7])
+        self.assert_rejected_unchanged(2, 2132, values=[8])
+        self.clock.return_value = base + 20 * 3600
+        self.success(1, 2135, values=[7, 1])
+        self.success(1, 2136)
+        self.success(1, 2137)
+        self.clock.return_value = base + 22 * 3600
+        self.success(1, 2138, values=[7])
+        war = self.shared()["war"]
+        self.assertEqual(war["stage"], 2)
+        self.assertTrue(war["fights"])
+        fight = war["fights"][0]
+        self.assertTrue(fight["reports"])
+        report = self.success(1, 2141, values=[7, fight["id"], 1])
+        self.assertTrue(next(v for n, w, v in protocol.iter_pb_fields(report) if (n, w) == (5, 2)))
+        self.assertEqual(war["owners"]["7"], fight["winner"])
+        self.reconnect()
+        self.success(1, 2144)
+        if fight["winner"] == 1:
+            self.success(1, 2142, values=[7])
+            self.assert_rejected_unchanged(1, 2142, values=[7])
+
+    def test_shared_activity_commit_recovers_paid_inspire_and_war_root_once(self):
+        self.aged()
+        self.success(1, 4840)
+        original = storage.atomic_write
+        def fail_publish(path, raw):
+            data = json.loads(raw) if Path(path).name == "guilds.json" else {}
+            row = data.get("guilds", {}).get("1", {})
+            if row.get("boss", {}).get("inspire") and "pending_action" not in row:
+                raise OSError("shared publish failed")
+            return original(path, raw)
+        gold = self.sessions[1].save["role_state"]["gold"]
+        with patch.object(storage, "atomic_write", side_effect=fail_publish), self.assertRaises(OSError):
+            self.request(1, 4843)
+        self.reconnect()
+        self.success(1, 4840)
+        self.assertEqual(self.shared()["guilds"]["1"]["boss"]["inspire"], 1)
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"], gold - 200)
+        self.war_time(9)
+        self.success(1, 2130)
+        before = copy.deepcopy(self.sessions[1].save)
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 2132, values=[1])
+        self.assertEqual(self.sessions[1].save, before)
+        self.success(1, 2130)
+        self.assertEqual(self.shared()["war"]["signups"], {})
+        self.success(1, 2132, values=[1])
+        self.assertEqual(self.shared()["war"]["signups"], {"1": [1]})
+
+    def test_rooms_partial_material_price_quote_chain_conversion_and_reconnect_settlement(self):
+        self.aged()
+        self.give(20073, 3)
+        self.assert_rejected_unchanged(1, 2272, values=[1, 2, 34])
+        self.success(1, 2272, values=[1, 2, 35])
+        self.assertEqual(self.count(20073), 0)
+        self.assert_rejected_unchanged(1, 2275)
+        self.clock.return_value += 60
+        self.success(1, 2275)
+        self.give(20073, 10)
+        self.success(1, 2276, values=[0])
+        self.assertEqual(self.sessions[1].save["guild_room_state"]["feast"]["hosted"], 2)
+        self.sessions[1].save["role_state"]["level"] = 130
+        self.success(1, 2278, values=[1])
+        self.clock.return_value += 60
+        self.reconnect()
+        self.success(1, 2271)
+        state = copy.deepcopy(self.sessions[1].save)
+        self.success(1, 2271)
+        self.assertEqual(self.sessions[1].save["role_state"], state["role_state"])
+        self.assertGreater(self.sessions[1].save["guild_room_state"]["converted_exp"], 0)
+        self.success(1, 2272, values=[2, 2, 100])
+
+    def test_guard_daily_score_boxes_and_rank_prizes_are_durable(self):
+        self.aged()
+        self.success(1, 5150)
+        state = self.sessions[1].save["guild_guard"]
+        state.update(total=500, high=500)
+        player.save_role(self.sessions[1].save, self.store.path(1), COUNTS)
+        self.success(1, 5154, values=[1])
+        self.assert_rejected_unchanged(1, 5154, values=[1])
+        row = self.shared()["guilds"]["1"]
+        row["guard_scores"] = {str((self.now + 28800) // 86400): {"1": {"identity": self.sessions[1].save["created_at"], "score": 500}}}
+        self.update_guild(guard_scores=row["guard_scores"])
+        before = self.sessions[1].save["role_state"]["gold"]
+        self.clock.return_value += 86400
+        self.success(1, 5150)
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"] - before, 300)
+        self.reconnect()
+        self.success(1, 5150)
+        self.assertEqual(self.sessions[1].save["role_state"]["gold"] - before, 300)
+        self.assertEqual(self.sessions[1].save["guild_guard"]["total"], 0)
+
+    def test_technology_all_configured_levels_and_formation_projection_preserve_bonuses(self):
+        from zyj_server import battle, formation, guild_skill
+        self.aged()
+        save = self.sessions[1].save
+        save["role_state"]["level"] = 150
+        for level in range(1, 151):
+            self.contribution(100000000)
+            for index in range(1, 5):
+                self.success(1, 2263, values=[index])
+        self.assertEqual(save["guild_skills"] if "guild_skills" in save else self.sessions[1].save["guild_skills"], [150] * 4)
+        before = copy.deepcopy(self.sessions[1].save)
+        slots = formation.records(bytes.fromhex(before["world_state"]["1002"]), 4, 1)
+        temporary = copy.deepcopy(before)
+        formation.apply_slots(temporary, slots, CONFIG)
+        self.assertEqual(temporary["role_state"]["power"], before["role_state"]["power"])
+        self.assertEqual(guild_skill.bonuses(before, CONFIG)[1], CONFIG["gang2_skill_level"]["150"]["adddmg"])
+        self.assert_rejected_unchanged(1, 2263, values=[1])
+
+    @classmethod
+    def all_client_sources(cls):
+        if not hasattr(cls, "_all_sources"):
+            import build_local_apk as builder
+            with redirect_stdout(io.StringIO()):
+                scripts = builder.get_patched_lua_scripts()
+            cls._all_sources = {}
+            for path, raw in scripts.items():
+                data = builder.xxtea_decrypt(raw, builder.XXTEA_KEY)
+                cls._all_sources[path] = data[:struct.unpack("<I", data[-4:])[0]]
+        return cls._all_sources
+
+    def test_actual_packaged_protobuf_callbacks_for_technology_guard_rooms_boss_and_war(self):
+        import build_local_apk as builder
+        import test_activity_copy
+        self.config = CONFIG
+        lua = test_activity_copy.ActivityCopyTests.network_lua(self)
+        for name in ("params_pb", "gangstatus_pb", "gangbroadcasts_pb", "stringcontent_pb", "gangs_pb", "players_pb", "gangmembers_pb", "combmessages_pb", "worldboss1_pb", "worldboss1realnotify_pb"):
+            lua.execute(builder.read_script(name, "pb"))
+        native = builder.read_script("gamedata").decode().replace("\r\n", "\n")
+        for first, last in (("GangBoss", "CangjinggeData"), ("gangSkill", "DevilFotressStatus"), ("GangGuardData", "ActivityShare"),
+                            ("GuildWarTakeWarPointData", "GangSkill"), ("GuildWarInspire", "FavoriteCheck"), ("playerdata", "chatData")):
+            start = native.index(f"function gamedata.{first}(")
+            end = native.index(f"function gamedata.{last}(", start) if last != "GangSkill" else native.index("--工会技能", start)
+            lua.execute(native[start:end].encode())
+        lua.execute(b'''gamedata.cache.gang2skill={};gamedata.cache.gang2status={contribution=1000000};gamedata.cache.guildwarmain={}
+            gamedata.cache.guildwarpointquery={};gamedata.cache.guildwarjionconfirm={};gamedata.cache.guildchecklist={}
+            gamedata.cache.GuildWarMembers={};gamedata.cache.GuildWarPrepare={};gamedata.cache.GuildWarInspire={}
+            gamedata.cache.role.gold=10000000;gamedata.cache.role.coin=10000000
+            gamedata.updateRoleGold=function(self,n) self.cache.role.gold=self.cache.role.gold+n end
+            gamedata.updateRoleCoin=function(self,n) self.cache.role.coin=self.cache.role.coin+n end
+            gamedata.time=function() return 1793430000 end
+            gamedata.SomethingProcess=function(self,p) return {} end''')
+        scripts = self.all_client_sources()
+        for name in ("GameGang", "GameGuildWar"):
+            lua.execute(scripts[f"assets/scripts/{name}.so"])
+        def callback(name, body):
+            return lua.globals()[name.encode()](lua.table_from({b"rbuf": body}))
+        self.aged()
+        self.contribution(1000000)
+        callback("NetGangSkillQuery", self.success(1, 2262))
+        callback("NetGang2BossCallBack", self.success(1, 4840))
+        response = callback("NetGang2BossBattleCallBack", self.success(1, 4844))
+        self.assertTrue(json.loads(response[b"battlereport"]))
+        self.give(20073, 10)
+        room = callback("NetGangCreateJoinFeastCallBack", self.success(1, 2272, values=[1, 2, 0]))
+        self.assertEqual(room[b"data"][b"feastPlayers"][1][b"params"][1][b"i"], 1)
+        self.assertEqual(room[b"data"][b"feastPlayers"][1][b"params"][2][b"i"], 1)
+        lua.globals().UIGangGetFeastRewardCallBack(lua.table_from({b"beinum": 1, b"roomid": 1, b"personnum": 1}))
+        reply = callback("NetGangGetFeastRewardCallBack", self.success(1, 2273))
+        self.assertEqual((reply[b"roomid"], reply[b"personNum"]), (1, 1))
+        self.assertIsNone(lua.globals().gameConfig)
+        base = self.war_time(9)
+        callback("NetGuildWarPointCatalogueCallBack", self.success(1, 2130))
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"guildwarmain"][b"allpointsdata"][1][b"id"], 0)
+        self.success(1, 2132, values=[7])
+        self.clock.return_value = base + 20 * 3600
+        callback("NetGangPointEnterBattlefieldCallBack", self.success(1, 2134, values=[7]))
+        self.success(1, 2135, values=[7, 1])
+        prepare = dict(self.business_rows(self.success(1, 2134, values=[8])))
+        self.assertEqual(protocol.parse_ids_pb(prepare[0])[0], 7)
+        self.clock.return_value = base + 22 * 3600
+        callback("NetGangPointBattleStatusQueryCallBack", self.success(1, 2138, values=[7]))
+        fight = self.shared()["war"]["fights"][0]
+        callback("NetGangPointBraBattlePlayCallBack", self.success(1, 2141, values=[7, fight["id"], 1]))
+        day = (int(self.clock.return_value) + 28800) // 86400
+        self.clock.return_value += (2 - ((day + 3) % 7 + 1)) % 7 * 86400
+        self.success(1, 5151, values=[0])
+        data = callback("NetGang2GroundGetHogsCallBack", self.success(1, 5152))
+        self.assertEqual(data[b"mouseNum"], 1)
+        callback("NetGang2GroundCatchHogCallBack", self.success(1, 5153, values=[data[b"mouseTab"][1][b"point"], 1, data[b"mouseTab"][1][b"token"]]))
+
+    def test_all_boss_profiles_and_nine_strongholds_convert_actual_animation_assets(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("实际动画验证需要lupa.lua51")
+        import build_local_apk as builder
+        from zyj_server import arena, battle, guild_boss
+        self.aged()
+        config = dict(CONFIG)
+        with zipfile.ZipFile(ROOT / "configs_sec5.zip") as archive:
+            for name in ("generalanimation", "skillanimation"):
+                config[name] = json.loads(archive.read("5/" + name + ".json"))
+        lua = LuaRuntime()
+        lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
+        lua.execute('''print=function() end;printT=print;battleScene={slotNum=7}
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            CCFileUtils={sharedFileUtils=function(self) return self end,fullPathForFilename=function(self,p) return p end}
+            ui={Split=function(s,sep) local t={} for v in string.gmatch(s,'[^'..sep..']+') do t[#t+1]=v end return t end}''')
+        lua.execute(self.all_client_sources()["assets/scripts/battleReportConvert.so"])
+        lua.execute(builder.read_script("BattleReportAbbToKey"))
+        before = copy.deepcopy(self.sessions[1].save)
+        with zipfile.ZipFile(builder.SRC_APK) as archive:
+            names, cache = archive.namelist(), {}
+            lua.globals().CCFileUtils.isFileExist = lambda _, path: any(n.endswith("/" + path) for n in names)
+            def asset(path):
+                if path not in cache:
+                    matches = [n for n in names if n.endswith("/" + path)]
+                    self.assertEqual(len(matches), 1, path)
+                    cache[path] = json.loads(archive.read(matches[0]))
+                return lua.table_from(cache[path], recursive=True)
+            lua.globals().LoadJsonFileToTable = asset
+            def convert(report):
+                native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
+                attack, defense = lua.globals().getBattleInitSlotInfo(native)
+                animations, ext = lua.globals().convertBattleReportToAnimationSub(native, attack, defense, None, "worldboss")
+                self.assertGreater(len(animations), 0)
+                for side, key in (("attack", "atk"), ("defense", "def")):
+                    for pos, unit in report["endmeta"][side].items():
+                        self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
+            for cid, row in config["gang2_boss"].items():
+                save, shared = copy.deepcopy(before), copy.deepcopy(self.shared())
+                shared["guilds"]["1"]["boss"] = {"cid": int(cid), "hp": row["hp"], "born": self.now,
+                    "revive": 0, "round": 1, "inspire": 0, "damage": {}, "pending": {}}
+                with patch("secrets.randbits", return_value=7):
+                    raw, _, _ = guild_boss.prepare(4844, b"", shared, "1", save, {1: save}, 1, config, self.now)
+                data = next(v for n, w, v in protocol.iter_pb_fields(raw) if (n, w) == (6, 2))
+                convert(json.loads(next(v for n, w, v in protocol.iter_pb_fields(data) if (n, w) == (5, 2))))
+            for city in config["gang2_cityaward"].values():
+                for npc in city["npc"].strip(";").split(";"):
+                    attack, defense = arena.rosters(before, config["athletics_copy2"][npc], config)
+                    convert(battle.simulate(attack, defense, config, 7))
+        self.assertEqual(self.sessions[1].save, before)
+
+    def test_nine_city_rewards_real_multiplayer_winners_and_effects_do_not_duplicate(self):
+        from zyj_server import battle, guild_war
+        self.aged()
+        self.success(3, 2231, text="对手公会")
+        for a in (1, 3):
+            save = self.sessions[a].save
+            world = bytes.fromhex(save["world_state"]["1002"])
+            values = []
+            for n, w, raw in protocol.iter_pb_fields(world):
+                if (n, w) == (1, 2):
+                    for f, value in ((6, 10000000 if a == 1 else 100), (7, 10000000 if a == 1 else 10), (8, 100000000 if a == 1 else 1000), (9, 300 if a == 1 else 50)):
+                        raw = protocol.pb_set_varint(raw, f, value)
+                values.append(protocol.encode_pb_field(n, w, raw))
+            save["world_state"]["1002"] = b"".join(values).hex()
+            player.save_role(save, self.store.path(a), COUNTS)
+        state = self.shared()
+        row = state["guilds"]["2"]
+        row["created_at"] = self.now - 4 * 86400
+        row["experience"] = state["guilds"]["1"]["experience"]
+        row["members"]["3"]["joined_at"] = self.now - 3 * 86400
+        base = self.war_time(9)
+        war, _, _ = guild_war.get_state(state, CONFIG, int(self.clock.return_value))
+        for city in range(1, 10):
+            with self.subTest(city=city):
+                war.update(signups={"1": [city], "2": [city]}, teams={
+                    str(a): {"guild": 1 if a == 1 else 2, "point": city, "identity": self.sessions[a].save["created_at"],
+                             "snapshot": guild_war.freeze(self.sessions[a].save)} for a in (1, 3)},
+                    stage=0, finalists={}, fights=[], owners={}, inspire={})
+                shared = copy.deepcopy(state)
+                guild_war.settle(shared, {a: s.save for a, s in self.sessions.items()}, CONFIG, base + 22 * 3600)
+                result = shared["war"]
+                self.assertEqual(result["owners"][str(city)], 1)
+                self.assertTrue(result["fights"][0]["reports"])
+                self.assertEqual(guild_war.benefit(shared, 1, CONFIG, base + 22 * 3600), CONFIG["gang2_cityaward"][str(city)]["bonus_id"])
+                before = copy.deepcopy(result["pending"])
+                guild_war.settle(shared, {a: s.save for a, s in self.sessions.items()}, CONFIG, base + 22 * 3600 + 1)
+                self.assertEqual(shared["war"]["pending"], before)
+
+    def test_guard_expired_target_nonce_cannot_hit_reused_position(self):
+        self.aged()
+        day = (self.now + 28800) // 86400
+        self.clock.return_value += (2 - ((day + 3) % 7 + 1)) % 7 * 86400
+        self.success(1, 5151, values=[0])
+        with patch("secrets.randbits", return_value=7):
+            first = protocol.parse_ids_pb(self.success(1, 5152))
+            self.clock.return_value += 2.5
+            second = protocol.parse_ids_pb(self.success(1, 5152))
+        self.assertEqual(first[2], second[2])
+        self.assertNotEqual(first[4], second[4])
+        self.assert_rejected_unchanged(1, 5153, values=[first[2], 1, first[4]])
+        self.success(1, 5153, values=[second[2], 1, second[4]])
+
+    def test_guard_target_nonce_is_not_reused_after_new_run_and_reconnect(self):
+        self.aged()
+        day = (self.now + 28800) // 86400
+        self.clock.return_value += (2 - ((day + 3) % 7 + 1)) % 7 * 86400
+        self.success(1, 5151, values=[0])
+        with patch("secrets.randbits", return_value=7):
+            first = protocol.parse_ids_pb(self.success(1, 5152))
+            for elapsed in (0, 2 * 86400):
+                self.success(1, 5156)
+                self.clock.return_value += elapsed
+                self.reconnect()
+                self.success(1, 5151, values=[0])
+                second = protocol.parse_ids_pb(self.success(1, 5152))
+                self.assertEqual(first[2], second[2])
+                self.assert_rejected_unchanged(1, 5153, values=[first[2], 1, first[4]])
+                self.assertNotEqual(first[4], second[4])
+                self.success(1, 5153, values=[second[2], 1, second[4]])
+                first = second
+
+    def test_boss_kill_prizes_survive_reconnect_and_revive_advances_one_profile(self):
+        self.aged()
+        self.success(1, 4840)
+        row = self.shared()["guilds"]["1"]
+        row["boss"]["hp"] = 1
+        self.update_guild(boss=row["boss"])
+        self.success(1, 4844)
+        self.assertEqual(self.shared()["guilds"]["1"]["boss"]["hp"], 0)
+        self.assertIn("1", self.shared()["guilds"]["1"]["boss"]["pending"])
+        coin = self.sessions[1].save["role_state"]["coin"]
+        self.reconnect()
+        self.success(1, 4840)
+        self.assertEqual(self.sessions[1].save["role_state"]["coin"] - coin, 2000000)
+        self.success(1, 4840)
+        self.assertEqual(self.sessions[1].save["role_state"]["coin"] - coin, 2000000)
+        self.clock.return_value += 1800
+        self.success(1, 4840)
+        self.assertEqual(self.shared()["guilds"]["1"]["boss"]["cid"], 32002)
+
+    def test_occupation_benefits_change_real_campaign_and_strengthening_not_snapshots(self):
+        from zyj_server import guild_war, training
+        self.aged()
+        self.success(1, 2130)
+        shared = self.shared()
+        shared["war"]["owners"] = {"1": 1}
+        guild.write(self.root / "guilds.json", shared)
+        self.assertEqual(self.store.guild_profit(1, self.now), 19000)
+        self.assertEqual(self.store.guild_profit(2, self.now), 19000)
+        self.assertEqual(self.store.guild_profit(3, self.now), 0)
+        base = copy.deepcopy(self.sessions[1].save)
+        world = bytes.fromhex(base["world_state"]["1002"])
+        iid = next(protocol.parse_ids_pb(raw)[0] for n, w, raw in protocol.iter_pb_fields(world) if (n, w) == (2, 2)
+                   and CONFIG["equip"][str(protocol.parse_ids_pb(raw)[1])]["type"] in ("weapon", "armor", "head", "accessory"))
+        normal, discounted = copy.deepcopy(base), copy.deepcopy(base)
+        discounted["guild_profit"] = 19000
+        body = protocol.encode_pb_field(1, 0, iid)
+        raw, _ = training.strengthen(normal, 1101, body, CONFIG, 7)
+        reduced, _ = training.strengthen(discounted, 1101, body, CONFIG, 7)
+        def paid(data):
+            value = protocol.pb_get_varint(data, 1)
+            return (1 << 64) - value
+        self.assertEqual(paid(reduced), paid(raw) * 80 // 100)
+        for cid, kind, amount in ((19001, 1, 15), (19002, 4, 15), (19003, 2, 20), (19004, 3, 15), (19005, 1, 10),
+                                  (19006, 4, 5), (19007, 3, 10), (19008, 1, 5)):
+            self.assertEqual(guild_war.effect({"guild_profit": cid}, CONFIG, kind), amount)
+
+    def test_live_room_ui_has_single_validated_invite_real_poll_and_target_tokens(self):
+        sources = self.all_client_sources()
+        for name, opcode in (("Layer_guild_feast", 2274), ("Layer_guild_zaotang", 2284)):
+            source = sources[f"assets/scripts/{name}.so"].decode()
+            self.assertNotIn('type = 3011, content = ', source)
+            self.assertIn(f"type={opcode},roomid=self.roomId", source)
+            self.assertIn("os.time()>=nextPoll", source)
+            self.assertIn("unscheduleScriptEntry(self.localRoomPoll)", source)
+        source = sources["assets/scripts/Layer_guild2_guard.so"].decode()
+        self.assertIn("token=targetToken", source)
+        self.assertIn("self.mouseHoleData[i].token=targetToken", source)
+        servers = sources["assets/scripts/gameserver.so"].decode()
+        self.assertIn("[5152] = NetGang2GroundGetHogsCallBack", servers)
+        self.assertIn("[5153] = NetGang2GroundCatchHogCallBack", servers)
+
+    def test_room_guest_decay_resets_at_real_midnight_without_regranting_old_seconds(self):
+        self.aged()
+        day = (self.now + 28800) // 86400
+        midnight = (day + 1) * 86400 - 28800
+        self.clock.return_value = midnight - 70
+        self.give(20073, 10)
+        self.success(1, 2272, values=[1, 2, 0])
+        self.success(2, 2272, values=[1, 1, 0])
+        self.clock.return_value += 60
+        self.success(1, 2275)
+        self.clock.return_value = midnight + 5
+        self.success(2, 2273)
+        self.assertEqual(self.sessions[2].save["guild_room_state"]["feast"]["seconds"], 5)
+        role = copy.deepcopy(self.sessions[2].save["role_state"])
+        self.success(2, 2273)
+        self.assertEqual(self.sessions[2].save["role_state"], role)
+
+
 
 
 if __name__ == "__main__":

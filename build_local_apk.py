@@ -1045,6 +1045,140 @@ end'''}
     return patched
 
 
+def patch_guild_gameplay_scripts(patched):
+    def load(name):
+        path = "assets/scripts/" + name + ".so"
+        if path not in patched:
+            return read_script(name).decode("utf-8").replace("\r\n", "\n")
+        raw = xxtea_decrypt(patched[path], XXTEA_KEY)
+        return raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+
+    def put(name, code):
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, filename in (("GameGang", "guild_network.lua"), ("GameGuildWar", "guild_war_network.lua")):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, load(name) + "\n" + stream.read())
+    code = load("gameserver")
+    marker = "    [5151] = NetGang2GroundStartCallBack,"
+    assert code.count(marker) == 1
+    put("gameserver", code.replace(marker, marker + "\n    [5152] = NetGang2GroundGetHogsCallBack,\n    [5153] = NetGang2GroundCatchHogCallBack,"))
+
+    code = load("UIGang")
+    marker = '    print("帮会2278，接受客户端数据")\n    runGamePrompt({msg = "设置成功"})'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    print("帮会2278，接受客户端数据")
+    runGamePrompt({msg=t.method==1 and "伙伴经验按20000兑换1颗神奇经验丹，余量保留" or "已关闭伙伴经验转换"})''')
+    marker = "function UIGang2SkillStudy( t )\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    UIRequest({type=2262})\n    UIRequest({type=2230})\n")
+    start = code.index("function UIGang2GetFeastReward( t )\n")
+    end = code.index("--盛宴刷新", start)
+    code = code[:start] + '''function UIGang2GetFeastReward(t)
+    local layer = GameScene.layers["guildfeast"]
+    if layer.show then
+        layer.module.needoutext = false
+        layer.module:awardCallback(t)
+    elseif t.reward and next(t.reward) then
+        showRewardPopupWindow(t.reward)
+    end
+end
+
+''' + code[end:]
+    code += '''
+local localGuardQuery = UIGang2GroundQuery
+function UIGang2GroundQuery(t)
+    localGuardQuery(t)
+    if t.data.localRunning and GameScene.layers.gang_guard.show then
+        UIRequest({type=5156, highScore=t.data.highScore})
+    end
+end
+function UIGang2GroundGetHogs(t)
+    local layer = GameScene.layers.gang_guard
+    if not layer.show then return end
+    if t.status == 3 then
+        UIRequest({type=5156, highScore=layer.module.highScore})
+    elseif t.mouseNum > 0 then
+        layer.module:getMouseData(t)
+    else
+        layer.module.isAppear = 0
+    end
+end
+function UIGang2GroundCatchHog(t)
+    local layer = GameScene.layers.gang_guard
+    if not layer.show then return end
+    if t.mouseData and t.mouseData.hp then
+        t.status=0
+        layer.module:catchMouseData(t)
+    end
+end
+'''
+    put("UIGang", code)
+    code = load("Layer_guild2_guard")
+    marker = "function guildguard.getMouseData( self,data )\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if not self.rootNode or not data.mouseTab or #data.mouseTab == 0 then self.isAppear=0; return end\n")
+    marker = "            local i=v.point\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "            local targetToken=v.token\n            self.mouseHoleData[i].token=targetToken\n")
+    marker = "UIRequest({type = 5153, point = i,status = 1})"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "UIRequest({type=5153,point=i,status=1,token=self.mouseHoleData[i] and self.mouseHoleData[i].token})")
+    marker = "UIRequest({type = 5153, point = i,status = 0})"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "UIRequest({type=5153,point=i,status=0,token=targetToken})")
+    marker = '            if self.mouseHoleData[i] then\n                self.mouseHoleTab["animationManager"..i]:setAnimationCompletedCallback(function()\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''            if self.mouseHoleData[i] then
+                local clickedToken=self.mouseHoleData[i].token
+                self.mouseHoleTab["animationManager"..i]:setAnimationCompletedCallback(function()
+                    if not self.rootNode or not self.mouseHoleData[i] or self.mouseHoleData[i].token~=clickedToken then return end
+''')
+    marker = '            self.rootItems["mouseNode"..i]:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(self:getGuardSpeed(self.scoreNum)), CCCallFunc:create(function()\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '                if not self.rootNode or not self.mouseHoleData[i] or self.mouseHoleData[i].token~=targetToken then return end\n')
+    put("Layer_guild2_guard", code)
+
+    for name, obj, kind, opcode in (("Layer_guild_feast", "guildfeast", 1, 2274), ("Layer_guild_zaotang", "guildzaotang", 6, 2284)):
+        code = load(name)
+        pattern = r'UIRequest\(\{type = 3011, content = "[^"\n]+"\.\.self.roomId\}\)'
+        code, count = re.subn(pattern, '-- 邀请由确认窗口发送一次', code)
+        assert count == 2
+        marker = f'{{barrageType = {kind}}},callback)'
+        assert code.count(marker) == (1 if kind == 1 else 0)
+        code = code.replace(marker, f'{{barrageType = {kind},params={{self.roomId}}}},callback)')
+        if name == "Layer_guild_feast":
+            start = code.index('    if isfirst == true then\n        for i = 1, 13 do\n')
+            end = code.index('\nend\n', start)
+            code = code[:start] + code[end:]
+        # 原界面固定七个头像，其余席位仅显示实际总人数，不填造假成员。
+        marker = 'local idx = v.params["1"].i'
+        assert marker in code
+        start = code.index(f"function {obj}.updataDaojishi(self)\n")
+        end = code.index("\nend", start) + len("\nend")
+        code = code[:start] + f'''function {obj}.updataDaojishi(self)
+    local nextPoll=os.time()+5
+    self.localRoomPoll=CCDirector:sharedDirector():getScheduler():scheduleScriptFunc(function()
+        if self.rootNode and os.time()>=nextPoll then
+            nextPoll=os.time()+5
+            if not self.isGetReward then
+                UIRequest({{type={opcode},roomid=self.roomId}})
+                if self.data and self.data.feastStatus~=1 and self.myFeastTime<=0 then self:award() end
+            end
+        end
+    end,1,false)
+end''' + code[end:]
+        marker = f"function {obj}.clear(self)"
+        start = code.index(marker)
+        line_end = code.index("\n", start)
+        code = code[:line_end + 1] + '''    if self.localRoomPoll then
+        CCDirector:sharedDirector():getScheduler():unscheduleScriptEntry(self.localRoomPoll)
+        self.localRoomPoll=nil
+    end
+''' + code[line_end + 1:]
+        put(name, code)
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -2130,6 +2264,7 @@ token.cpp_type = 1
 FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}''')
     patched["assets/pb/fosterconfirm_pb.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
+    patch_guild_gameplay_scripts(patched)
     return patched
 
 

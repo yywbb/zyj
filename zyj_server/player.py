@@ -66,6 +66,10 @@ def load_role_config(config_path):
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
                              "gang2_shop", "gang2_bait", "gang2_fishpond", "gang2_fishpondexp",
+                             "gang2_skill_open", "gang2_skill_level", "gang2_boss", "gang2_boss_reward", "gang2_boss_contribution", "gang2_boss_encouraging",
+                             "guild_box", "guild_box_total", "guild_play", "guild_integral", "guild_time", "guild_rank",
+                             "gang2_feast_type", "gang2_bath_type", "gang2_feast_gain", "gang2_bath_buff", "gang2_feast_profit", "gang2_bath_profit",
+                             "gang2_feast_award", "gang2_bath_award", "price_props", "barrage", "gang2_cityaward", "gang2_battleTime", "gang2battle_youhua_type",
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
                              "favorable", "favorable_level", "favorable_task", "shake_param",
                              "penglai3_map", "penglai3_type", "penglai3_dice", "penglai3_card", "penglai3_monster",
@@ -974,9 +978,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     return body
 
 
-def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None):
+def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None):
     before = copy.deepcopy(save)
     now = int(time.time())
+    if guild_profit and responses and responses[0]["opcode"] in (1101, 1109, 999900):
+        save["guild_profit"] = guild_profit(now)
     self_update = settle_self_stats(save, role_config)
     settle_campaign(save, role_config, now)
     online_rewards.settle(save, role_config, connected_at, now)
@@ -1066,9 +1072,11 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
     return packets
 
 
-def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config, connected_at, *, opcode=1306):
+def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config, connected_at, *, opcode=1306, guild_profit=None):
     before = copy.deepcopy(save)
     now = int(time.time())
+    if guild_profit:
+        save["guild_profit"] = guild_profit(now)
     self_update = settle_self_stats(save, role_config)
     settle_campaign(save, role_config, now)
     online_rewards.settle(save, role_config, connected_at, now)
@@ -1082,6 +1090,9 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
         point, old_star = battle.challenge(save, request_body, role_config)
         attempts, location = 1, request_body
     attack, defense = battle.rosters(save, point, role_config)
+    from . import guild_war
+    for unit in attack.values():
+        unit["atk"] = unit["atk"] * (100 + guild_war.effect(save, role_config, 4)) // 100
     seed = random.getrandbits(64)
     report = None if opcode == 1307 else battle.simulate(attack, defense, role_config, seed, attack_pet=pets.combat(save, role_config))
     if report is not None:
@@ -1094,6 +1105,7 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
     if won:
         for index in range(attempts):
             reward = battle.victory_role_reward(state, point, old_star, star, role_config)
+            reward["coin"] = reward["coin"] * (100 + guild_war.effect(save, role_config, 1)) // 100
             drops = battle.drops(point, old_star == 0, role_config, (seed + index) ^ 0xD09)
             for cid, name in ((1000, "coin"), (1001, "gold")):
                 if reward[name]:

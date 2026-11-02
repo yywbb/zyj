@@ -30,6 +30,7 @@ class Session:
         self.rank_query = rank_query
         self.rank_observer = rank_observer
         self.guild_request = guild_request
+        self.guild_profit = None
         self.random_replies = {}
         self.connected_at = int(time.time())
         self.refresh_day = (self.connected_at + 28800) // 86400
@@ -314,7 +315,7 @@ class Session:
             try:
                 if opcode in (1306, 1307):
                     packets = player.prepare_battle_responses(seq, working, body, self.save_path,
-                                                             self.step_counts, self.role_config, self.connected_at, opcode=opcode)
+                                                             self.step_counts, self.role_config, self.connected_at, opcode=opcode, guild_profit=self.guild_profit)
                 else:
                     reply = (encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + encode_pb_field(2, 2, b""))
                              + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01"))) if sign_comb else b""
@@ -341,7 +342,7 @@ class Session:
                                  + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
                     packets = player.prepare_recorded_responses(
                         seq, [{"opcode": opcode, "seq": seq, "hex": reply.hex()}], working, body,
-                        self.save_path, self.step_counts, self.role_config, self.connected_at)
+                        self.save_path, self.step_counts, self.role_config, self.connected_at, guild_profit=self.guild_profit)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working
@@ -361,7 +362,7 @@ class Session:
                 packets = player.prepare_recorded_responses(
                     seq, [{"opcode": opcode, "seq": seq, "hex": baseline.hex()}], working, body,
                     self.save_path, self.step_counts, self.role_config, self.connected_at,
-                    auto_sigils=self.sigil_auto_pending if opcode == 1002 else None)
+                    auto_sigils=self.sigil_auto_pending if opcode == 1002 else None, guild_profit=self.guild_profit)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working
@@ -423,7 +424,7 @@ class Session:
         initialize_sigils = opcode == 999900 and any(mid == 1002 for mid, raw in get_comb_messages(body))
         packets = player.prepare_recorded_responses(seq, responses, working, body,
                                                      self.save_path, self.step_counts, self.role_config, self.connected_at,
-                                                     auto_sigils=self.sigil_auto_pending if initialize_sigils else None)
+                                                     auto_sigils=self.sigil_auto_pending if initialize_sigils else None, guild_profit=self.guild_profit)
         self.save = working
         if initialize_sigils:
             self.sigil_auto_pending = None

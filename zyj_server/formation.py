@@ -2,6 +2,8 @@
 
 from fractions import Fraction
 
+from . import guild_skill
+
 from . import battle, equip_baptize, godstone, pets, sigil, treasure_refine
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
@@ -195,6 +197,7 @@ def apply_slots(save, slots, config):
     update = b""
     pet_bonus = pets.attributes(save, config)
     sigil_bonus, sigil_flat = sigil.bonuses(save, config)
+    skill_bonus, skill_flat = guild_skill.bonuses(save, config)
     for iid in sorted(before.keys() | after.keys()):
         raw = generals[iid]
         previous, _ = bonuses(raw, before.get(iid, b""), old_members, equips, config)
@@ -205,6 +208,9 @@ def apply_slots(save, slots, config):
         for field, value in sigil_bonus.items():
             previous[field] += int(value) if iid in before else 0
             current[field] += int(value) if iid in after else 0
+        for field, value in skill_bonus.items():
+            previous[field] += value if iid in before else 0
+            current[field] += value if iid in after else 0
         power_delta = 0
         for field in range(6, 17):
             value = pb_get_varint(raw, field) or 0
@@ -218,6 +224,7 @@ def apply_slots(save, slots, config):
             raw = pb_set_varint(raw, field, changed)
         power_delta += sum(equip_baptize.flat(after.get(iid, b""), equips, config)) - sum(equip_baptize.flat(before.get(iid, b""), equips, config))
         power_delta += sum(sigil_flat) * (int(iid in after) - int(iid in before))
+        power_delta += skill_flat * (int(iid in after) - int(iid in before))
         power = (pb_get_varint(raw, 20) or 0) + power_delta
         if not 0 <= power < (1 << 31):
             raise ValueError("换阵后的武将战力超出范围")
