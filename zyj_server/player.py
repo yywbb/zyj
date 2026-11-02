@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -52,7 +52,7 @@ def load_role_config(config_path):
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
                              "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "build",
-                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "soul",
+                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
                              "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake",
@@ -520,6 +520,23 @@ def record_protagonist_general(save, general):
     save["protagonist_snapshot"] = body.hex()
 
 
+def apply_sigil_update(save, body, power_delta, role_config):
+    state = get_role_state(save, role_config)
+    for key in ("power", "power_all"):
+        state[key] += power_delta
+        if not 0 <= state[key] < (1 << 31):
+            raise ValueError("魔符增加后的角色战力超出范围")
+    record_slot_update(save, body)
+    for n, w, raw in iter_pb_fields(body):
+        if (n, w) == (1, 2):
+            record_protagonist_general(save, raw)
+    if save.get("protagonist_snapshot"):
+        protagonist = encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"]))
+        record_slot_update(save, protagonist)
+        body += protagonist
+    return body
+
+
 def prepare_recorded_response(opcode, body, save, request_body, step_counts, role_config, now):
     if opcode == 999900:
         requests = dict(get_comb_messages(request_body))
@@ -847,6 +864,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 if field == 6 and wire == 2:
                     record_protagonist_general(save, value)
                     record_slot_update(save, encode_pb_field(1, 2, value))
+    elif opcode in sigil.OPCODES:
+        body, power_delta = sigil.prepare(opcode, save, request_body, role_config)
+        if opcode in (1140, 1141):
+            body = apply_sigil_update(save, body, power_delta, role_config)
     elif opcode in equip_baptize.OPCODES:
         body, costs, reward, power_delta, replaced = equip_baptize.prepare(opcode, save, request_body, role_config, random.getrandbits(64))
         state = get_role_state(save, role_config)
@@ -942,7 +963,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     return body
 
 
-def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at):
+def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None):
     before = copy.deepcopy(save)
     now = int(time.time())
     self_update = settle_self_stats(save, role_config)
@@ -950,6 +971,11 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     online_rewards.settle(save, role_config, connected_at, now)
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
+    sigil_update = b""
+    if auto_sigils:
+        sigil_update, power_delta = sigil.auto_compose(save, role_config, auto_sigils)
+        if sigil_update:
+            apply_sigil_update(save, sigil_update, power_delta, role_config)
     automatic_reward = b""
     if responses and (responses[0]["opcode"] in arena.OPCODES
                       or responses[0]["opcode"] == 301 and pb_get_varint(request_body, 1) == 1):
@@ -997,9 +1023,9 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1005, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
-                                                         *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES) and not responses[0]["hex"])
+                                                         *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, 1140, 1141) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
-    if local_update or break_comb or pet_update or self_update:
+    if local_update or break_comb or pet_update or self_update or sigil_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
         if any(state[key] != previous[key] for key in ("power", "g_power", "power_all")):
             power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in

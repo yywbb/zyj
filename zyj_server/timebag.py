@@ -1,10 +1,11 @@
 """功能限时礼包：触发、模拟付款及领取与角色存档一起提交。"""
 
 from . import recruit
-from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb
+from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 PET_GIFT = 130012
-GIFTS = {PET_GIFT: ("pet_gift_state", 59), 130013: ("stone_gift_state", 104), 130014: ("baptize_gift_state", 21)}
+GIFTS = {PET_GIFT: ("pet_gift_state", 59), 130013: ("stone_gift_state", 104), 130014: ("baptize_gift_state", 21),
+         130004: ("sigil_gift_state", 22), 130010: ("sigil_growth_gift_state", None)}
 QUERIES = (2880,)
 MUTATIONS = (2881, 2882)
 OPCODES = QUERIES + MUTATIONS
@@ -59,13 +60,20 @@ def prepare(opcode, save, body, config, now, baseline=b""):
                 rows.append(current)
         return b"".join(encode_pb_field(1, 0, v & ((1 << 64) - 1)) for r in rows for v in r)
     if len(fields) != 1 or fields[0][:2] != (1, 0) or fields[0][2] not in GIFTS:
-        raise ValueError("此限时礼包请求无效；仅接通魔宠、神石、洗炼礼包")
+        raise ValueError("此限时礼包请求无效；仅接通魔宠、神石、洗炼和魔符礼包")
     gift_id = fields[0][2]
     state = get_state(save, gift_id)
     if opcode == 2882:
-        if (not save.get("has_role") or save["role_state"]["level"] < config["trigger_gift2"][str(gift_id)]["level"]
-                or save.get("guide", {}).get("sections", {}).get(str(GIFTS[gift_id][1]), {}).get("status") != 2):
+        row = config["trigger_gift2"][str(gift_id)]
+        if not save.get("has_role") or save["role_state"]["level"] < row["level"]:
+            raise ValueError("限时礼包等级尚未满足")
+        if row["type"] == 1 and save.get("guide", {}).get("sections", {}).get(str(GIFTS[gift_id][1]), {}).get("status") != 2:
             raise ValueError("对应功能引导完成后才能触发礼包")
+        if row["type"] == 2 and not state["triggered_at"]:
+            opened = pb_get_varint(bytes.fromhex(save.get("role_snapshot", "")), 22)
+            day = (max(now, state["checked_at"]) + 28800) // 86400 - ((int(save["created_at"]) if opened is None else opened) + 28800) // 86400 + 1
+            if not row["param1"] <= day <= row["param2"]:
+                raise ValueError("魔符成长礼包不在配置的首期触发日期内")
         if not state["triggered_at"]:
             state["triggered_at"] = state["checked_at"] = max(now, state["checked_at"])
         return status_payload(save, config, now, gift_id)

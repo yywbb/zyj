@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -60,6 +60,8 @@ class Session:
         penglai.get_state(self.save, role_config)
         single_boss.get_state(self.save, role_config)
         equip_baptize.get_state(self.save, role_config)
+        sigil_state = sigil.get_state(self.save, role_config)
+        self.sigil_auto_pending = sigil_state["auto_level"] if sigil_state["auto_state"] else None
         for gift_id in timebag.GIFTS:
             timebag.get_state(self.save, gift_id)
         if self.save.get("has_role"):
@@ -300,7 +302,7 @@ class Session:
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
                                   *daily_events.CLAIMS,
-                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES):
+                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:
@@ -350,17 +352,20 @@ class Session:
 
         if opcode in (204, 300, 4016, 1304, 1350, *player.WORLD_QUERY_IDS, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
-                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES, *penglai.QUERIES, *single_boss.QUERIES):
+                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES, *penglai.QUERIES, *single_boss.QUERIES, *sigil.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900
                                  for mid, data in get_comb_messages(bytes.fromhex(frame["hex"])) if mid == opcode), b"") if opcode in (300, 2880) else b""
                 packets = player.prepare_recorded_responses(
                     seq, [{"opcode": opcode, "seq": seq, "hex": baseline.hex()}], working, body,
-                    self.save_path, self.step_counts, self.role_config, self.connected_at)
+                    self.save_path, self.step_counts, self.role_config, self.connected_at,
+                    auto_sigils=self.sigil_auto_pending if opcode == 1002 else None)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working
+            if opcode == 1002:
+                self.sigil_auto_pending = None
             return packets
 
         if opcode in activities.OPCODES or opcode == 999905:
@@ -414,7 +419,11 @@ class Session:
                 and self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2):
             return unavailable_response(opcode, seq, body, "教程装备录制已过期，请使用当前阵容单独装备或强化。")
         working = copy.deepcopy(self.save)
+        initialize_sigils = opcode == 999900 and any(mid == 1002 for mid, raw in get_comb_messages(body))
         packets = player.prepare_recorded_responses(seq, responses, working, body,
-                                                     self.save_path, self.step_counts, self.role_config, self.connected_at)
+                                                     self.save_path, self.step_counts, self.role_config, self.connected_at,
+                                                     auto_sigils=self.sigil_auto_pending if initialize_sigils else None)
         self.save = working
+        if initialize_sigils:
+            self.sigil_auto_pending = None
         return packets

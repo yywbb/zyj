@@ -808,6 +808,121 @@ end''')
     return patched
 
 
+def patch_sigil_scripts():
+    code = read_script("GameMofu").decode("utf-8").replace("\r\n", "\n")
+    marker = "    for k,v in pairs(uireq.choose) do\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    for k,v in ipairs(uireq.choose) do\n")
+    marker = "    local data = getMofuCanLevelData(uireq.data)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    data.iid = uireq.data.iid\n")
+    for name, mid, message in (("LevelUp", 1140, "idsData"), ("ChangePos", 1141, "idsData")):
+        marker = f"function UISigil{name}CallBack(uireq)\n"
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + '''    if gamedata.ext.localSigilBusy then
+        return 0,503,{type=503,msg="魔符正在结算，请等待回复；超时请重进游戏"}
+    end
+''')
+        marker = f"    return 1, {mid}, {message}:SerializeToString()"
+        assert code.count(marker) == 1
+        code = code.replace(marker, "    gamedata.ext.localSigilBusy = true\n" + marker)
+        marker = f"function NetSigil{name}CallBack(fd)\n"
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    gamedata.ext.localSigilBusy = false\n")
+    patched = {"GameMofu": code}
+
+    code = read_script("GameSlots").decode("utf-8").replace("\r\n", "\n")
+    marker = "    local gems = table.copy(gamedata.cache.gems)\n    for ak,av in pairs(gamedata.cache.slotgems) do\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    local gems = table.copy(gamedata.cache.gems)\n    for _,gem in pairs(gems) do gem.ison = 0 end\n    for ak,av in pairs(gamedata.cache.slotgems) do\n")
+    start = code.index("function NetSlotsAllInfoCallBack(fd)\n")
+    end = code.index("\nfunction ", start + 1)
+    block = code[start:end]
+    marker = "    gamedata:SlotInfoProcess(info)\n"
+    assert block.count(marker) == 1
+    block = block.replace(marker, "    gamedata.cache.gems = {}\n    gamedata.cache.slotgems = {}\n" + marker)
+    code = code[:start] + block + code[end:]
+    patched["GameSlots"] = code
+
+    code = read_script("UIMofu").decode("utf-8").replace("\r\n", "\n")
+    marker = '    UIRequest({type = 10322,param = {"gem"}})'
+    assert code.count(marker) == 2
+    code = code.replace(marker, "")
+    marker = '    gameWindows.windows["mofulevelup"].module:selectdataReload({data=data.selectlistdata})'
+    assert code.count(marker) == 1
+    code = code.replace(marker, "")
+    marker = '    if gameWindows.windows["mofulevelup"].show then\n'
+    assert code.count(marker) == 2
+    code = code.replace(marker, '''    local window = gameWindows.windows["mofulevelup"]
+    if window.show and window.module.data and window.module.data.iid == t.iid then
+        window.module:selectdataReload({data=data.selectlistdata})
+''', 1)
+    for name, field in (("mofuproperty", "infodata"), ("mofulevelup", "data")):
+        marker = f'    if gameWindows.windows["{name}"].show then\n'
+        assert code.count(marker) == 1
+        code = code.replace(marker, f'''    local window = gameWindows.windows["{name}"]
+    if window.show and window.module.{field} and window.module.{field}.iid == t.data.iid then
+''')
+    patched["UIMofu"] = code
+
+    code = read_script("window_MofuLevelUp").decode("utf-8").replace("\r\n", "\n")
+    marker = "        if #(self.chooseData) == 0 then\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "        if #(self.chooseData) == 0 and self.data.exp < self.data.temp.exp then\n")
+    patched["window_MofuLevelUp"] = code
+
+    code = read_script("window_mofuProperty").decode("utf-8").replace("\r\n", "\n")
+    marker = '    self.rootNode, self.rootItems = CCBReaderLoad("mofu/mofu_info", nil, true, "mofu_info")\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localLevelUpX = self.rootItems.levelupNode:getPositionX()\n")
+    marker = "    self.infodata = data.infodata\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.ison = 0\n    self.rootItems.changeBtn:setEnabled(false)\n")
+    marker = "function mofuproperty.setCanLevelUpGemsReload(self,data)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if data.iid and data.iid ~= self.infodata.iid then return end\n")
+    marker = "\n    self.canlevelup = data.canlevelup\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.rootItems.changeBtn:setEnabled(self.ison > 0)\n")
+    start = code.index('    elseif data.page == "slot" then\n')
+    end = code.index('    elseif data.page == "other" then\n', start)
+    block = code[start:end]
+    assert block.count("self.rootItems.changeNode:setVisible(false)") == 1
+    assert block.count("self.rootItems.levelupNode:setPositionX(540)") == 1
+    block = block.replace("self.rootItems.changeNode:setVisible(false)", "self.rootItems.changeNode:setVisible(true)")
+    block = block.replace("self.rootItems.levelupNode:setPositionX(540)", "self.rootItems.levelupNode:setPositionX(self.localLevelUpX)")
+    code = code[:start] + block + code[end:]
+    marker = "    -- 去掉更换功能\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    ui.setLabelString(self.rootItems.changeText,"卸下",19)
+    self.rootItems.changeBtn:addHandleOfControlEvent(function()
+        if self.ison and self.ison > 0 then
+            UIRequest({type=1141,pos=self.ison*10+self.infodata.type,iid=0})
+            gameWindows:closeWindow("mofuproperty")
+        end
+    end,CCControlEventTouchUpInside)
+    self.rootItems.changeBtn:setSwallowsTouch(true)
+    self.rootItems.changeBtn:setTouchPriority(self.touchPriority)
+''' + marker)
+    patched["window_mofuProperty"] = code
+
+    code = read_script("Layer_slotsInfo").decode("utf-8").replace("\r\n", "\n")
+    marker = "function slotsInfo.updateAutoQuery( self,data )\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if not self.quickItems then return end\n")
+    patched["Layer_slotsInfo"] = code
+
+    code = read_script("GameTimeBag").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("    elseif uireq.opt == 2 then\n")
+    end = code.index("    elseif uireq.opt == 3 then\n", start)
+    block = code[start:end]
+    marker = "            if v.type==uireq.opt \n"
+    assert block.count(marker) == 1
+    code = code[:start] + block.replace(marker, "            if v.type==uireq.opt and v.id==130010\n") + code[end:]
+    patched["GameTimeBag"] = code
+    return patched
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -890,6 +1005,9 @@ end"""
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if error.ids[1] == 1120 or error.ids[1] == 1121 or error.ids[1] == 1124 then
         gamedata.ext.localBaptizeBusy = false
+    end
+    if error.ids[1] == 1140 or error.ids[1] == 1141 then
+        gamedata.ext.localSigilBusy = false
     end
 ''')
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
@@ -1741,6 +1859,9 @@ end"""
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     for name, code in patch_equip_baptize_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_sigil_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched

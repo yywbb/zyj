@@ -4,7 +4,7 @@ import copy
 import random
 from fractions import Fraction
 
-from . import equip_baptize, godstone, pets
+from . import equip_baptize, godstone, pets, sigil
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -81,6 +81,7 @@ def rosters(save, point, config):
     attack, defense = {}, {}
     equips = {pb_get_varint(v, 1): v for n, w, v in fields if n == 2 and w == 2}
     pet_bonus = pets.attributes(save, config)
+    sigil_bonus, sigil_flat = sigil.bonuses(save, config)
     for n, w, slot in fields:
         if n != 4 or w != 2 or not pb_get_varint(slot, 2):
             continue
@@ -102,9 +103,12 @@ def rosters(save, point, config):
             raise ValueError("阵位或上阵武将重复")
         unit["skill"] = config["general"][str(unit["cid"])]["skillid"]
         unit["flat_out"], unit["flat_in"] = equip_baptize.flat(slot, equips, config)
+        unit["flat_out"] += sigil_flat[0]
+        unit["flat_in"] += sigil_flat[1]
         stone = godstone.attributes(slot, config)
         unit["pet_rates"] = {name: pet_bonus.get(field, 0) - int(pet_bonus.get(field, 0)) + stone[field] - int(stone[field])
                              for name, field in godstone.ATTR_FIELDS.items() if field in godstone.RATE_FIELDS}
+        unit["pet_rates"]["critical"] = sigil_bonus[10] - int(sigil_bonus[10])
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")
