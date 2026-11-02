@@ -19,13 +19,13 @@ ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascri
 class AdminServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port, accounts, configs):
+    def __init__(self, port, accounts, configs, host="127.0.0.1"):
         self.accounts = accounts
         self.configs = configs
         self.gm = gm.Workbench(accounts)
         self.started_at = time.time()
         self.token = secrets.token_urlsafe(32)
-        super().__init__(("127.0.0.1", port), AdminHandler)
+        super().__init__((host, port), AdminHandler)
 
 
 class AdminHandler(BaseHTTPRequestHandler):
@@ -48,11 +48,20 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _check_origin(self):
         port = self.server.server_port
-        hosts = (f"127.0.0.1:{port}", f"localhost:{port}")
-        if self.headers.get("Host") not in hosts:
-            raise PermissionError("请通过启动日志中的本机地址访问后台。")
+        if self.server.server_address[0] in ("0.0.0.0", "::"):
+            host_header = self.headers.get("Host", "")
+            if ":" in host_header:
+                hdr_port = host_header.split(":")[-1]
+                if hdr_port != str(port):
+                    raise PermissionError("主机端口不匹配")
+            allowed = (f"http://{host_header}",)
+        else:
+            hosts = (f"127.0.0.1:{port}", f"localhost:{port}")
+            if self.headers.get("Host") not in hosts:
+                raise PermissionError("请通过启动日志中的本机地址访问后台。")
+            allowed = tuple("http://" + host for host in hosts)
         origin = self.headers.get("Origin")
-        if origin is not None and origin not in tuple("http://" + host for host in hosts):
+        if origin is not None and origin not in allowed:
             raise PermissionError("拒绝跨站后台请求")
 
     def do_GET(self):
@@ -162,7 +171,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send(500, {"error": f"读写失败，请刷新状态或按原操作编号查询结果: {error}"})
 
 
-def start_admin(port, accounts, configs):
-    server = AdminServer(port, accounts, configs)
+def start_admin(port, accounts, configs, host="127.0.0.1"):
+    server = AdminServer(port, accounts, configs, host=host)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
