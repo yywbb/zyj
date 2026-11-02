@@ -963,6 +963,88 @@ def patch_treasure_scripts():
     return {"GameTreasureUp": code}
 
 
+def patch_general_foster_scripts():
+    original = read_script("GameGeneralFoster").decode("utf-8")
+    for name in ("UIGeneralFosterPreviewCallBack", "NetGeneralFosterPreviewCallBack", "UIGeneralFosterConfirmCallBack",
+                 "NetGeneralFosterConfirmCallBack", "UIGeneralAutoTrainCallBack", "NetGeneralAutoTrainCallBack"):
+        assert original.count("function " + name + "(") == 1
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "general_foster.lua"), encoding="utf-8") as stream:
+        patched = {"GameGeneralFoster": stream.read()}
+    for name, module in (("Layer_generalup", "generalup"), ("window_generalInfo", "generalInfo")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for opt in (0, 1):
+            marker = f"UIRequest({{type = 1014, opt = {opt} }})"
+            assert code.count(marker) == 2
+            code = code.replace(marker, f"UIRequest({{type = 1014, opt = {opt}, id = self.data.general.iid, token = self.localFosterToken }})")
+        start = code.index(f"function {module}.setPage_train(")
+        end = code.index("\nend", start)
+        code = code[:end] + '''
+    self.localFosterToken = nil
+    if not self.localFosterNoQuery and self.data.general.level1 > 1 then
+        UIRequest({type=1013,id=self.data.general.iid,method=0})
+    end
+''' + code[end:]
+        start = code.index(f"function {module}.setTrainResuit(")
+        end = code.index("\nend", start)
+        block = code[start:end]
+        marker = "    self.trainResuit = true"
+        assert block.count(marker) == 1
+        block = block.replace(marker, "    self.localFosterToken = datas.token\n" + marker)
+        block = block.replace("                self.trainResuit = false\n", "")
+        code = code[:start] + block + code[end:]
+        marker = '    gamedata.music:PlayOptSound("py")'
+        if module == "generalInfo":
+            assert code.count(marker) == 1
+            code = code.replace(marker, '    if not datas.restored then gamedata.music:PlayOptSound("py") end')
+        patched[name] = code
+    code = read_script("UIGenerals").decode("utf-8").replace("\r\n", "\n")
+    replacements = {
+        "UIGeneralFosterPreview": '''function UIGeneralFosterPreview(t)
+    local function show(entry,kind)
+        local page = entry and entry.module
+        if not entry or not entry.show or not page.data or not page.data.general or page.data.general.iid ~= t.extGeneralData.iid then return end
+        if (kind == "layer" and page.selectpage ~= "train") or (kind == "window" and page.pagetype ~= "train") then return end
+        if t.token > 0 then
+            page:setTrainResuit(t)
+            page:setTrainPropNum({["20009"]=t.remaining})
+        elseif page.trainResuit then
+            page.trainResuit = false
+            page.localFosterNoQuery = true
+            page:setPage_train()
+            page.localFosterNoQuery = false
+        end
+    end
+    show(GameScene.layers["generalup"],"layer")
+    show(gameWindows.windows["generalInfo"],"window")
+end''',
+        "UIGeneralFosterConfirm": '''function UIGeneralFosterConfirm(t)
+    for _,id in ipairs({10021,10024,10023,1200}) do GameScene:addUpdate(id) end
+    local layer = GameScene.layers["generalup"]
+    if layer.show and layer.module.data.general.iid == t.general.iid then layer.module:ReloadData(t) end
+    local window = gameWindows.windows["generalInfo"]
+    if window.show and window.module.data.general.iid == t.general.iid then window.module:reloaddata(t) end
+end''',
+        "UIGeneralFosterAutomatic": '''function UIGeneralFosterAutomatic(t)
+    UIGeneralFosterConfirm(t)
+    local window = gameWindows.windows["generalcultivate"]
+    if window.show and window.module.iid == t.general.iid then window.module:reloadData(t) end
+end'''}
+    for name, replacement in replacements.items():
+        start = code.index(f"function {name}(t)")
+        end = code.index("\nend", start) + len("\nend")
+        code = code[:start] + replacement + code[end:]
+    patched["UIGenerals"] = code
+    code = read_script("window_generalcultivateAuto").decode("utf-8").replace("\r\n", "\n")
+    marker = 'gameConfig.strings:generalPeiyang(a1+1)'
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'string.format("第%d组（实际%d次）",a1+1,data.count)')
+    start = code.index('                if data["potential"] and data["potential"] > 0 then')
+    end = code.index('\n            else\n                ccbDocumentControler["stop"]:setVisible(false)', start)
+    code = code[:start] + '                ccbDocumentControler["stop"]:setString("培养已停止，仅扣实际执行次数")' + code[end:]
+    patched["window_generalcultivateAuto"] = code
+    return patched
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -1052,6 +1134,9 @@ end"""
     end
     if error.ids[1] == 1118 or error.ids[1] == 1119 or error.ids[1] == 1210 then
         gamedata.ext.localTreasureBusy = false
+    end
+    if error.ids[1] == 1013 or error.ids[1] == 1014 or error.ids[1] == 1126 then
+        gamedata.ext.localFosterBusy = nil
     end
 ''')
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
@@ -2026,6 +2111,24 @@ end"""
 
     for name, code in patch_treasure_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_general_foster_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    code = read_script("fosterconfirm_pb", "pb").decode("utf-8").replace("\r\n", "\n")
+    marker = 'FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD}'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''local token = protobuf.FieldDescriptor()
+token.name = "token"
+token.full_name = ".FosterConfirm.token"
+token.number = 3
+token.index = 2
+token.label = 2
+token.has_default_value = false
+token.default_value = 0
+token.type = 5
+token.cpp_type = 1
+FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}''')
+    patched["assets/pb/fosterconfirm_pb.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched
 

@@ -1466,7 +1466,7 @@ class AdminHttpTests(AdminFixture):
         data = self.request("/api/accounts/1")[2]
         self.assertEqual(len(data["business"]["recruit"]), 4)
         self.assertEqual({row["id"] for row in data["business"]["activities"] if row["id"] < 100},
-                         {1, 3, 7, 8, 9, 11, 14, 16, 17, 23, 37, 48})
+                         {1, 3, 7, 8, 9, 11, 14, 16, 17, 22, 23, 37, 48})
         self.assertEqual(data["business"]["recharge"]["rmb"], SAVE["recharge_state"]["rmb"])
         self.assertTrue(data["copies"][0]["points"])
         self.assertEqual(data["general_level_cap"], 12)

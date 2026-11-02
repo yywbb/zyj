@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from . import activities, equip_baptize, fashion, favorite, formation, recharge, recruit
+from . import activities, equip_baptize, fashion, favorite, formation, general_foster, recharge, recruit
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 QUERIES = (3704, 3850, 7030, 3780)
@@ -169,10 +169,16 @@ def prepare(opcode, save, body, config):
                 if not pristine_general(baseline, config, save):
                     raise ValueError("伙伴重生基线无效")
                 gets.update(dict(receipt["costs"]))
+                used = general_foster.used_potential(raw, config)
+                divisor = int(config["global_kv"]["general_rebirth_potential"]["value"])
+                price = int(config["global_kv"]["general_rebirth_potentialcost"]["value"])
+                if divisor <= 0 or price < 0:
+                    raise ValueError("培养重生费用配置无效")
                 costs.append((1001, config["renascence"][str(pb_get_varint(raw, 3))]["generallvcost"]
-                              + config["renascence"][str(pb_get_varint(raw, 4) or 0)]["breakcost"]))
+                              + config["renascence"][str(pb_get_varint(raw, 4) or 0)]["breakcost"] + (2*used*price+divisor)//(2*divisor)))
                 updates += encode_pb_field(8, 2, baseline)
                 del state["receipts"][f"general:{iid}"]
+                general_foster.remove(save, iid)
             else:
                 if not pristine_general(raw, config, save):
                     raise ValueError("强化过的伙伴请先安全重生，炼化未执行")
@@ -252,5 +258,7 @@ def prepare(opcode, save, body, config):
     for n, removed_ids in removed.items():
         for iid in removed_ids:
             state["receipts"].pop(f'{"general" if n == 1 else "equip"}:{iid}', None)
+            if n == 1:
+                general_foster.remove(save, iid)
     reward = activities.build_reward(save, ";".join(f"{cid},{num}" for cid, num in gets.items() if num), config) + updates
     return reward, [(cid, num) for cid, num in costs if num], reward

@@ -122,11 +122,14 @@ def _manage(save, action, data, config, step_counts, now):
         body = encode_pb_field(1, 0, position or current) + encode_pb_field(3, 0, iid if position else 0)
         player.prepare_recorded_response(1003, b"", save, body, step_counts, config, now)
     elif action == "remove-general":
+        from .. import general_foster
+
         protagonist = pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
         if iid == protagonist or row["actor"] == "lead" or iid in qiankun.protected(save):
             raise ValueError("只能移除非主角的闲置武将，请先下阵")
         save["world_state"]["1002"] = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world)
             if not (n == 1 and w == 2 and pb_get_varint(v, 2) == iid)).hex()
+        general_foster.remove(save, iid)
     else:
         level = pb_get_varint(raw, 3) or 0
         maximum = min(save["role_state"]["level"] * int(config["global_kv"]["general_level"]["value"]),
