@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -67,6 +67,7 @@ def load_role_config(config_path):
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
                              "favorable", "favorable_level", "favorable_task", "shake_param",
+                             "penglai3_map", "penglai3_type", "penglai3_dice", "penglai3_card", "penglai3_monster",
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
@@ -598,8 +599,9 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             record_protagonist_general(save, raw)
         if update:
             record_slot_update(save, update)
-    elif opcode in cornucopia.OPCODES:
-        body, costs, reward = cornucopia.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+    elif opcode in (*cornucopia.OPCODES, *penglai.OPCODES):
+        module = cornucopia if opcode in cornucopia.OPCODES else penglai
+        body, costs, reward = module.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
         if reward:
@@ -969,7 +971,9 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         for mid in WORLD_QUERY_IDS:
             if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
-    if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS):
+    if responses and responses[0]["opcode"] in penglai.MUTATIONS and save["world_state"]["1200"] != before["world_state"]["1200"]:
+        packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
+    if automatic_reward or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
