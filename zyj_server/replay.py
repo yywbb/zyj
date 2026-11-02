@@ -177,6 +177,32 @@ def build_routing_tables(frames):
             groups.append(responses)
         comb_routes.setdefault((get_comb_ids(short_guild), short_guild), groups)
 
+    # 19级公会解锁只多查询2230；仅补这条完整十二项模板，不做任意Comb子集匹配。
+    main_ids = (2313, 4800, 2880, 5511, 6911, 3210, 7002, 2037, 2039, 6501, 6810)
+    main_request = b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid)) for mid in main_ids)
+    guild_request = b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid))
+                             for mid in (*main_ids[:7], 2230, *main_ids[7:]))
+    guild_groups = []
+    if 2230 in baseline:
+        guild_query = encode_pb_field(1, 2, encode_pb_field(1, 0, 2230) + encode_pb_field(2, 2, baseline[2230]))
+        for group in comb_routes.get((get_comb_ids(main_request), main_request), []):
+            if any(tuple(mid for mid, _ in get_comb_messages(bytes.fromhex(r["hex"]))) != main_ids
+                   for r in group if r["opcode"] == 999900):
+                continue
+            responses = []
+            for response in group:
+                if response["opcode"] == 999900:
+                    out = bytearray()
+                    for n, w, v in iter_pb_fields(bytes.fromhex(response["hex"])):
+                        out.extend(encode_pb_field(n, w, v))
+                        if (n, w) == (1, 2) and pb_get_varint(v, 1) == 7002:
+                            out.extend(guild_query)
+                    response = dict(response, hex=out.hex())
+                responses.append(response)
+            guild_groups.append(responses)
+    if guild_groups:
+        comb_routes.setdefault((get_comb_ids(guild_request), guild_request), guild_groups)
+
     print_flush(f"[*] 带请求校验的录制路由就绪: {sum(len(groups) for groups in verified.values())} 个请求")
     print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个普通请求参数组合, {len(comb_routes)} 个 Comb 请求参数组合, {len(master_comb_packets)} 个主城初始化子帧")
     return opcode_routes, comb_routes, master_comb_packets, verified

@@ -547,6 +547,109 @@ class ReplayRoutingTests(unittest.TestCase):
         self.clock.return_value += 86400
         self.assertEqual(protocol.parse_ids_pb(self.query_world(4615))[0], 0)
 
+    def test_daily_heartbeat_notifies_once_even_after_another_query_settles_the_day(self):
+        self.seed_welfare_account()
+        midnight = ((self.now + 28800) // 86400 + 1) * 86400 - 28800
+        self.clock.return_value = midnight - 1
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.handle(4611, 1, recharge.ids([1]))
+            session.handle(4611, 2, recharge.ids([0, 10]))
+            original = copy.deepcopy(session.save["world_state"])
+            self.clock.return_value = midnight
+            reply = session.handle(300, 3, b"")
+            self.assertEqual(protocol.parse_ids_pb(reply[0][16:])[24:26], [0, 0])
+            packets = session.handle(999904, 4, b"")
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999904, 110])
+            self.assertEqual(packets[-1], protocol.pack_frame(110, 0, b""))
+            for key in ("1002", "1012", "1107", "1200"):
+                self.assertEqual(session.save["world_state"][key], original[key])
+            for now in (midnight, midnight - 1, midnight + 60):
+                self.clock.return_value = now
+                self.assertEqual(session.handle(999904, 5, b""), [protocol.pack_frame(999904, 5, b"")])
+            session.handle(4611, 6, recharge.ids([1]))
+            self.assertEqual(struct.unpack(">IIII", session.handle(4611, 7, recharge.ids([1]))[0][:16])[2], 999999)
+            reconnected = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(reconnected.handle(999904, 8, b""), [protocol.pack_frame(999904, 8, b"")])
+            self.assertTrue(reconnected.save["welfare_state"]["vip_free"])
+
+    def test_daily_heartbeat_failed_save_and_malformed_request_do_not_advance_refresh(self):
+        self.seed_welfare_account()
+        midnight = ((self.now + 28800) // 86400 + 1) * 86400 - 28800
+        self.clock.return_value = midnight - 1
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            session.handle(4611, 1, recharge.ids([1]))
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            self.clock.return_value = midnight
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(999904, 2, b"")
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+            self.assertEqual(session.refresh_day, (midnight - 1 + 28800) // 86400)
+            self.assertEqual(struct.unpack(">IIII", session.handle(999904, 3, b"\x08\x01")[0][:16])[2], 999999)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+
+    def test_campaign_daily_attempts_preserve_stars_boxes_unknown_fields_and_legacy_history(self):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        original = bytes.fromhex(saved["world_state"]["1300"]) + protocol.encode_pb_field(99, 0, 77)
+        unknown_point = b"\x08\x7f\x20\x09\x98\x06\x4d"
+        maps = self.entity_records(original, 1, 1)
+        original = player.merge_pb_records(original, protocol.encode_pb_field(1, 2,
+            maps[42101] + protocol.encode_pb_field(7, 2, unknown_point)), {1: 1})
+        original += protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 99999) +
+                                             protocol.encode_pb_field(7, 2, unknown_point))
+        saved["world_state"]["1300"] = original.hex()
+        self.save_path.write_text(json.dumps(saved))
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(session.handle(1300, 1, b"")[0][16:], original)
+            self.clock.return_value += 86400
+            response = session.handle(1300, 2, b"")[0][16:]
+            maps = self.entity_records(response, 1, 1)
+            for mid, raw in self.entity_records(original, 1, 1).items():
+                updated = self.entity_records(maps[mid], 7, 1)
+                for pid, point in self.entity_records(raw, 7, 1).items():
+                    expected = protocol.pb_set_varint(point, 4, 0) if str(pid) in self.role_config["copy"].get(str(mid), {}) else point
+                    self.assertEqual(updated[pid], expected)
+                for field in (2, 3, 4, 5, 6):
+                    self.assertEqual(protocol.pb_get_varint(maps[mid], field), protocol.pb_get_varint(raw, field))
+            self.assertEqual(protocol.pb_get_varint(response, 99), 77)
+            self.assertEqual(session.handle(1300, 3, b"")[0][16:], response)
+            session.handle(1307, 4, recharge.ids([42101, 1, 0, 0]))
+            after = copy.deepcopy(session.save["world_state"]["1300"])
+            self.clock.return_value -= 86400
+            self.assertEqual(session.handle(1300, 5, b"")[0][16:].hex(), after)
+            reconnected = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(reconnected.handle(1300, 6, b"")[0][16:].hex(), after)
+
+    def test_campaign_daily_attempts_settle_before_direct_sweep_and_failed_save_is_atomic(self):
+        self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        raw = bytes.fromhex(saved["world_state"]["1300"])
+        map_body = self.entity_records(raw, 1, 1)[42101]
+        point = self.entity_records(map_body, 7, 1)[1]
+        point = protocol.pb_set_varint(point, 4, self.role_config["copy"]["42101"]["1"]["challenge"])
+        map_body = player.merge_pb_records(map_body, protocol.encode_pb_field(7, 2, point), {7: 1})
+        saved["world_state"]["1300"] = player.merge_pb_records(raw, protocol.encode_pb_field(1, 2, map_body), {1: 1}).hex()
+        saved["campaign_day"] = (self.now + 28800) // 86400
+        self.save_path.write_text(json.dumps(saved))
+        body = recharge.ids([42101, 1, 0, 0])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(struct.unpack(">IIII", session.handle(1307, 1, body)[0][:16])[2], 999999)
+            self.clock.return_value += 86400
+            disk, memory = self.save_path.read_bytes(), copy.deepcopy(session.save)
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1307, 2, body)
+            self.assertEqual((self.save_path.read_bytes(), session.save), (disk, memory))
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            self.assertEqual(struct.unpack(">IIII", session.handle(1307, 3, body)[0][:16])[2], 1307)
+            maps = self.entity_records(bytes.fromhex(session.save["world_state"]["1300"]), 1, 1)
+            updated = self.entity_records(maps[42101], 7, 1)[1]
+            self.assertEqual(protocol.pb_get_varint(updated, 4), 1)
+            self.assertEqual(protocol.pb_get_varint(updated, 3), protocol.pb_get_varint(point, 3))
+
     def test_welfare_growth_order_is_distinct_from_gold_recharge_and_counts_real_accounts(self):
         self.seed_welfare_account()
         old_order = self.recharge_order(5)
@@ -665,12 +768,58 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.assertEqual(self.replay([refresh]), [dict(responses[1], seq=refresh["seq"])])
         self.assertEqual(self.tables, tables)
 
+    def test_main_page_guild_preload_adds_only_new_account_membership_query(self):
+        self.seed_shop_account()
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"].update(level=19, nextexp=self.role_config["role_exp"]["19"]["nextexp"])
+        self.save_path.write_text(json.dumps(saved))
+        previous = self.replay([self.by_seq[27]])[0]
+        expected = protocol.get_comb_messages(bytes.fromhex(previous["hex"]))
+        baseline = next(dict(protocol.get_comb_messages(bytes.fromhex(f["hex"])))[2230]
+                        for f in self.tables[2] if f["opcode"] == 999900)
+        expected.insert(7, (2230, baseline))
+        ids = (2313, 4800, 2880, 5511, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810)
+        body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid)) for mid in ids)
+        request = {"opcode": 999900, "seq": 24000, "hex": body.hex()}
+        before = self.save_path.read_bytes()
+        for seq in (24000, 24001):
+            responses = self.replay([dict(request, seq=seq)], chunk_size=7)
+            self.assertEqual([(f["opcode"], f["seq"]) for f in responses], [(999900, seq)])
+            self.assertEqual(protocol.get_comb_messages(bytes.fromhex(responses[0]["hex"])), expected)
+            self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_main_page_guild_preload_requires_complete_source_and_membership_baseline(self):
+        ids = (2313, 4800, 2880, 5511, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810)
+        body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid)) for mid in ids)
+        unknown = protocol.encode_pb_field(9, 2, b"keep")
+        initial = [self.by_seq[12], self.recorded[(12, 999900)]]
+        request = self.by_seq[27]
+        response = dict(self.recorded[(27, 999900)], hex=self.recorded[(27, 999900)]["hex"] + unknown.hex())
+        frames = [*initial, request, response]
+        original = copy.deepcopy(frames)
+        with redirect_stdout(io.StringIO()):
+            tables = replay.build_routing_tables(frames)
+            result = replay.Replay(tables).match(999900, 24000, body)
+            self.assertIsNotNone(result)
+            self.assertTrue(bytes.fromhex(result[0]["hex"]).endswith(unknown))
+            for source in ([], [dict(response, seq=0)], [dict(response, hex="")]):
+                tables = replay.build_routing_tables([*initial, request, *source])
+                self.assertIsNone(replay.Replay(tables).match(999900, 24000, body))
+            missing = b"".join(protocol.encode_pb_field(n, w, value)
+                               for n, w, value in protocol.iter_pb_fields(bytes.fromhex(initial[1]["hex"]))
+                               if not ((n, w) == (1, 2) and protocol.pb_get_varint(value, 1) == 2230))
+            tables = replay.build_routing_tables([initial[0], dict(initial[1], hex=missing.hex()), request, response])
+            self.assertIsNone(replay.Replay(tables).match(999900, 24000, body))
+        self.assertEqual(frames, original)
+
     def test_main_page_comb_compatibility_keeps_full_parameter_validation(self):
         self.seed_shop_account()
         before = self.save_path.read_bytes()
         self.clock.return_value = self.now + 360
         refresh = bytes.fromhex("0a030889120a0308c0250a0308ff350a03088a190a0308da360a0308f50f0a0308f70f0a0308e5320a03089a35")
-        for raw in (bytes.fromhex(self.by_seq[27]["hex"]), bytes.fromhex(self.by_seq[122]["hex"]), refresh):
+        guild = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid))
+                         for mid in (2313, 4800, 2880, 5511, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810))
+        for raw in (bytes.fromhex(self.by_seq[27]["hex"]), bytes.fromhex(self.by_seq[122]["hex"]), refresh, guild):
             fields = list(protocol.iter_pb_fields(raw))
             bodies = [raw + b"\x10\x01", raw + protocol.encode_pb_field(*fields[0]),
                       b"".join(protocol.encode_pb_field(*f) for f in reversed(fields))]

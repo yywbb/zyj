@@ -224,6 +224,31 @@ def settle_stamina(save, role_config, now):
         clock["next_at"] = clock["next_at"] + recovered * STAMINA_INTERVAL if state["stamina"] < state["maxstamina"] else 0
 
 
+def settle_campaign(save, role_config, now):
+    if not save.get("has_role"):
+        return
+    day = (now + 28800) // 86400
+    # 旧次数没有日期，首次接入只锚定；不能清掉可能已在今天消耗的次数。
+    previous = save.setdefault("campaign_day", day)
+    if type(previous) is not int or not 0 <= previous < (1 << 31):
+        raise ValueError("主线每日次数日期无效")
+    if day <= previous:
+        return
+    out = bytearray()
+    for field, wire, value in iter_pb_fields(bytes.fromhex(save["world_state"]["1300"])):
+        if (field, wire) == (1, 2) and str(pb_get_varint(value, 1)) in role_config["copy"]:
+            points = role_config["copy"][str(pb_get_varint(value, 1))]
+            rows = bytearray()
+            for n, w, row in iter_pb_fields(value):
+                if (n, w) == (7, 2) and str(pb_get_varint(row, 1)) in points:
+                    row = pb_set_varint(row, 4, 0)
+                rows.extend(encode_pb_field(n, w, row))
+            value = bytes(rows)
+        out.extend(encode_pb_field(field, wire, value))
+    save["world_state"]["1300"] = out.hex()
+    save["campaign_day"] = day
+
+
 def record_legacy_role_state(save, body, role_config):
     ids = parse_ids_pb(body)
     if len(ids) != 5 or str(ids[0]) not in role_config["role_exp"] or any(not 0 <= value < (1 << 31) for value in ids):
@@ -904,6 +929,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     before = copy.deepcopy(save)
     now = int(time.time())
     self_update = settle_self_stats(save, role_config)
+    settle_campaign(save, role_config, now)
     online_rewards.settle(save, role_config, connected_at, now)
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)
@@ -985,6 +1011,7 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
     before = copy.deepcopy(save)
     now = int(time.time())
     self_update = settle_self_stats(save, role_config)
+    settle_campaign(save, role_config, now)
     online_rewards.settle(save, role_config, connected_at, now)
     welfare.settle(save, now)
     settle_stamina(save, role_config, now)

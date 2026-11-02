@@ -31,6 +31,7 @@ class Session:
         self.guild_request = guild_request
         self.random_replies = {}
         self.connected_at = int(time.time())
+        self.refresh_day = (self.connected_at + 28800) // 86400
         self.save = player.load_save(save_path, step_counts)
         player.initialize_world_state(self.save, self.replay.master_comb_packets)
         activities.get_state(self.save)
@@ -103,6 +104,19 @@ class Session:
     def _handle(self, opcode, seq, body):
         """成功响应只在落盘后返回；解析、业务或保存失败时抛错，由收发入口关闭连接。"""
         print_flush(f"[C->S] Opcode: {opcode:6d} (0x{opcode:04x}), Seq: {seq:3d}, Payload: {len(body):3d} B")
+        if opcode == 999904:
+            if body:
+                return unavailable_response(opcode, seq, body, "心跳不接受参数")
+            working = copy.deepcopy(self.save)
+            packets = player.prepare_recorded_responses(
+                seq, [{"opcode": opcode, "seq": seq, "hex": ""}], working, body,
+                self.save_path, self.step_counts, self.role_config, self.connected_at)
+            self.save = working
+            day = working["welfare_state"]["day"]
+            if day > self.refresh_day:
+                packets.append(pack_frame(110, 0, b""))
+                self.refresh_day = day
+            return packets
         if opcode == 200:
             sections = guide.get_guide_sections(self.save, self.step_counts)
             pb = guide.build_guide_query_pb(sections)
@@ -398,6 +412,6 @@ class Session:
             return unavailable_response(opcode, seq, body, "教程装备录制已过期，请使用当前阵容单独装备或强化。")
         working = copy.deepcopy(self.save)
         packets = player.prepare_recorded_responses(seq, responses, working, body,
-                                                    self.save_path, self.step_counts, self.role_config, self.connected_at)
+                                                     self.save_path, self.step_counts, self.role_config, self.connected_at)
         self.save = working
         return packets

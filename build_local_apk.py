@@ -983,7 +983,7 @@ end
         "GameEatChicken": (("UIActivityEatChickenQueryCallBack", 2010),),
         "GameActivityReward": (("UIContinue7QueryCallBack1", 214),),
         "GameSignIn": (("UISignIn2StatusCallBack", 3641), ("UILuxurySignInStatusCallBack", 3643)),
-        "GameRecharge": (("UIVipStatusCallBack", 300), ("UIGrowPlan2CallBack", 7091)),
+        "GameRecharge": (("UIVipStatusCallBack", 300), ("UIMonthCardCallBack", 2090), ("UIGrowPlan2CallBack", 7091)),
         "GameActivityMultipleRebate": (("UIMonthGrowQueryCallBack", 3680), ("UIMonthGrowWelfareQueryCallBack", 3682)),
         "GameGang": (("UIUserGang2PrayQueryCallBack", 2250),),
     }
@@ -1331,6 +1331,9 @@ end
     patched["assets/scripts/battleReportConvert.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("GameCopy").decode("utf-8").replace("\r\n", "\n")
+    marker = "    if next(gamedata.cache.copy) then\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    if next(gamedata.cache.copy) and not uireq.update then\n")
     marker = '''    local challenge = 1
     if gamedata.ext.copyattackwipe.method == 1 then
         challenge = config[tostring(map)][tostring(point)].challenge - copy[map].points[point].kill
@@ -1450,6 +1453,46 @@ end''' + code[end:]
 ''')
     patched["assets/scripts/Layer_mochonglead.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
+    daily_queries = "{" + ", ".join(f"[{opcode}]=true" for opcode in (
+        214, 300, 2010, 2015, 2062, 2090, 2092, 2097, 3627, 3630, 3641, 3643, 3650,
+        3680, 3682, 4615, 4810, 4813, 4814, 4890, 5000, 5010, 5015, 5017, 5020, 5022,
+        5030, 5034, 5039, 7091, 7094, 8026, 8075, 8077)) + "}"
+    code = read_script("GameScene").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function gameScene.cacheresetrequest(self,order)\n")
+    end = code.index("\nend", start) + len("\nend")
+    assert "reqs= {1001,300,2300,1300" in code[start:end]
+    code = code[:start] + '''function gameScene.cacheresetrequest(self,order)
+    self:UICacheReset()
+    local sent = {}
+    local function query(opcode)
+        if sent[opcode] then return end
+        sent[opcode] = true
+        UIRequest({type = opcode, update = true, param2 = opcode == 2000,
+                   param = opcode == 1001 and "resume" or nil})
+    end
+    for _,opcode in ipairs({1001,300,1300,3610,1032,3200,3210,2410,2037,2000}) do
+        query(opcode)
+    end
+    for name,opcode in pairs({bloodbattle=3620, zhuxiantaiShop=3627, watchstar=2062,
+                              starcopy_map=1350, gang_shangxiang=2250, shopList=4890}) do
+        if self.layers[name] and self.layers[name].show then query(opcode) end
+    end
+    local chapter = self.layers.copy_chapter
+    if chapter.show and chapter.module.selectpage == "star" then query(1350) end
+    local layer = self.layers.activity
+    if layer and layer.show then
+        local activity = layer.module
+        local page = activity.realPageTable[activity.presentPage]
+        local opcode = page and page.request
+        if page and page.id == 161 then
+            opcode = page.module.tempRequestTable[page.module.pageId]
+        end
+        local readable = ''' + daily_queries + '''
+        if readable[opcode] then query(opcode) end
+    end
+end''' + code[end:]
+    patched["assets/scripts/GameScene.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     code = read_script("Layer_activity").decode("utf-8").replace("\r\n", "\n")
     marker = "[57] = { request = 46111,"
     assert code.count(marker) == 1
@@ -1461,10 +1504,32 @@ end"""
     assert code.count(old) == 1
     # 点当前页不应初始化相邻活动；实际切页仍由 createPages 加载并查询。
     code = code.replace(old, "function activity.createPagesExt(self)\nend")
+    marker = "function activity.makepageconfig(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    local readable = ''' + daily_queries + '''
+    for _,page in pairs(self.activityPageconfig) do
+        if readable[page.request] then page.needupdate = true end
+    end
+''')
+    marker = "UIRequest({ type = self.realPageTable[page].request })"
+    assert code.count(marker) == 2
+    code = code.replace(marker, "UIRequest({ type = self.realPageTable[page].request, update = true })")
     patched["assets/scripts/Layer_activity.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched Layer_activity.so (query activities only when selected)")
 
+    code = read_script("Layer_activity_general_shop").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function generalShop.refreshFunc(self,pageId)\n")
+    end = code.index("\nend", start)
+    assert "self:shiftPage(i)" in code[start:end]
+    code = code[:end] + '''
+    if self.tempRequestTable[self.pageId] == 3650 then UIRequest({type = 3650, update = true}) end
+''' + code[end:]
+    patched["assets/scripts/Layer_activity_general_shop.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
     for name, code in patch_friend_copy_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_activity_copy_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     for name, code in patch_arena_scripts().items():
@@ -1570,9 +1635,6 @@ end
     d = d.replace(old_net, new_net, 1)
     patched["assets/scripts/gameserver.so"] = xxtea_encrypt(d, XXTEA_KEY)
     print("  [Lua] Patched gameserver.so (registered 999898 role state report)")
-
-    for name, code in patch_activity_copy_scripts().items():
-        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched
 

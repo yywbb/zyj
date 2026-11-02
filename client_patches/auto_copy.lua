@@ -5,7 +5,11 @@ local autoCopyInterval = 3.1  -- 客户端1306限流要求跨越3个整秒。
 local function autoCopyLabel(text)
     local layer = autoCopy.layer
     if layer and layer.autoCopyButton then
-        setControlButtonTitle(layer.autoCopyButton, autoCopy.active and "停止推图" or "自动推图")
+        local title = autoCopy.active and "停止推图" or "自动推图"
+        -- 旧标题辅助函数传CCString，与当前原生绑定要求的Lua字符串不兼容。
+        for _, state in ipairs({CCControlStateNormal, CCControlStateHighlighted, CCControlStateDisabled}) do
+            layer.autoCopyButton:setTitleForState(title, state)
+        end
         layer.autoCopyLabel:setString(text or "")
     end
 end
@@ -161,12 +165,12 @@ function AutoCopyAttach(layer, toppos)
     autoCopy.layer = layer
     layer.autoCopyTimer = CCNode:create()
     layer.rootNode:addChild(layer.autoCopyTimer)
-    layer.autoCopyLabel = ui.createLabel({text = "", fontsize = 22, x = gameConfig.originSize.width - 120, y = toppos - 150})
+    layer.autoCopyLabel = ui.createLabel({text = "", fontsize = 22, x = gameConfig.originSize.width - 400, y = toppos - 50})
     layer.rootNode:addChild(layer.autoCopyLabel)
     layer.autoCopyButton = CCControlButton:create("自动推图", "Helvetica-Bold", 26)
     layer.autoCopyButton:setPreferredSize(CCSizeMake(190, 70))
     layer.autoCopyButton:setAnchorPoint(ccp(0.5, 0.5))
-    layer.autoCopyButton:setPosition(ccp(gameConfig.originSize.width - 120, toppos - 100))
+    layer.autoCopyButton:setPosition(ccp(gameConfig.originSize.width - 400, toppos - 100))
     setControlButtonFrame(layer.autoCopyButton, "b_n_button5")
     layer.autoCopyButton:addHandleOfControlEvent(function()
             if autoCopy.active then AutoCopyStop("自动推图已停止，本场结果仍会正常结算"); return end

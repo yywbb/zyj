@@ -489,14 +489,18 @@ class LanBuildTests(unittest.TestCase):
             CCCallFunc={create=function(_,callback) return callback end}
             CCSequence={createWithTwoActions=function(_,delay,callback) return {delay=delay,callback=callback} end}
             CCControlStateNormal=0; CCControlStateHighlighted=1; CCControlStateDisabled=2; CCControlEventTouchUpInside=1
-            CCString={create=function(_,text) return text end}
+            CCString={create=function(_,text) return {value=text} end}
             CCSizeMake=function(w,h) return {width=w,height=h} end
             ccp=function(x,y) return {x=x,y=y} end
             CCControlButton={create=function()
-                return {setPreferredSize=function() end,setAnchorPoint=function() end,setPosition=function() end,
+                return {setPreferredSize=function(self,size) self.size=size end,setAnchorPoint=function() end,
+                    setPosition=function(self,position) self.position=position end,
                     setTouchPriority=function() end,setSwallowsTouch=function() end,
                     setBackgroundSpriteFrameForState=function(_,frame) assert(frame=='button-frame') end,
-                    setTitleForState=function(self,title) self.title=title end,
+                    setTitleForState=function(self,title,state)
+                        assert(type(title)=='string','native button title must be a Lua string')
+                        self.titles=self.titles or {};self.titles[state]=title;self.title=title
+                    end,
                     addHandleOfControlEvent=function(self,callback) self.callback=callback end}
             end}
             local frames={}
@@ -506,7 +510,7 @@ class LanBuildTests(unittest.TestCase):
             CCSprite={create=function(_,path)
                 if path=='public/publicsprite/b_n_button5.png' then return {displayFrame=function() return 'button-frame' end} end
             end}
-            ui={createLabel=function() return {setString=function(self,value) self.value=value end} end}
+            ui={createLabel=function(args) return {x=args.x,y=args.y,setString=function(self,value) self.value=value end} end}
             gameWindows={windows={},openWindow=function(self,name,args,cb) confirmed=cb end}
             gameConfig={originSize={width=1080}}
             GameScene={presentLayer='copy_map',roleinfo={stamina=20},layers={
@@ -530,10 +534,18 @@ class LanBuildTests(unittest.TestCase):
         lua.execute('''
             layer=makeLayer();AutoCopyAttach(layer,1500)
             assert(layer.autoCopyButton.title=='自动推图' and #requests==0)
+            assert(layer.autoCopyButton.position.x+layer.autoCopyButton.size.width/2<gameConfig.originSize.width-250)
+            assert(layer.autoCopyLabel.y>layer.autoCopyButton.position.y)
+            for _,state in ipairs({CCControlStateNormal,CCControlStateHighlighted,CCControlStateDisabled}) do
+                assert(layer.autoCopyButton.titles[state]=='自动推图')
+            end
             layer.autoCopyButton.callback();assert(confirmed and #requests==0)
             confirmed();assert(layer.autoCopyTimer.action.delay>=3);layer.autoCopyTimer:fire()
             assert(#requests==1 and requests[1].type==1306 and requests[1].map==42101 and requests[1].point==1)
             assert(requests[1].local_auto_copy and layer.autoCopyButton.title=='停止推图')
+            for _,state in ipairs({CCControlStateNormal,CCControlStateHighlighted,CCControlStateDisabled}) do
+                assert(layer.autoCopyButton.titles[state]=='停止推图')
+            end
             assert(AutoCopyBlockManual())
             UICopyAttack2(dataFor(42101,1,42101,2))
             assert(#requests==2 and requests[2].type==1001)
@@ -1119,7 +1131,7 @@ class LanBuildTests(unittest.TestCase):
             package.preload.activityquery_pb = function() return {} end
             gamedata = {cache={role={gold=1000}, mammon={1,100}, chicken={2,2,2},
                               continueX1={1,1}, signin2={daynum=1,status=1}, luxurySignInStatus={status=2},
-                              vipstatus={vipexchange_free=0}, timegift={}, growplanx1={status={}}}, ext={},
+                              vipstatus={vipexchange_free=0}, monthcard={{status=2}}, timegift={}, growplanx1={status={}}}, ext={},
                         config={mammon={['1']={gold=18}}}}
             function gamedata:Mammon(data) for _,v in ipairs(data.ids) do table.insert(self.cache.mammon,v) end end
             function gamedata:SomethingProcess(data)
@@ -1135,7 +1147,8 @@ class LanBuildTests(unittest.TestCase):
         lua.execute('''
             for _,row in ipairs({{UIActivityMammonQueryCallBack,2015}, {UIActivityEatChickenQueryCallBack,2010},
                                  {UIContinue7QueryCallBack1,214}, {UISignIn2StatusCallBack,3641},
-                                 {UILuxurySignInStatusCallBack,3643}, {UIVipStatusCallBack,300}, {UIGrowPlan2CallBack,7091}}) do
+                                 {UILuxurySignInStatusCallBack,3643}, {UIVipStatusCallBack,300},
+                                 {UIMonthCardCallBack,2090}, {UIGrowPlan2CallBack,7091}}) do
                 local remote, opcode, body = row[1]({})
                 assert(remote==1 and opcode==row[2] and body==nil)
             end
@@ -1189,6 +1202,148 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn("desc_muyou:setVisible(false)", scripts["assets/scripts/Layer_activity_newcontinuous.so"])
         self.assertIn('desc1,"连续登录，可获得 元宝和银币', scripts["assets/scripts/Layer_activity_newcontinuous.so"])
         self.assertNotIn("isdouble", scripts["assets/scripts/Layer_activity_peace.so"])
+
+    def test_daily_refresh_uses_read_queries_and_restores_vip_buttons(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("跨日页面刷新验证需本机已有 lupa.lua51")
+        scripts = self.client_scripts()
+        lua = LuaRuntime()
+        lua.execute('''
+            require=function() return {} end
+            cclog=function() end
+            myque={new=function() return {} end}
+            ccp=function(x,y) return {x=x,y=y} end
+            gameConfig={originSize={width=1080,height=1920}, maxRadio_size=1, images={}}
+            gamedata={device={SCREEN_WIDTH=1080,SCREEN_HEIGHT=1920}, config={vip_welfare={['6']={
+                ['10']={battle_lv=10,free='20001,1',pay='20001,1',discount='1001,10'}}},global_kv={}}}
+            requests={}
+            UIRequest=function(t) table.insert(requests,t) end
+            gameWindows={openWindow=function() end}
+            gameTouch={clickprofbytime=function() end}
+            CCUserDefault={sharedUserDefault=function() return {setStringForKey=function() end} end}
+            CCControlEventTouchUpInside=1
+            ui={getIDandNUMs=function() return {{cid=1001,num=1}} end,
+                setLabelString=function() end, removeGray=function(_,node) node.gray=false end,
+                addGray=function(_,node) node.gray=true end}
+            function widgets()
+                return setmetatable({}, {__index=function(items,key)
+                    local node=setmetatable({addHandleOfControlEvent=function(self,f) self.click=f end},
+                        {__index=function() return function() end end})
+                    items[key]=node
+                    return node
+                end})
+            end
+        ''')
+        lua.globals().GameScene = lua.execute(scripts["assets/scripts/GameScene.so"])
+        lua.execute('''
+            GameScene.rootItems={}
+            GameScene.roleinfo={id=10001,level=8}
+            GameScene.vip={vip=6}
+            GameScene.layers.activity={show=true,module={type='5',presentPage=1,
+                realPageTable={{request=300},{request=4611}}}}
+            GameScene.layers.copy_map.module.normaldata={stale=true}
+            GameScene:cacheresetrequest('cachereset')
+            local found={}
+            for _,request in ipairs(requests) do
+                found[request.type]=(found[request.type] or 0)+1
+                assert(request.type~=999900 and request.type~=4611 and request.type~=2038 and request.type~=3626)
+            end
+            assert(GameScene.layers.copy_map.module.normaldata==nil)
+            assert(found[300]==1 and found[1300] and found[3200] and found[2410] and found[2037])
+            assert(not found[3620])
+            requests={}
+            GameScene.layers.activity.module.realPageTable[1].request=4611
+            GameScene:cacheresetrequest('cachereset')
+            for _,request in ipairs(requests) do assert(request.type~=4611) end
+            for _,opcode in ipairs({2090,2010,3641,3630,3680,8075,8026,4890}) do
+                requests={}
+                GameScene.layers.activity.module.realPageTable[1].request=opcode
+                GameScene:cacheresetrequest('cachereset')
+                local count=0
+                for _,request in ipairs(requests) do
+                    if request.type==opcode then assert(request.update); count=count+1 end
+                    assert(request.type~=4611 and request.type~=3620)
+                end
+                assert(count==1)
+            end
+            GameScene.layers.activity.module.realPageTable[1]={id=161,module={pageId=2,tempRequestTable={6911,3650}}}
+            requests={}
+            GameScene:cacheresetrequest('cachereset')
+            assert(requests[#requests].type==3650)
+            GameScene.layers.copy_chapter.show=true
+            for _,kind in ipairs({'normal','star'}) do
+                GameScene.layers.copy_chapter.module.selectpage=kind
+                requests={}
+                GameScene:cacheresetrequest('cachereset')
+                local found=false
+                for _,request in ipairs(requests) do if request.type==1350 then found=true end end
+                assert(found==(kind=='star'))
+            end
+            GameScene.layers.copy_chapter.show=false
+        ''')
+        lua.execute((Path(__file__).parent / "scripts_clean/UICacheReset.lua").read_text())
+        lua.execute('''
+            guide={}
+            requests={}
+            battleScene={show=true}
+            UICacheReset({type=110})
+            assert(#requests==0 and battleScene.cacheresetCallBack)
+            battleScene.show=false
+            GameScene.layers.activity.show=false
+            GameScene.layers.bloodbattle.show=true
+            battleScene.cacheresetCallBack()
+            local found={}
+            for _,request in ipairs(requests) do
+                found[request.type]=true
+                assert(request.type~=999900 and request.type~=4611 and request.type~=2038 and request.type~=3626)
+            end
+            assert(found[3620] and not found[3650])
+        ''')
+        lua.execute(scripts["assets/scripts/GameCopy.so"])
+        lua.execute('''
+            gamedata.cache={copy={stale=true}}
+            local remote,opcode,body=UICopyQueryCallback({update=true})
+            assert(remote==1 and opcode==1300 and body==nil)
+        ''')
+        lua.globals().welfare = lua.execute(scripts.get("assets/scripts/Layer_activity_vipwelfare.so") or
+            (Path(__file__).parent / "scripts_clean/Layer_activity_vipwelfare.lua").read_text())
+        lua.execute('''
+            welfare.show=true
+            welfare.coveritems=widgets()
+            welfare.ListTableView1={reloadData=function() end}
+            welfare.ListTableView2=welfare.ListTableView1
+            welfare:reloaddata({vipstatus={vipexchange_free=1,vipexchange_buy=1}})
+            assert(welfare.coveritems.getButton.gray and welfare.coveritems.buyButton.gray)
+            welfare:reloaddata({vipstatus={vipexchange_free=0,vipexchange_buy=0}})
+            assert(not welfare.coveritems.getButton.gray and not welfare.coveritems.buyButton.gray)
+            requests={}
+            welfare.coveritems.getButton:click()
+            assert(#requests==1 and requests[1].type==4611 and requests[1].isfree==1)
+        ''')
+        lua.globals().activity = lua.execute(scripts["assets/scripts/Layer_activity.so"])
+        lua.execute('''
+            gamedata.config.activity_time={}
+            activity:makepageconfig()
+            for _,id in ipairs({1,5,10,18,19,22,28,57,101,132,149,153,169,170,173}) do
+                assert(activity.activityPageconfig[id].needupdate)
+            end
+            assert(not activity.activityPageconfig[3].needupdate)
+        ''')
+        lua.globals().generalShop = lua.execute(scripts["assets/scripts/Layer_activity_general_shop.so"])
+        lua.execute('''
+            requests={}
+            generalShop.tempActivityTable={}
+            generalShop.tempRequestTable={6911,3650}
+            generalShop.pageId=2
+            generalShop:refreshFunc()
+            assert(#requests==1 and requests[1].type==3650 and requests[1].update)
+            requests={}
+            generalShop.pageId=1
+            generalShop:refreshFunc()
+            assert(#requests==0)
+        ''')
 
     def test_month_fund_unactivated_and_expired_views_do_not_offer_invalid_claims(self):
         try:
