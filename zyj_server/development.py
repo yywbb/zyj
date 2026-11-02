@@ -1,6 +1,6 @@
 """主角魔晶培养/进阶与普通伙伴突破；在事务副本上准备属性和消耗。"""
 
-from . import battle, formation, qiankun
+from . import battle, cheer, formation, qiankun
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 QUERIES = (1023, 1056)
@@ -66,10 +66,10 @@ def migrate_self_stats(save, config):
     return b"".join(updates)
 
 
-def grow_protagonist(raw, row, cid, trained, slot, members, equips, config):
+def grow_protagonist(raw, row, cid, trained, slot, members, equips, config, *, cheer_tiers=()):
     changed = pb_set_varint(pb_set_varint(raw, 1, cid), 4, row["level"])
-    previous, _ = formation.bonuses(raw, slot, members, equips, config)
-    current, relations = formation.bonuses(changed, slot, members, equips, config)
+    previous, _ = formation.bonuses(raw, slot, members, equips, config, cheer_tiers=cheer_tiers)
+    current, relations = formation.bonuses(changed, slot, members, equips, config, cheer_tiers=cheer_tiers)
     changes = {field: current[field] - previous[field] for field in current}
     old, new = config["general"][str(pb_get_varint(raw, 1))], config["general"][str(cid)]
     level = pb_get_varint(raw, 3)
@@ -106,13 +106,13 @@ def prepare(opcode, save, body, config):
                 raise ValueError("主角选项未记录")
             trained = {field: pb_get_varint(snapshot, field - 2) or 0 for field in (6, 7, 8)}
             equips = formation.records(world, 2, 1)
-            members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
+            members = cheer.members(save, config)
             if opcode == 1056:
                 previews = []
                 for target in range(stage + 1, 24):
                     grow = config["protagonist_grow"][str(target)]
                     raw, _, _ = grow_protagonist(raw, grow, grow[f"general{choice}"], trained,
-                                                 slots.get(iid, b""), members, equips, config)
+                                                 slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config))
                     trained = {}
                     previews.append(encode_pb_field(1, 2, raw))
                 return b"".join(previews), costs, update
@@ -135,7 +135,7 @@ def prepare(opcode, save, body, config):
                 current, cid = coats[str(current)]["coat_id"], coats[str(cid)]["coat_id"]
             if pb_get_varint(raw, 1) != current:
                 raise ValueError("主角形态与当前进阶不一致，请重新登录")
-            raw, increase, relations = grow_protagonist(raw, row, cid, trained, slots.get(iid, b""), members, equips, config)
+            raw, increase, relations = grow_protagonist(raw, row, cid, trained, slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config))
             snapshot = pb_set_varint(snapshot, 3, stage + 1)
             for field in (4, 5, 6):
                 snapshot = pb_set_varint(snapshot, field, 0)
@@ -181,9 +181,8 @@ def prepare(opcode, save, body, config):
         target = previous + 1
         # shortcut: 普通+1–10；红/金将转换需觉醒、好感和飞升业务一并实现。
         if (not general["battle"] or general["quality"] not in (3, 4, 5, 6) or not general["init_cid"]
-                or target > 10 or any(pb_get_varint(raw, n) for n in range(21, 41))
-                or iid in formation.records(world, 5, 2)):
-            raise ValueError("尚不支持此伙伴的高级/助阵突破")
+                or target > 10 or any(pb_get_varint(raw, n) for n in range(21, 41))):
+            raise ValueError("尚不支持此伙伴的高级突破")
         row = config["general_awake"][str(target)]
         if opcode == 1017:
             if level < row["level"]:
@@ -194,10 +193,10 @@ def prepare(opcode, save, body, config):
                 fragment = next(r["id"] for r in config["general_fragment"].values() if r["general"] == general["init_cid"])
                 costs.append((fragment, row[f"{quality}piece"]))
         changed = pb_set_varint(raw, 4, target)
-        members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
+        members = cheer.members(save, config)
         equips = formation.records(world, 2, 1)
-        old, _ = formation.bonuses(raw, slots.get(iid, b""), members, equips, config)
-        new, _ = formation.bonuses(changed, slots.get(iid, b""), members, equips, config)
+        old, _ = formation.bonuses(raw, slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config))
+        new, _ = formation.bonuses(changed, slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config))
         changes = {battle.GENERAL_FIELDS[name]: int(battle.general_base(general, name, level, target, config))
                    - int(battle.general_base(general, name, level, previous, config)) for name in ("atk", "def", "hp", "speed")}
         old_self = battle.self_stats(general, level, previous, config)

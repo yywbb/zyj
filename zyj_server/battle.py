@@ -391,12 +391,19 @@ def targets(actor, enemies, skill, rng):
     raise ValueError(f"战斗 v2 尚不支持技能范围 {scope}")
 
 
-def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None, max_rounds=None):
+def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None, attack_cheer=(), defense_cheer=(), max_rounds=None):
     """不改变输入；同一输入/配置/seed 生成完全相同的行动及终局。"""
     max_rounds = MAX_ROUNDS if max_rounds is None else max_rounds
     if type(max_rounds) is not int or not 1 <= max_rounds <= MAX_ROUNDS:
         raise ValueError("战斗回合上限无效")
     teams = {True: copy.deepcopy(attack), False: copy.deepcopy(defense)}
+    cheers = {True: list(attack_cheer), False: list(defense_cheer)}
+    cheer_ids = {}
+    for direct, cids in cheers.items():
+        if (len(cids) > 8 or any(type(cid) is not int or not config["general"].get(str(cid), {}).get("battle") for cid in cids)
+                or len(set(cids)) != len(cids)):
+            raise ValueError("战斗助阵成员无效")
+        cheer_ids[direct] = {config["general"][str(cid)]["init_cid"] or cid for cid in cids}
     _prepare_teams(teams, config)
     rng = random.Random(seed)
     report = {"t": "b", "meta": {}, "b": {"init": {}, "a": []}, "endmeta": {},
@@ -415,7 +422,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                                       "h": unit["hp"], "j": unit["hp"], "ap": unit["ap"], "d": {"i": unit["skill"]},
                                       **({key: unit[key] for key in ("cover_d", "cover_d2", "cover_p", "cover_l")} if unit["cover_d"] else {})}
         report["meta"][side] = {"n": "本地玩家" if direct else next(iter(team.values())).get("name", "守关队伍"),
-                                "g": meta, "pet": {}, "cheer": []}
+                                "g": meta, "pet": {}, "cheer": cheers[direct]}
         report["b"]["init"][side] = initial
         pet = combat_pets[direct]
         if pet is not None:
@@ -613,6 +620,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             partner = next((u for u in living(friends) if (config["general"][str(u["cid"])]["init_cid"] or u["cid"]) == cid
                             and not u["dizzy"] and u["states"].get("skilllock", 0) <= round_number), None)
             if partner is None:
+                if (cid in cheer_ids[actor["direct"]]
+                        and not any((config["general"][str(u["cid"])]["init_cid"] or u["cid"]) == cid for u in friends.values())):
+                    continue
                 return None
             participants.append(partner["pos"])
         candidates = living(friends if skill["kind"] == "gain" else enemies)
@@ -775,7 +785,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             combination = choose_combo(actor, friends, enemies)
             if combination:
                 skill, participants = combination
-        combined = len(participants) > 1 or skill is not None and skill["id"] == 12618
+        combined = skill is not None and skill is config["combskill"].get(str(skill["id"]))
         if skill and skill["kind"] == "gain":
             selected = sorted((u for u in friends.values() if u["hp"] > 0), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
             if skill["range"] in ("first", "second"):

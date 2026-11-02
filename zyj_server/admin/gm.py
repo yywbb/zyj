@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 
-from .. import formation, player, qiankun, recruit, storage, training
+from .. import cheer, formation, player, qiankun, recruit, storage, training
 from ..protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 from ..session import Session
 from . import views
@@ -139,8 +139,8 @@ def _manage(save, action, data, config, step_counts, now):
             raise ValueError(f"目标等级须高于当前等级，且不超过 {maximum}")
         needed = sum(config["general_exp"][str(lv)][f'{row["quality"]}exp'] for lv in range(level, data["level"]))
         gained = max(0, needed - (pb_get_varint(raw, 5) or 0))
-        members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
-        raw, increase, _ = training.grow_general(raw, gained, slots.get(iid, b""), members, equips, config, data["level"])
+        members = cheer.members(save, config)
+        raw, increase, _ = training.grow_general(raw, gained, slots.get(iid, b""), members, equips, config, data["level"], cheer_tiers=cheer.tiers(save, config))
         player.apply_reward(save, encode_pb_field(8, 2, raw), config, now)
         if save.get("protagonist_snapshot"):
             player.record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))

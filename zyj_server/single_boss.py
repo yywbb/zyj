@@ -7,7 +7,7 @@ from fractions import Fraction
 import json
 import random
 
-from . import activities, battle, development, formation, pets, recharge
+from . import activities, battle, cheer, development, formation, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_varint
 
 QUERIES = (3700, 3702)
@@ -223,7 +223,7 @@ def prepare(opcode, save, body, config, now, seed):
     rng, gets, won = random.Random(seed), Counter(), 0
     for attempt in range(1, count + 1):
         battle_seed = rng.getrandbits(64)
-        report = battle.simulate(attack, defense, combat_config, battle_seed, attack_pet=pet)
+        report = battle.simulate(attack, defense, combat_config, battle_seed, attack_pet=pet, attack_cheer=cheer.combat(save, config))
         report["meta"]["attack"]["n"] = save["role_name"]
         if report["result"]:
             gets.update(prizes(save, row, row["level"] > state["cleared"][str(kind)], config, state["day"], rng))

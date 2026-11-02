@@ -3,7 +3,7 @@
 import json
 import random
 
-from . import activities, battle, pets, recharge
+from . import activities, battle, cheer, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -122,7 +122,7 @@ def prepare(opcode, save, body, config, now, seed):
         protagonist = pb_get_varint(bytes.fromhex(save["protagonist_snapshot"]), 1)
         position = next(pos for pos in reversed(battle.POSITIONS) if attack[pos]["iid"] != protagonist)
     attack[position] = helper(save, option, config)
-    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config))
+    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
     report["meta"]["attack"]["n"] = save["role_name"]
     report["meta"]["defense"]["n"] = config["expedition_map"][str(mid)]["name"]
     reward = drops(save, mid, 1, config, seed) if report["result"] else b""

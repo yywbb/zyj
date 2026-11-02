@@ -3,7 +3,7 @@
 import json
 import random
 
-from . import activities, battle, formation, pets, recharge
+from . import activities, battle, cheer, formation, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -92,7 +92,7 @@ def fight(save, body, config, now, seed):
             or state["wins"].get(key, 0) >= point["challenge"]):
         raise ValueError("名将副本今日可战胜次数已用完")
     attack, defense = battle.rosters(save, point, config)
-    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config))
+    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
     report["meta"]["attack"]["n"] = save["role_name"]
     report["meta"]["defense"]["n"] = point["name"]
     rewards, rng = [], random.Random(seed ^ 0xD09)

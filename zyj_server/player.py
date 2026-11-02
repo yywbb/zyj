@@ -10,7 +10,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -47,7 +47,7 @@ def load_role_config(config_path):
     with zipfile.ZipFile(config_path) as archive:
         sign_tables = tuple(n[2:-5] for n in archive.namelist() if n.startswith("5/sign2_") and n.endswith(".json"))
     return configuration.load_tables(config_path,
-                            ("role_exp", "copy", "star_copy", "star_map", "expedition2", "expedition_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
+                             ("role_exp", "cheer", "copy", "star_copy", "star_map", "expedition2", "expedition_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
                              "begin7day", "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
@@ -877,12 +877,14 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         ids = parse_ids_pb(body)
         if len(ids) >= 6:
             get_role_state(save, role_config).update(power=ids[1], g_power=ids[3], power_all=ids[5])
-    elif opcode in (1003, 1005, 1009, 1007, 1130, 1024, 1027, 1057):
+    elif opcode in (1003, 1004, 1005, 1009, 1007, 1130, 1024, 1027, 1057):
+        if opcode == 1004 and body:
+            raise ValueError("助阵不使用历史录制结果，请单独操作")
         if opcode == 1130:
             body, costs = formation.strengthen_stones(save, request_body, role_config)
             for cid, count in costs:
                 change_item_count(save, cid, -count, role_config, now)
-        if opcode in (1003, 1005, 1007, 1009) and not body:
+        if opcode in (1003, 1004, 1005, 1007, 1009) and not body:
             body = formation.change(save, opcode, request_body, role_config)
         record_slot_update(save, body)
         old_protagonist = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
@@ -904,7 +906,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 save["protagonist_snapshot"] = (pb_set_field(value, 10, 2, general) if general else value).hex()
                 if general:
                     get_role_state(save, role_config)["profile"] = pb_get_varint(general, 1)
-        if opcode in (1003, 1005, 1007, 1009, 1130) and save.get("protagonist_snapshot"):
+        if opcode in (1003, 1004, 1005, 1007, 1009, 1130) and save.get("protagonist_snapshot"):
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode == 1306:
         values = {n: v for n, w, v in iter_pb_fields(body)}
@@ -1070,6 +1072,10 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
+    cheer_update, cheer_power = cheer.growth(save, before, role_config) if not responses or responses[0]["opcode"] != 1004 else (b"", 0)
+    if cheer_update:
+        apply_sigil_update(save, cheer_update, cheer_power, role_config)
+        packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     if responses and responses[0]["opcode"] == 116:
         gift_id = save["recharge_state"]["bagid"]
         if gift_id in timebag.GIFTS and save.get(timebag.GIFTS[gift_id][0]) != before.get(timebag.GIFTS[gift_id][0]):
@@ -1093,10 +1099,10 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
-    local_update = (responses and responses[0]["opcode"] in (1003, 1005, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
+    local_update = (responses and responses[0]["opcode"] in (1003, 1004, 1005, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
                                                          *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, 1140, 1141) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
-    if local_update or break_comb or pet_update or self_update or sigil_update:
+    if local_update or break_comb or pet_update or self_update or sigil_update or cheer_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
         if any(state[key] != previous[key] for key in ("power", "g_power", "power_all")):
             power = b"".join(encode_pb_field(1, 0, value & ((1 << 64) - 1)) for value in
@@ -1148,7 +1154,7 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
     for unit in attack.values():
         unit["atk"] = unit["atk"] * (100 + guild_war.effect(save, role_config, 4)) // 100
     seed = random.getrandbits(64)
-    report = None if opcode == 1307 else battle.simulate(attack, defense, role_config, seed, attack_pet=pets.combat(save, role_config))
+    report = None if opcode == 1307 else battle.simulate(attack, defense, role_config, seed, attack_pet=pets.combat(save, role_config), attack_cheer=cheer.combat(save, role_config))
     if report is not None:
         report["meta"]["attack"]["n"] = save.get("role_name") or "主角"
         report["meta"]["defense"]["n"] = point["name"]
@@ -1176,12 +1182,12 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
         records = formation.records(world, 1, 2)
         slots = formation.records(world, 4, 2)
         equips = formation.records(world, 2, 1)
-        members = {role_config["general"][str(unit["cid"])]["init_cid"] for unit in attack.values()}
+        members = cheer.members(save, role_config)
         maximum = min(state["level"] * int(role_config["global_kv"]["general_level"]["value"]),
                       max(map(int, role_config["general_exp"])))
         for _, unit in sorted(attack.items()):
             raw, increase, up = training.grow_general(records[unit["iid"]], point["xp"] * attempts, slots[unit["iid"]],
-                                                     members, equips, role_config, maximum)
+                                                     members, equips, role_config, maximum, cheer_tiers=cheer.tiers(save, role_config))
             record_slot_update(save, encode_pb_field(1, 2, raw))
             record_protagonist_general(save, raw)
             generals.append(encode_pb_field(6, 2, raw))

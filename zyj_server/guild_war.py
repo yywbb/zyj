@@ -93,7 +93,7 @@ def team_roster(team, config, counts):
 
 
 def duel(war, city, attacker, defender, state, saves, config):
-    from . import arena, battle
+    from . import arena, battle, cheer
     from .guild_boss import battle_result
 
     groups = {}
@@ -126,7 +126,9 @@ def duel(war, city, attacker, defender, state, saves, config):
             unit["atk"] = int(unit["atk"] * (1 + Fraction(str(castle["att"]))))
             unit["def"] += castle["def"] // len(defense)
         seed = secrets.randbits(64)
-        report = battle.simulate(attack, defense, config, seed, attack_pet=pet_a, defense_pet=pet_b)
+        report = battle.simulate(attack, defense, config, seed, attack_pet=pet_a, defense_pet=pet_b,
+                                 attack_cheer=cheer.combat(ta["snapshot"], config),
+                                 defense_cheer=() if "npc" in td else cheer.combat(td["snapshot"], config))
         report["meta"]["attack"]["n"] = ta["snapshot"]["role_name"]
         report["meta"]["defense"]["n"] = name
         fight["reports"].append({"a": a, "b": b, "name_a": ta["snapshot"]["role_name"], "name_b": name,

@@ -4,7 +4,7 @@ from fractions import Fraction
 import json
 import random
 
-from . import activities, battle, magic, pets, recharge
+from . import activities, battle, cheer, magic, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields
 
 
@@ -132,7 +132,7 @@ def prepare(opcode, save, body, config, now, seed):
     if row["used"] >= config["vip"]["0"][limit]:
         raise ValueError("活动副本今日挑战次数已用完")
     attack, defense, combat_config = rosters(save, aid, difficulty, config)
-    report = battle.simulate(attack, defense, combat_config, seed, attack_pet=pets.combat(save, config),
+    report = battle.simulate(attack, defense, combat_config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config),
                              max_rounds=point["battle_times"] if aid in BOSSES else battle.MAX_ROUNDS)
     report["meta"]["attack"]["n"] = save["role_name"]
     report["meta"]["defense"]["n"] = point["name"]

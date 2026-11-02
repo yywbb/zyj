@@ -124,7 +124,7 @@ class GeneralFosterTests(unittest.TestCase):
         for values in ([self.iid, 0, 10, 0, 0, 0], [self.iid, 1, 0, 0, 0, 0], [self.iid, 1, 201, 0, 0, 0], [self.iid, 1, 10, 2, 0, 0]):
             self.assert_rejected(1126, recharge.ids(values))
         baseline = copy.deepcopy(self.session.save)
-        for problem in ("level", "role", "owner", "protagonist", "one", "cheer", "advanced", "illusion", "pills", "gold", "potential"):
+        for problem in ("level", "role", "owner", "protagonist", "one", "advanced", "illusion", "pills", "gold", "potential"):
             self.session.save = copy.deepcopy(baseline)
             iid, raw = self.iid, self.generals()[self.iid]
             if problem == "level": self.session.save["role_state"]["level"] = 29
@@ -132,7 +132,6 @@ class GeneralFosterTests(unittest.TestCase):
             elif problem == "owner": iid += 1
             elif problem == "protagonist": iid = protocol.pb_get_varint(bytes.fromhex(self.session.save["protagonist_snapshot"]), 1)
             elif problem == "one": self.set_raw(protocol.pb_set_varint(raw, 3, 1))
-            elif problem == "cheer": player.record_slot_update(self.session.save, protocol.encode_pb_field(5, 2, protocol.encode_pb_field(1, 0, 1)+protocol.encode_pb_field(2, 0, iid)))
             elif problem == "advanced": self.set_raw(protocol.pb_set_varint(raw, 21, 1))
             elif problem == "illusion": self.set_raw(raw+protocol.encode_pb_field(41, 2, recharge.ids([1])))
             elif problem == "pills": player.change_item_count(self.session.save, 20009, -self.props(20009), self.config, test_penglai.NOW)

@@ -3,7 +3,7 @@
 import json
 import random
 
-from . import battle, formation, pets, recharge, recruit
+from . import battle, cheer, formation, pets, recharge, recruit
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -132,7 +132,7 @@ def prepare(opcode, save, body, config, seed):
 
 
 def fight(save, cid, index, attack, defense, point, config, seed):
-    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config))
+    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
     report["meta"]["attack"]["n"] = save["role_name"]
     report["meta"]["defense"]["n"] = ("本地守卫甲", "本地守卫乙", "本地守卫丙")[index]
     gets = []
