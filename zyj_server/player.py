@@ -65,6 +65,7 @@ def load_role_config(config_path):
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
+                             "gang2_shop", "gang2_bait", "gang2_fishpond", "gang2_fishpondexp",
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
                              "favorable", "favorable_level", "favorable_task", "shake_param",
                              "penglai3_map", "penglai3_type", "penglai3_dice", "penglai3_card", "penglai3_monster",

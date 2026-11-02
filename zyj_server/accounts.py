@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, guild, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, guild, guild_chat, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -55,6 +55,7 @@ class AccountStore:
         self.step_counts = step_counts
         self.role_config = role_config
         self.active = {}
+        self.guild_disconnects = {}
         self.lock = threading.RLock()
         # shortcut: 限流仅在本进程内保留；支持多进程部署时再共享计数。
         self.failed_logins = {}
@@ -121,17 +122,39 @@ class AccountStore:
                 raise ValueError(f"账号 {account} 已在线，请先退出原设备")
             self.active[account] = {"address": str(address[0]), "connected_at": time.time()}
         try:
-            return Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
+            session = Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
                            lambda body, opcode=3500, save=None: self.rank_query(account, body, opcode, save),
                            lambda previous=None: self.observe_rankings({account: previous} if previous else None),
                            lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body))
+            with self.lock:
+                self.active[account]["identity"] = session.save["created_at"]
+            return session
         except Exception as error:
             self.close_session(account)
             raise ValueError(f"载入玩家状态失败: {error}") from error
 
     def close_session(self, account):
         with self.lock:
-            self.active.pop(account, None)
+            connection = self.active.pop(account, None)
+            if connection and "identity" in connection:
+                self.guild_disconnects[account] = (connection["identity"], int(time.time()))
+            path = self.save_path.with_name("guilds.json")
+            if not connection or "identity" not in connection or not path.exists():
+                return
+            try:
+                state = guild.load(path, {})
+                _, row = guild.membership(state, account)
+                member = row["members"][str(account)] if row else None
+                if member and member["identity"] == connection["identity"]:
+                    now = max(int(time.time()), state["checked_at"], member.get("seen_at", 0))
+                    member["seen_at"] = now
+                    if "pending_action" in row:
+                        row["pending_action"]["after"]["members"][str(account)]["seen_at"] = now
+                    state["checked_at"] = now
+                    guild.write(path, state)
+            except (OSError, ValueError) as error:
+                # 断线必须释放登录占用；损坏公会库仍由后续请求拒绝，不能空库覆盖。
+                print(f"[!] 公会离线时间未保存: {error}", flush=True)
 
     def guild_request(self, account, session, opcode, seq, body):
         with self.lock:
@@ -152,9 +175,39 @@ class AccountStore:
                 guild.validate_role(session.save)
                 saves[account] = session.save
             now = max(int(time.time()), state["checked_at"])
-            if opcode in guild.DAILY_OPCODES:
+            for row in state["guilds"].values():
+                for key, member in row["members"].items():
+                    identity, seen = self.guild_disconnects.get(int(key), (None, 0))
+                    if identity == member["identity"] and seen > member.get("seen_at", 0):
+                        member["seen_at"] = seen
+            if opcode in guild_chat.OPCODES:
+                gid, _ = guild.membership(state, account)
+                cached = getattr(session, "guild_chat_reply", None)
+                if opcode == 3011 and cached and cached[0] == (seq, body):
+                    if cached[2] != gid:
+                        raise ValueError("公会身份已变化，请刷新聊天")
+                    return list(cached[1])
+                reply, cursor = guild_chat.prepare(opcode, body, state, saves, account, self.role_config, now,
+                                                  getattr(session, "guild_chat_cursor", None))
+                if state != before:
+                    state["checked_at"] = now
+                    guild.write(path, state)
+                packets = [protocol.pack_frame(opcode, seq, reply)]
+                session.guild_chat_cursor = cursor
+                if opcode == 3011:
+                    session.guild_chat_reply = ((seq, body), tuple(packets), gid)
+                return packets
+            cached = session.random_replies.get(opcode) if opcode in guild.MUTATIONS else None
+            if cached and cached[0] == (seq, body):
+                if (session.save == cached[2] and state == cached[3]
+                        and (now + 28800) // 86400 == cached[4]):
+                    return list(cached[1])
+                raise ValueError("公会状态已变化，请刷新后重新操作")
+            if opcode in (*guild.DAILY_OPCODES, *guild.FEATURE_OPCODES):
                 working = copy.deepcopy(session.save)
-                reply, costs, reward = guild.prepare_daily(opcode, body, state, working, account, self.role_config, now)
+                settled = copy.deepcopy(state)
+                prepare = guild.prepare_feature if opcode in guild.FEATURE_OPCODES else guild.prepare_daily
+                reply, costs, reward = prepare(opcode, body, state, working, account, self.role_config, now)
                 online_rewards.settle(working, self.role_config, session.connected_at, now)
                 welfare.settle(working, now)
                 player.settle_stamina(working, self.role_config, now)
@@ -163,12 +216,20 @@ class AccountStore:
                 if reward:
                     player.apply_reward(working, reward, self.role_config, now)
                 packets = [protocol.pack_frame(opcode, seq, reply)]
-                if opcode != 2250:
+                if opcode in guild.MUTATIONS:
                     packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
+                    for mid in (1200, 1012, 1107, 1027):
+                        key = "1002" if mid == 1027 else str(mid)
+                        if working["world_state"][key] != session.save["world_state"][key]:
+                            packets.append(protocol.pack_frame(mid, 0, bytes.fromhex(working["world_state"][key])))
                 if opcode == 2251:
                     activities.record_liveness(working, 23, 1, self.role_config, now)
                     state["checked_at"] = now
                     # 先存上香草稿，角色扣费/贡献/次数/收据同存档；恢复后仅补一次公会经验。
+                    guild.write(path, state)
+                elif state != settled:
+                    guild.stage_action(state, settled, account, working)
+                    state["checked_at"] = now
                     guild.write(path, state)
                 packets = player.save_response_group(packets, working, session.save, session.save_path,
                                                      self.step_counts, self.role_config, now)
@@ -178,6 +239,9 @@ class AccountStore:
                 if state != before:
                     state["checked_at"] = now
                     guild.write(path, state)
+                if opcode in guild.MUTATIONS:
+                    session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state),
+                                                     (now + 28800) // 86400)
                 return packets
             reply, cost = guild.prepare(opcode, body, state, saves, account, self.role_config, now, self.active)
             packets = [protocol.pack_frame(opcode, seq, reply)]

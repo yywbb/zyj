@@ -1,16 +1,19 @@
 """本地基础公会；共享成员状态独立落盘，创建扣款以角色收据确认。"""
 
+import copy
 import json
 import math
 import re
 import secrets
 
-from . import activities, storage
+from . import activities, guild_chat, storage
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
 DAILY_OPCODES = (2250, 2251, 2260)
-OPCODES = (*range(2230, 2244), *DAILY_OPCODES, 2265, 2266, 2267)
+FEATURE_OPCODES = (2252, 2253, 2256, 2257, 2258, 2259)
+MUTATIONS = (2251, 2253, 2257, 2258, 2259, 2260)
+OPCODES = (*range(2230, 2244), *DAILY_OPCODES, *FEATURE_OPCODES, 2254, 2255, 2261, 2265, 2266, 2267)
 
 
 def ids(values):
@@ -23,7 +26,7 @@ def params(values):
 
 
 def message(mid, data):
-    return encode_pb_field(1, 2, encode_pb_field(1, 0, mid) + encode_pb_field(2, 2, data))
+    return encode_pb_field(1, 2, encode_pb_field(1, 0, mid & ((1 << 64) - 1)) + encode_pb_field(2, 2, data))
 
 
 def request_ids(body, count):
@@ -56,7 +59,7 @@ def request_text(body, maximum, minimum=0):
 
 def load(path, saves):
     if not path.exists():
-        if any(s.get("guild_creations") or daily_state(s)["receipt"] for s in saves.values()):
+        if any(s.get("guild_creations") or daily_state(s)["receipt"] or s.get("guild_action_receipt") for s in saves.values()):
             raise ValueError("公会存档缺失，请恢复 guilds.json，不能重新创建空公会库")
         return {"version": 1, "next_id": 1, "checked_at": 0, "guilds": {}, "cooldowns": {}}
     try:
@@ -74,6 +77,9 @@ def validate_role(save):
         role = save["role_state"]
         receipts = save.get("guild_creations", [])
         daily_state(save)
+        receipt = save.get("guild_action_receipt", "")
+        if not isinstance(receipt, str) or receipt and not re.fullmatch(r"[a-f0-9]{32}", receipt):
+            raise ValueError
         if (type(identity) not in (float, int) or not math.isfinite(identity) or identity <= 0
                 or not isinstance(save["role_name"], str) or not isinstance(role, dict)
                 or not isinstance(receipts, list)
@@ -120,6 +126,20 @@ def validate(state):
         integer(row["auto"], 0, 1)
         integer(row["min_level"], 1, 120)
         integer(row.get("experience", 0), high=(1 << 63) - 1)
+        fishpond_state(row)
+        guild_chat.validate(row)
+        events = row.get("events", [])
+        integer(row.get("next_event", 1), 1)
+        if not isinstance(events, list) or len(events) > 200:
+            raise ValueError("公会动态无效")
+        previous = 0
+        for event in events:
+            integer(event["id"], previous + 1, row.get("next_event", 1) - 1)
+            previous = event["id"]
+            integer(event["at"])
+            integer(event["opt"], 1, 12)
+            if any(not valid_text(event[k], 512) for k in ("name", "other", "content", "status", "param")):
+                raise ValueError("公会动态内容无效")
         if not row["members"] or not isinstance(row["applications"], dict):
             raise ValueError("公会成员无效")
         posts = []
@@ -127,6 +147,7 @@ def validate(state):
             identity(account, member)
             integer(member["joined_at"])
             integer(member["post"], 0, 2)
+            integer(member.get("seen_at", 0))
             if account in members:
                 raise ValueError("角色重复加入公会")
             members.add(account)
@@ -150,9 +171,29 @@ def validate(state):
                     or not re.fullmatch(r"[a-f0-9]{32}", pending["token"])
                     or row.get("experience", 0) + pending["exp"] >= (1 << 63)):
                 raise ValueError("公会上香收据无效")
+            event = pending.get("event")
+            if event is not None and (not isinstance(event, list) or len(event) != 5
+                    or type(event[0]) is not int or not 0 <= event[0] < (1 << 31) or type(event[1]) is not int or event[1] != 3
+                    or not valid_text(event[2], 64, 1) or event[3] not in ("1", "2", "3") or event[4] != str(pending["exp"])):
+                raise ValueError("公会上香动态无效")
     for account, cooldown in state["cooldowns"].items():
         identity(account, cooldown)
         integer(cooldown["left_at"])
+    pending = [(key, row["pending_action"]) for key, row in state["guilds"].items() if "pending_action" in row]
+    if len(pending) > 1:
+        raise ValueError("公会存在未完成的事务")
+    for key, action in pending:
+        identity(action["account"], action)
+        after = action["after"]
+        member = state["guilds"][key]["members"].get(action["account"])
+        if (not member or member["identity"] != action["identity"]
+                or not isinstance(action["token"], str) or not re.fullmatch(r"[a-f0-9]{32}", action["token"])
+                or not isinstance(after, dict) or any(k in after for k in ("pending", "pending_pray", "pending_action"))
+                or after.get("members") != state["guilds"][key]["members"]):
+            raise ValueError("公会事务收据无效")
+        candidate = copy.deepcopy(state)
+        candidate["guilds"][key] = after
+        validate(candidate)
 
 
 def write(path, state):
@@ -163,6 +204,11 @@ def write(path, state):
 def recover(state, saves):
     """只认已随扣款落盘的创建收据；未扣款的草稿不可见。"""
     for gid, row in list(state["guilds"].items()):
+        action = row.pop("pending_action", None)
+        if action:
+            saved = saves.get(int(action["account"]), {})
+            if saved.get("created_at") == action["identity"] and saved.get("guild_action_receipt") == action["token"]:
+                row = state["guilds"][gid] = action["after"]
         pending = row.get("pending")
         if pending:
             saved = saves.get(int(pending["account"]), {})
@@ -175,6 +221,8 @@ def recover(state, saves):
             saved = saves.get(int(pending["account"]), {})
             if saved.get("created_at") == pending["identity"] and daily_state(saved)["receipt"] == pending["token"]:
                 row["experience"] = row.get("experience", 0) + pending["exp"]
+                if "event" in pending:
+                    log(row, *pending["event"])
         for group in (row["members"], row["applications"]):
             for account, entry in list(group.items()):
                 if saves.get(int(account), {}).get("created_at") != entry["identity"]:
@@ -223,6 +271,26 @@ def progress(row, config):
     return level, min(exp, config["gang2_level"][str(level)]["gang_exp"])
 
 
+def log(row, now, opt, name, other="", content="", status="", param=""):
+    index = row.get("next_event", 1)
+    row.setdefault("events", []).append({"id": index, "at": now, "opt": opt, "name": str(name),
+                                        "other": str(other), "content": str(content), "status": str(status), "param": str(param)})
+    row["events"] = row["events"][-200:]
+    row["next_event"] = index + 1
+
+
+def stage_action(state, before, account, save):
+    """共享变化先作草稿；只有随个人扣款/奖励保存的收据才能发布。"""
+    gid, row = membership(state, account)
+    if row == before["guilds"][gid]:
+        return
+    token = secrets.token_hex(16)
+    save["guild_action_receipt"] = token
+    pending = copy.deepcopy(before["guilds"][gid])
+    pending["pending_action"] = {"account": str(account), "identity": save["created_at"], "token": token, "after": row}
+    state["guilds"][gid] = pending
+
+
 def daily_state(save, now=None):
     state = save.get("guild_daily_state", {"day": 0, "pray": 0, "claimed": False, "contribution": 0, "receipt": ""})
     if (not isinstance(state, dict)
@@ -232,9 +300,34 @@ def daily_state(save, now=None):
             or state["receipt"] and not re.fullmatch(r"[a-f0-9]{32}", state["receipt"])):
         raise ValueError("公会日常存档无效")
     state = dict(state)
+    state.setdefault("total_contribution", state["contribution"])
+    state.setdefault("soap_used", 0)
+    state.setdefault("soap_contribution", 0)
+    state.setdefault("fish_claimed", [])
+    state.setdefault("shop", {})
+    if (any(type(state[k]) is not int or not 0 <= state[k] < (1 << 31)
+            for k in ("total_contribution", "soap_used", "soap_contribution"))
+            or state["total_contribution"] < state["contribution"]
+            or not isinstance(state["fish_claimed"], list)
+            or any(type(n) is not int or n not in range(1, 5) for n in state["fish_claimed"])
+            or len(set(state["fish_claimed"])) != len(state["fish_claimed"])
+            or not isinstance(state["shop"], dict)
+            or any(not isinstance(k, str) or not k.isdecimal() or str(int(k)) != k or int(k) < 1
+                   or type(v) is not int or not 0 <= v < (1 << 31) for k, v in state["shop"].items())):
+        raise ValueError("公会贡献或玩法存档无效")
+    state["fish_claimed"] = list(state["fish_claimed"])
+    state["shop"] = dict(state["shop"])
     if now is not None and (now + 28800) // 86400 > state["day"]:
-        state.update(day=(now + 28800) // 86400, pray=0, claimed=False)
+        state.update(day=(now + 28800) // 86400, pray=0, claimed=False, soap_used=0, soap_contribution=0, fish_claimed=[], shop={})
     return state
+
+
+def change_contribution(daily, delta):
+    total = daily["total_contribution"] + max(0, delta)
+    if not 0 <= daily["contribution"] + delta < (1 << 31) or total >= (1 << 31):
+        raise ValueError("公会贡献不足或超出范围")
+    daily["contribution"] += delta
+    daily["total_contribution"] = total
 
 
 def prepare_daily(opcode, body, state, save, viewer, config, now):
@@ -257,8 +350,10 @@ def prepare_daily(opcode, body, state, save, viewer, config, now):
                 or type(exp) is not int or not 0 < exp < (1 << 31)
                 or daily["contribution"] + contribution >= (1 << 31)):
             raise ValueError("上香配置或贡献数量无效")
-        daily.update(pray=method, contribution=daily["contribution"] + contribution, receipt=secrets.token_hex(16))
-        row["pending_pray"] = {"account": str(viewer), "identity": save["created_at"], "token": daily["receipt"], "exp": exp}
+        change_contribution(daily, contribution)
+        daily.update(pray=method, receipt=secrets.token_hex(16))
+        row["pending_pray"] = {"account": str(viewer), "identity": save["created_at"], "token": daily["receipt"], "exp": exp,
+                               "event": [now, 3, save["role_name"], str(method), str(exp)]}
         return ids([contribution, exp, 0]), [(cid, cost)], b""
     request_ids(body, 0)
     if opcode == 2250:
@@ -269,6 +364,114 @@ def prepare_daily(opcode, body, state, save, viewer, config, now):
     reward = activities.build_reward(save, config["gang2_level"][str(level)]["param"], config)
     daily["claimed"] = True
     return reward, [], reward
+
+
+def fishpond_state(row, now=None):
+    state = row.get("fishpond", {"day": 0, "experience": 0, "progress": 0})
+    if (not isinstance(state, dict) or any(type(state.get(k)) is not int or not 0 <= state[k] < (1 << 31)
+                                         for k in ("day", "experience", "progress"))):
+        raise ValueError("公会仙池存档无效")
+    state = dict(state)
+    if now is not None and (now + 28800) // 86400 > state["day"]:
+        state.update(day=(now + 28800) // 86400, progress=0)
+    return state
+
+
+def pond_status(row, daily, config, now):
+    level, _ = progress(row, config)
+    setting = config["gang2_fishpond"][str(config["gang2_level"][str(level)]["fishpondid"])]
+    pond = fishpond_state(row, now)
+    exp, fish_level = pond["experience"], 1
+    while fish_level < setting["level"]:
+        required = config["gang2_fishpondexp"][str(fish_level)]["exp" + str(setting["quality"])]
+        if exp < required:
+            break
+        exp -= required
+        fish_level += 1
+    exp = min(exp, config["gang2_fishpondexp"][str(fish_level)]["exp" + str(setting["quality"])])
+    boxes = [2 if n in daily["fish_claimed"] else int(pond["progress"] >= setting[f"milestone_award{n}"]) for n in range(1, 5)]
+    return [setting["quality"], exp, fish_level, pond["progress"], *boxes, daily["soap_used"]]
+
+
+def prepare_feature(opcode, body, state, save, viewer, config, now):
+    _, row = membership(state, viewer)
+    if row is None or not save.get("has_role") or save["role_state"]["level"] < config["build"]["28"]["level"]:
+        raise ValueError("请先加入已解锁的公会")
+    daily = daily_state(save, now)
+    save["guild_daily_state"] = daily
+    if opcode == 2259:
+        name = request_text(body, 12, 1)
+        if row["members"][str(viewer)]["post"] != 1:
+            raise ValueError("只有会长可以修改公会名")
+        if any(g["name"].casefold() == name.casefold() for g in state["guilds"].values()):
+            raise ValueError("公会名未改变或与其他公会重复")
+        row["name"] = name
+        return ids([0]), [(1001, 300)], b""
+    if opcode == 2252:
+        request_ids(body, 0)
+        return ids([daily["shop"].get(str(i), 0) for i in range(1, max(map(int, config["gang2_shop"])) + 1)]), [], b""
+    if opcode == 2253:
+        index, count = request_ids(body, 2)
+        item = config["gang2_shop"].get(str(index))
+        if (not item or not 1 <= count <= 100 or item["alone_cycle"] != 0
+                or progress(row, config)[0] < item["gang_level"]
+                or daily["shop"].get(str(index), 0) + count > item["number"]):
+            raise ValueError("公会商品、等级、数量或今日限购无效")
+        cid, cost = map(int, item["consume"].rstrip(";").split(","))
+        if cid != 1006 or cost <= 0:
+            raise ValueError("公会商店价格配置无效")
+        reward = activities.build_reward(save, item["award"], config, count)
+        change_contribution(daily, -cost * count)
+        daily["shop"][str(index)] = daily["shop"].get(str(index), 0) + count
+        return reward, [], reward
+    if opcode == 2256:
+        request_ids(body, 0)
+        row["fishpond"] = fishpond_state(row, now)
+        return ids(pond_status(row, daily, config, now)), [], b""
+    if opcode == 2258:
+        box, = request_ids(body, 1)
+        if box not in range(1, 5) or pond_status(row, daily, config, now)[box + 3] != 1:
+            raise ValueError("仙池宝箱未达进度或今日已领取")
+        level, _ = progress(row, config)
+        setting = config["gang2_fishpond"][str(config["gang2_level"][str(level)]["fishpondid"])]
+        reward = activities.build_reward(save, setting[f"award{box}"], config)
+        daily["fish_claimed"].append(box)
+        return reward, [], reward
+    fields = list(iter_pb_fields(body))
+    values = request_ids(body, len(fields))
+    pairs = list(zip(values[::2], values[1::2]))
+    if (not 2 <= len(values) <= 8 or len(values) % 2 or len({cid for cid, _ in pairs}) != len(pairs)
+            or any(str(cid) not in config["gang2_bait"] or count <= 0 for cid, count in pairs)
+            or daily["soap_used"] + sum(count for _, count in pairs) > int(config["global_kv"]["gang2_fishpoind_limit"]["value"])):
+        raise ValueError("肥皂类型、数量或每日使用上限无效")
+    old = pond_status(row, daily, config, now)
+    old_level, _ = progress(row, config)
+    pond = fishpond_state(row, now)
+    prizes, gang_exp, fish_exp, contribution = {}, 0, 0, 0
+    for cid, count in pairs:
+        bait = config["gang2_bait"][str(cid)]
+        for entry in bait["award"].rstrip(";").split(";"):
+            reward_cid, number = map(int, entry.split(","))
+            prizes[reward_cid] = prizes.get(reward_cid, 0) + number * count
+        gang_exp += bait["gang_exp"] * count
+        fish_exp += bait["fish_exp"] * count
+        contribution += bait["contribution"] * count
+        pond["progress"] += bait["gang_milestone"] * count
+        log(row, now, 9, save["role_name"], str(cid), status=str(bait["gang_exp"] * count))
+    pond["experience"] += fish_exp
+    row["experience"] = row.get("experience", 0) + gang_exp
+    row["fishpond"] = pond
+    change_contribution(daily, contribution)
+    daily["soap_used"] += sum(count for _, count in pairs)
+    daily["soap_contribution"] += contribution
+    reward = activities.build_reward(save, ";".join(f"{cid},{number}" for cid, number in sorted(prizes.items())), config)
+    current = pond_status(row, daily, config, now)
+    new_level, exp = progress(row, config)
+    quality_up = current[0] != old[0]
+    reply = (message(0, ids([2 if quality_up else int(old_level != new_level), int(not quality_up and current[2] != old[2]), gang_exp, contribution, fish_exp]))
+             + (message(1, ids([exp, new_level])) if new_level != old_level else b"")
+             + message(2, ids(current)) + message(3, reward))
+    return reply, pairs, reward
 
 
 def list_row(gid, row, viewer, saves, config):
@@ -286,7 +489,7 @@ def status(state, viewer, saves, config, now):
     daily = daily_state(saves[viewer], now)
     return (message(1, params([int(gid), row["name"], level, exp, row["content"], 0, 0, 0,
                                 row["declaration"], len(row["members"]), power(row, saves)]))
-            + message(2, ids([daily["contribution"], daily["contribution"], row["members"][str(viewer)]["joined_at"],
+            + message(2, ids([daily["contribution"], daily["total_contribution"], row["members"][str(viewer)]["joined_at"],
                               int(daily["claimed"]), 0, 0, 0, 0, 0, 0])))
 
 
@@ -303,10 +506,12 @@ def members(row, viewer, saves, online, now, config):
         elif member["post"] == 2:
             posts[vice], vice = rid, vice + 1
         raw = bytes.fromhex(save["role_snapshot"])
-        secs = 0 if account in online else max(1, now - int(save.get("last_login", now)))
+        last_seen = max(int(save.get("last_login", now)), member.get("seen_at", 0))
+        secs = 0 if account in online else max(1, now - last_seen)
         daily = daily_state(save, now)
         today = config["gang2_incense"][str(daily["pray"])]["contribution"] if daily["pray"] else 0
-        result += message(account, params([rid, save["role_name"], role["level"], role["power"], daily["contribution"], today, secs,
+        today += daily["soap_contribution"]
+        result += message(account, params([rid, save["role_name"], role["level"], role["power"], daily["total_contribution"], today, secs,
                                           role["profile"], role["vip"], 0, 0,
                                           pb_get_varint(raw, 23) or 35001, pb_get_varint(raw, 24) or 35501]))
     return message(0, ids(posts)) + result
@@ -356,10 +561,12 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
     def join(account, target):
         eligible(account, target)
         target["members"][str(account)] = {"identity": saves[account]["created_at"], "post": 0, "joined_at": now}
+        log(target, now, 1, saves[account]["role_name"], save["role_name"])
         for g in state["guilds"].values():
             g["applications"].pop(str(account), None)
 
     def leave(account):
+        log(row, now, 2 if account == viewer else 10, saves[account]["role_name"])
         del row["members"][str(account)]
         state["cooldowns"][str(account)] = {"identity": saves[account]["created_at"], "left_at": now}
 
@@ -411,6 +618,39 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
     if row is None:
         raise ValueError("您还没有加入公会")
     post = row["members"][key]["post"]
+    if opcode == 2254:
+        offset, count = request_ids(body, 2)
+        if offset > (1 << 20) or not 1 <= count <= 100:
+            raise ValueError("公会动态分页范围无效")
+        events = list(reversed(row.get("events", [])))[offset:offset + count]
+        return (message(-1, ids([offset])) + b"".join(message(offset + i + 1, params([
+            event["opt"], event["at"], event["name"], event["other"], event["content"], event["status"], event["param"]]))
+            for i, event in enumerate(events))), 0
+    if opcode == 2255:
+        request_ids(body, 0)
+        leader = next(a for a, m in row["members"].items() if m["post"] == 1)
+        last = max(int(saves[int(leader)].get("last_login", now)), row["members"][leader].get("seen_at", 0))
+        limit = int(kv["gang_impeach_limit"]["value"])
+        if leader == key or int(leader) in online or now - last < limit:
+            raise ValueError(f"仅可弹劾连续离线满 {limit // 3600} 小时的会长")
+        row["members"][leader]["post"] = 0
+        row["members"][key]["post"] = 1
+        log(row, now, 7, save["role_name"])
+        return ids([0]), 0
+    if opcode == 2261:
+        request_ids(body, 0)
+        entries = sorted(row["members"], key=lambda a: (-daily_state(saves[int(a)], now)["soap_contribution"], int(a)))
+        result = b""
+        for account in entries:
+            data = saves[int(account)]
+            role, raw = data["role_state"], bytes.fromhex(data["role_snapshot"])
+            result += encode_pb_field(1, 2,
+                encode_pb_field(1, 0, role_id(int(account), viewer, saves))
+                + encode_pb_field(2, 2, data["role_name"].encode("utf-8"))
+                + b"".join(encode_pb_field(n, 0, v) for n, v in ((3, role["level"]), (4, role["vip"]), (5, role["profile"]),
+                    (7, daily_state(data, now)["soap_contribution"])))
+                + encode_pb_field(8, 2, params([0, 0, pb_get_varint(raw, 23) or 35001, pb_get_varint(raw, 24) or 35501])))
+        return result, 0
     if opcode == 2236:
         request_ids(body, 0)
         return members(row, viewer, saves, online, now, config), 0
@@ -470,6 +710,7 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
                 if target["post"] != 2:
                     raise ValueError("请先将接任者任命为副会长")
                 target["post"], row["members"][key]["post"] = 1, 0
+                log(row, now, 6, saves[account]["role_name"])
             else:
                 option = values[0]
                 if option not in (0, 1) or target["post"] != (0 if option == 0 else 2):
@@ -477,5 +718,6 @@ def prepare(opcode, body, state, saves, viewer, config, now, online):
                 if option == 0 and sum(m["post"] == 2 for m in row["members"].values()) >= 3:
                     raise ValueError("副会长人数已达上限")
                 target["post"] = 2 if option == 0 else 0
+                log(row, now, 4 if option == 0 else 5, saves[account]["role_name"])
         return ids([1]), 0
     raise ValueError("此公会操作尚未开放")

@@ -10,6 +10,7 @@ import subprocess
 import argparse
 import ipaddress
 import shutil
+import re
 
 from zyj_server.configuration import iter_config_bytes
 
@@ -1003,7 +1004,8 @@ end"""
     code = code.replace(marker, "    return { type = 9999, errornum = error.ids[2], msg = cnMessage, request_opcode = error.ids[1] }")
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
-    code = code.replace(marker, marker + '''    if error.ids[1] == 1120 or error.ids[1] == 1121 or error.ids[1] == 1124 then
+    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and gamedata.ext.localGuildBusy == error.ids[1] then gamedata.ext.localGuildBusy = nil end
+    if error.ids[1] == 1120 or error.ids[1] == 1121 or error.ids[1] == 1124 then
         gamedata.ext.localBaptizeBusy = false
     end
     if error.ids[1] == 1140 or error.ids[1] == 1141 then
@@ -1320,6 +1322,37 @@ end
             marker = "gamedata.cache.gang2status.totalcontribution+ids.ids[2]"
             assert code.count(marker) == 1
             code = code.replace(marker, "gamedata.cache.gang2status.totalcontribution+ids.ids[1]")
+            start = code.index("function UIUserGang2CallBack(uireq)\n")
+            end = code.index("\nfunction NetUserGang2CallBack(fd)", start)
+            assert "gamedata.ext.gang2statusparam" in code[start:end]
+            code = code[:start] + '''function UIUserGang2CallBack(uireq)
+    gamedata.ext.gang2statusparam = uireq.param
+    return 1, 2230, nil
+end
+''' + code[end:]
+            for request, response, opcode in (
+                ("UIUserGang2PrayCallBack", "NetUserGang2PrayCallBack", 2251),
+                ("UIGuideShopBuyGoodsCallBack", "NetGuideShopBuyGoodsCallBack", 2253),
+                ("UIUserGang2FishpondFeedCallBack", "NetUserGang2FishpondFeedCallBack", 2257),
+                ("UIUserGang2FishpondRewardCallBack", "NetUserGang2FishpondRewardCallBack", 2258),
+                ("UIUserGang2MSetNameCallBack", "NetUserGang2MSetNameCallBack", 2259),
+                ("UIUserGang2DailyRewardCallBack", "NetUserGang2DailyRewardCallBack", 2260),
+            ):
+                marker = f"function {request}(uireq)\n"
+                assert code.count(marker) == 1
+                code = code.replace(marker, marker + '''    if gamedata.ext.localGuildBusy then
+        return 0, 503, {type=503, msg="正在处理公会操作，请稍候"}
+    end
+''')
+                start = code.index(marker)
+                end = code.index("\nend", start)
+                pattern = rf"(?m)^    return 1,\s*{opcode},"
+                block, count = re.subn(pattern, f"    gamedata.ext.localGuildBusy = {opcode}\n    return 1, {opcode},", code[start:end])
+                assert count == 1
+                code = code[:start] + block + code[end:]
+                marker = f"function {response}(fd)\n"
+                assert code.count(marker) == 1
+                code = code.replace(marker, marker + f"    if gamedata.ext.localGuildBusy == {opcode} then gamedata.ext.localGuildBusy = nil end\n")
         if name == "GameRecharge":
             start = code.index("function UIUserBuyCallBack(uireq)\n")
             end = code.index("\nfunction NetUserBuyCallBack(fd)", start)
@@ -1359,6 +1392,85 @@ end
     end
 ''' + marker)
     patched["assets/scripts/Layer_guild2_shangxiang.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("window_guild2_xianchi").decode("utf-8").replace("\r\n", "\n")
+    marker = "    if ListTableView then\n        ListTableView:reloadData()"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    if self.ListTableView then\n        self.ListTableView:reloadData()")
+    patched["assets/scripts/window_guild2_xianchi.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_guild_shop2").decode("utf-8").replace("\r\n", "\n")
+    marker = "function guildshop.makeConfig(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.configdata = {}\n")
+    marker = 'self.gangdata["level"] >= v.display_level'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '(self.gangdata["level"] or 0) >= v.display_level')
+    patched["assets/scripts/Layer_guild_shop2.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("UIGang").decode("utf-8").replace("\r\n", "\n")
+    marker = '    GameScene.layers["gang_main"].module.gang = t.gang2status\n'
+    assert code.count(marker) == 2
+    code = code.replace(marker, marker + '''    if not t.gang2status.id or t.gang2status.id <= 0 then
+        if GameScene.layers["gang_main"].show or (GameScene.layers["gang_xianchi"] and GameScene.layers["gang_xianchi"].show) then
+            reloadGang(t.gang2status)
+            return
+        end
+    elseif GameScene.layers["gang_main"].show then
+        GameScene.layers["gang_main"].module:reloaddata(t.gang2status)
+    end
+''', 1)
+    marker = '        GameScene.layers["gang_xianchi"].module:reloaddata(t.data)'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''        GameScene.layers["gang_xianchi"].module.gang = GameScene.layers["gang_main"].module.gang
+''' + marker)
+    marker = "    GameScene:addUpdate(1200)\n    UIRequest({type = 1001})\n"
+    start = code.index("function UIGangUserGang2FishpondFeed(t)\n")
+    end = code.index("function UIGangUserGang2FishpondReward(t)\n", start)
+    assert code[start:end].count(marker) == 1
+    code = code[:start] + code[start:end].replace(marker, marker + "    UIRequest({type = 2230})\n    UIRequest({type = 2256})\n") + code[end:]
+    patched["assets/scripts/UIGang.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("GameChat").decode("utf-8").replace("\r\n", "\n")
+    marker = "        opt = gangchatopt,\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "        local_snapshot = gangchatopt == 1,\n")
+    patched["assets/scripts/GameChat.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("Layer_chat").decode("utf-8").replace("\r\n", "\n")
+    marker = "    UIRequest({type = 3010, opt = 1})\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    local nextGuildPoll = os.time() + 5
+    self.localGuildPoll = CCDirector:sharedDirector():getScheduler():scheduleScriptFunc(function()
+        if self.rootNode and GameScene.layers["chat"].show and self.selectpage == "guild" and os.time() >= nextGuildPoll then
+            nextGuildPoll = os.time() + 5
+            UIRequest({type = 3010})
+        end
+    end, 1, false)
+''')
+    marker = "function chat.clear(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if self.localGuildPoll then
+        CCDirector:sharedDirector():getScheduler():unscheduleScriptEntry(self.localGuildPoll)
+        self.localGuildPoll = nil
+    end
+''')
+    marker = "function chat.addNewChatguild(self,t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if t.local_snapshot then
+        self.guildchatdata, self.guildplayerdata, self.guildsizeT, self.guildtotalT = {}, {}, {}, 0
+    end
+''')
+    patched["assets/scripts/Layer_chat.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("window_chat_guildnew").decode("utf-8").replace("\r\n", "\n")
+    marker = "function chat_guildnew.addNewChat(self,t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if t.local_snapshot then
+        self.chatdata, self.playerdata, self.sizeT, self.totalT = {}, {}, {}, 0
+    end
+''')
+    patched["assets/scripts/window_chat_guildnew.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("window_buyPowerPop").decode("utf-8").replace("\r\n", "\n")
     marker = "function buy.open(self,touchPriority,data,callback)\n"
@@ -1790,8 +1902,10 @@ end''' + code[end:]
     for _,opcode in ipairs({1001,300,1300,3610,1032,3200,3210,2410,2037,2000}) do
         query(opcode)
     end
+    if self.layers.gang_xianchi and self.layers.gang_xianchi.show then query(2230) end
     for name,opcode in pairs({bloodbattle=3620, zhuxiantaiShop=3627, watchstar=2062,
-                              starcopy_map=1350, gang_shangxiang=2250, shopList=4890, singleboss=3700}) do
+                              starcopy_map=1350, gang_shangxiang=2250, gang_main=2230,
+                              gang_xianchi=2256, shopList=4890, singleboss=3700}) do
         if self.layers[name] and self.layers[name].show then query(opcode) end
     end
     local chapter = self.layers.copy_chapter
@@ -1803,6 +1917,10 @@ end''' + code[end:]
         local opcode = page and page.request
         if page and page.id == 161 then
             opcode = page.module.tempRequestTable[page.module.pageId]
+        end
+        if page and page.id == 162 and page.module.tempActivityTable[page.module.pageId] == 27 then
+            query(2230)
+            query(2252)
         end
         local readable = ''' + daily_queries + '''
         if readable[opcode] then query(opcode) end

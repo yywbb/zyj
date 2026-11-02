@@ -6,6 +6,7 @@ import struct
 import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import guild_chat
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -176,7 +177,7 @@ class Session:
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
 
-        if opcode in guild.OPCODES:
+        if opcode in (*guild.OPCODES, *guild_chat.OPCODES):
             try:
                 if self.guild_request is None:
                     raise ValueError("公会需要绑定本地账号库")
