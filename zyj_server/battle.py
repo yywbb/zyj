@@ -214,12 +214,13 @@ def general_experience(unit, gained, config, maximum=None):
 
 
 def _prepare_teams(teams, config):
-    dynamic = {9100001, 9100002, 9000001, 9000008, 9000015, 9000020, 9000023, 9000024, 9000025,
+    dynamic = {*range(9100001, 9100008), 9000001, 9000008, 9000015, 9000020, 9000023, 9000024, 9000025,
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
                9000038, 9000039, 9000040, 9000400, 9000412, 9000413, 9000483, 9000489,
                9000496, 9000501, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803}
     flat_defense = {9000047, 9000049, 9000072, 9000078, 9000082}
     stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
+    lead_basis = {}
     for direct, team in teams.items():
         if not team:
             raise ValueError("战斗双方必须有上阵武将")
@@ -260,9 +261,10 @@ def _prepare_teams(teams, config):
             unit["base"] = {name: unit.get(name, 0) for name in stats}
             for row in rows:
                 attr, code = row["attr"], row["type_param"] or row["id"]
-                if row["id"] == 9100001:
-                    code = 9100001
-                if row["type"] == 0 and code not in (9100001, 9100002):
+                # 主角的种类号与别行ID重号，按本行识别，不能套用被引用行的效果。
+                if 9100001 <= row["id"] <= 9100007:
+                    code = row["id"]
+                if row["type"] == 0 and code not in range(9100001, 9100005):
                     if attr not in (*stats, "ap", "dmg", "fdmg") or row["target"] not in ("1", "2", "3", "4", "5"):
                         raise ValueError("尚不支持该突破属性")
                 elif code not in dynamic:
@@ -275,6 +277,12 @@ def _prepare_teams(teams, config):
                     unit["flat_in" if row["id"] in flat_defense else "flat_out"] += int(row["value"])
             unit["guard"] = 2 if 9000024 in unit["effects"] else 0
             unit["low_action"] = 9100001 in unit["effects"]
+            if 9100005 in unit["effects"]:
+                unit["ap"] += int(unit["effects"][9100005]["value"])
+            if 9100007 in unit["effects"]:
+                for name in ("atk", "def", "hp"):
+                    unit[name] += int(unit["base"][name] * Fraction(str(unit["effects"][9100007]["value"])))
+            lead_basis[direct, pos] = {name: unit[name] for name in ("atk", "def", "hp")}
 
     def matches(unit, region, sex):
         general = config["general"][str(unit["cid"])]
@@ -287,16 +295,18 @@ def _prepare_teams(teams, config):
             unit["out_multiplier"] *= 1 + value
         elif attr == "reduction":
             unit["in_multiplier"] *= max(0, 1 - value)
-        else:
+        elif attr in stats:
             unit[attr] = unit.get(attr, 0) + (unit["base"][attr] * value if method == "percent" and attr in ("atk", "def", "hp", "speed") else value)
+        else:
+            raise ValueError("尚不支持该突破属性")
 
     applied = set()
     for direct, team in teams.items():
         for _, provider in sorted(team.items()):
             for row in provider["passive_rows"]:
-                code = 9100001 if row["id"] == 9100001 else row["type_param"] or row["id"]
+                code = row["id"] if 9100001 <= row["id"] <= 9100007 else row["type_param"] or row["id"]
                 value = Fraction(str(row["value"]))
-                if code in (9100001, 9100002):
+                if code in range(9100001, 9100008):
                     continue
                 if row["type"] == 0 or code == 9000001:
                     if row["attr"] == "fdmg" or row["method"] == "value" and row["attr"] == "dmg":
@@ -337,6 +347,12 @@ def _prepare_teams(teams, config):
                 elif code == 9000489:
                     add(provider, "dmg", value)
     for direct, team in teams.items():
+        reduction = max((Fraction(str(u["effects"][9100006]["value"])) for u in team.values() if 9100006 in u["effects"]), default=0)
+        for unit in team.values():
+            unit["in_multiplier"] *= 1 - reduction
+            for code, name in ((9100005, "hp"), (9100006, "def"), (9100007, "atk")):
+                unit[name] += max((int(lead_basis[direct, pos][name]) // 20 for pos, provider in team.items()
+                                   if provider is not unit and code in provider["effects"]), default=0)
         if any(unit.get("boss_aura") for unit in team.values()):
             for target in teams[not direct].values():
                 # 本地解释采用Boss文案的减攻80%，不误解析矛盾的生命光环引用。
@@ -350,6 +366,8 @@ def _prepare_teams(teams, config):
                     unit[name] = max(0, unit[name])
             unit["ap"] = max(0, min(10, unit["ap"]))
             unit["maxhp"] = unit["hp"]
+            if 9100003 in unit["effects"]:
+                unit["protagonist_atk"] = unit["atk"]
             if min(unit["hp"], unit["atk"], unit["speed"]) <= 0:
                 raise ValueError("突破效果后的战斗属性无效")
 
@@ -445,6 +463,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
 
     def stat(unit, name):
         value = unit.get(name, 0)
+        if name == "atk" and 9100003 in unit["effects"]:
+            dead = sum(other is not unit and other["hp"] <= 0 for other in teams[unit["direct"]].values())
+            value += Fraction(unit["protagonist_atk"] * dead, 10)
         for (kind, attr), (amount, until) in unit["buffs"].items():
             if attr == name and until > round_number:
                 value += (unit.get(name, 0) if name in ("atk", "def", "speed") else 100) * amount * (1 if kind == "promote" else -1)
@@ -535,6 +556,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
     def deaths():
         while pending_deaths:
             unit = pending_deaths.pop(0)
+            for provider in teams[unit["direct"]].values():
+                if provider["hp"] > 0 and 9100003 in provider["effects"]:
+                    event([dest(provider, B={"R": "atk", "u": "promote", "w": True})])
             if effect(unit, 9000027):
                 friends = sorted((u for u in teams[unit["direct"]].values() if u["hp"] > 0), key=lambda u: (u["hp"], u["pos"]))
                 if friends:
@@ -1054,6 +1078,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     act(reactor, target, reaction=True)
         if finished():
             break
+        if round_number == 5:
+            for team in teams.values():
+                for unit in living(team):
+                    if 9100004 in unit["effects"] and unit["hp"] < unit["maxhp"]:
+                        event([change_hp(unit, unit["hp"] - unit["maxhp"])])
     won = any(u["hp"] > 0 for u in teams[True].values()) and not any(u["hp"] > 0 for u in teams[False].values())
     remaining = sum(u["hp"] for u in teams[True].values())
     maximum = sum(u["maxhp"] for u in teams[True].values())

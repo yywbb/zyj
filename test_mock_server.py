@@ -67,6 +67,120 @@ class ReplayConnection:
         self.closed = True
 
 
+class ProtagonistBattleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.config = player.load_role_config(server.CONFIG_ZIP)
+
+    def unit(self, cid=10101, **values):
+        return {"cid": cid, "iid": cid, "level": 1, "advance": 0, "exp": 0, "atk": 100,
+                "def": values.pop("defense", 200), "hp": 1000, "speed": 100, "skill": self.config["general"][str(cid)]["skillid"], **values}
+
+    def test_high_lead_passives_apply_ap_self_core_and_other_member_auras_on_both_sides(self):
+        for direct in (True, False):
+            for stage in (21, 22, 23):
+                teams = {True: {2: self.unit(10201)}, False: {2: self.unit(10201)}}
+                teams[direct] = {2: self.unit(advance=stage), 8: self.unit(10201, atk=10, defense=10, hp=100)}
+                battle._prepare_teams(teams, self.config)
+                lead, ally = teams[direct][2], teams[direct][8]
+                self.assertEqual(lead["ap"], 5)
+                self.assertEqual((lead["atk"], lead["def"], lead["hp"]), (130, 260, 1300) if stage == 23 else (100, 200, 1000))
+                self.assertEqual((ally["atk"], ally["def"], ally["hp"]), (16, 23, 165) if stage == 23 else (10, 20 if stage == 22 else 10, 150))
+                for unit in teams[direct].values():
+                    self.assertEqual(unit["in_multiplier"], Fraction(4, 5) if stage >= 22 else 1)
+
+    def test_initial_ap_caps_at_ten_and_ally_auras_do_not_feed_back_into_the_lead(self):
+        teams = {True: {2: self.unit(advance=23, initial_ap=9)}, False: {2: self.unit(10201)}}
+        battle._prepare_teams(teams, self.config)
+        self.assertEqual(teams[True][2]["ap"], 10)
+        self.assertEqual((teams[True][2]["atk"], teams[True][2]["def"], teams[True][2]["hp"]), (130, 260, 1300))
+
+    def test_dead_allies_increase_actual_lead_attack_once_without_counting_the_lead(self):
+        cid = next(int(cid) for cid, row in self.config["general"].items() if row["battle"] and row["init_cid"]
+                   and self.config["skill"].get(str(row["skillid"]), {}).get("range") == "all"
+                   and self.config["skill"][str(row["skillid"])]["kind"] == "attack")
+        for count in (1, 2):
+            totals = []
+            for stage in (5, 11):
+                team = {14: self.unit(advance=stage, atk=1000, defense=0, hp=1000000, speed=100, initial_ap=0)}
+                team.update({pos: self.unit(10201, iid=pos, hp=1, defense=0, speed=1) for pos in (2, 4)[:count]})
+                enemy = self.unit(cid, atk=100, defense=0, hp=1000000, speed=300, initial_ap=10)
+                report = battle.simulate(team, {2: enemy}, self.config, 7, max_rounds=1)
+                hit = next(action for action in report["b"]["a"] if action["s"].get("r") is True and action["s"].get("p") == [14])
+                totals.append(next(e["m"]["m"] for e in hit["e"] if e.get("r") is False and isinstance(e.get("m"), dict)))
+            self.assertEqual(totals, [1000, 1000+count*100])
+
+    def test_fifth_round_full_heal_happens_once_not_earlier_or_on_a_dead_lead(self):
+        lead = self.unit(advance=20, atk=1, defense=0, hp=10000, speed=200, initial_ap=0)
+        enemy = self.unit(10201, atk=100, defense=0, hp=1000000, initial_ap=0)
+        for rounds in (4, 5, 6):
+            report = battle.simulate({2: lead}, {2: enemy}, self.config, 0, max_rounds=rounds)
+            hp = report["endmeta"]["attack"]["2"]["h"]
+            self.assertEqual(hp == 10000, rounds == 5)
+            heals = [e for action in report["b"]["a"] for e in action["e"]
+                     if e.get("r") is True and e.get("p") == 2 and isinstance(e.get("m"), dict) and e["m"]["m"] < 0]
+            self.assertEqual(len(heals), int(rounds >= 5))
+        report = battle.simulate({2: {**lead, "hp": 1}, 8: self.unit(10201, hp=1000000, atk=1, defense=0)},
+                                 {2: {**enemy, "speed": 300}}, self.config, 0, max_rounds=5)
+        self.assertEqual(report["endmeta"]["attack"]["2"]["h"], 0)
+
+    def test_unknown_dynamic_static_attributes_and_scopes_still_fail_closed(self):
+        config = copy.deepcopy(self.config)
+        config["general"]["10201"]["break1"] = 9999991
+        for changes in ({"type": 1}, {"type": 0, "attr": "unknown", "target": "1"}, {"type": 0, "attr": "atk", "target": "999"}):
+            config["breakskill"]["9999991"] = {**config["breakskill"]["9100003"], "id": 9999991, **changes}
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                battle.simulate({2: self.unit(10201, advance=1)}, {2: self.unit()}, config, 0)
+
+    def test_advanced_lead_report_is_deterministic_without_changing_persistable_inputs(self):
+        attack = {2: self.unit(advance=23), 8: self.unit(10201)}
+        defense = {2: self.unit(10201, hp=100000)}
+        original = copy.deepcopy((attack, defense))
+        report = battle.simulate(attack, defense, self.config, 7, max_rounds=6)
+        self.assertEqual((attack, defense), original)
+        self.assertEqual(report, battle.simulate(attack, defense, self.config, 7, max_rounds=6))
+        self.assertEqual(json.loads(json.dumps(report))["meta"], report["meta"])
+
+    def test_advanced_leads_convert_actual_animation_assets_and_preserve_healed_end_hp(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("主角高阶被动动画验证需要 lupa.lua51")
+        lua = LuaRuntime()
+        config = dict(self.config)
+        with zipfile.ZipFile(server.CONFIG_ZIP) as archive:
+            for name in ("generalanimation", "skillanimation"):
+                config[name] = json.loads(archive.read("5/"+name+".json"))
+        lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
+        lua.execute('''print=function() end;printT=print;battleScene={slotNum=7}
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            CCFileUtils={sharedFileUtils=function(self) return self end,fullPathForFilename=function(self,p) return p end}
+            ui={Split=function(s,sep) local t={} for v in string.gmatch(s,'[^'..sep..']+') do t[#t+1]=v end return t end}''')
+        with zipfile.ZipFile(apk_builder.SRC_APK) as archive:
+            names = archive.namelist()
+            lua.globals().CCFileUtils.isFileExist = lambda _, path: any(n.endswith("/"+path) for n in names)
+            def asset(path):
+                matches = [n for n in names if n.endswith("/"+path)]
+                self.assertEqual(len(matches), 1, path)
+                return lua.table_from(json.loads(archive.read(matches[0])), recursive=True)
+            lua.globals().LoadJsonFileToTable = asset
+            lua.execute(apk_builder.patch_combo_animation_script(apk_builder.read_script("battleReportConvert").decode().replace("\r\n", "\n")))
+            lua.execute(apk_builder.read_script("BattleReportAbbToKey").decode())
+            for choice in (1, 2, 3):
+                cid = self.config["protagonist_grow"]["23"][f"general{choice}"]
+                attack = {14: self.unit(cid, advance=23, atk=1, defense=0, hp=10000, speed=200),
+                          2: self.unit(10201, hp=1, defense=0, speed=1)}
+                report = battle.simulate(attack, {2: self.unit(10201, atk=1000, defense=0, hp=1000000, speed=300)}, self.config, 7, max_rounds=6)
+                native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
+                allies, enemies = lua.globals().getBattleInitSlotInfo(native)
+                animations, ext = lua.globals().convertBattleReportToAnimationSub(native, allies, enemies)
+                self.assertGreater(len(animations), 1)
+                for side, key in (("attack", "atk"), ("defense", "def")):
+                    for pos, unit in report["endmeta"][side].items():
+                        self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
+                        self.assertEqual(ext.endinfo[key][pos].ap, unit["ap"])
+
+
 class ReplayRoutingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -9158,6 +9272,35 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 999999)
                 self.assertEqual(self.save_path.read_bytes(), original)
                 self.assertEqual(session.save, memory)
+
+    def test_live_battle_supports_advanced_protagonist_breakthrough_skills(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        # 将主角突破提升至 +23（包含 9100003 '愤怒'、9100004 '魔王战歌' 等高阶突破）
+        raw_lead = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[7059]
+        advanced_lead = protocol.pb_set_varint(raw_lead, 4, 23)
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, advanced_lead))
+        self.save_path.write_text(json.dumps(saved))
+
+        session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+        body = bytes.fromhex(self.activity_request(1306, [42102, 2])["hex"])
+        packets = session.handle(1306, 22000, body)
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1306)
+        self.assertEqual(session.save["world_state"]["1300"], self.save_path.read_text().split('"1300": "')[1].split('"')[0])
+
+    def test_unknown_advanced_passive_still_rejects_without_battle_cost_or_saved_changes(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[7059]
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, protocol.pb_set_varint(raw, 4, 23)))
+        self.save_path.write_text(json.dumps(saved))
+        session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+        memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+        row = {**self.role_config["breakskill"]["9100003"], "id": 9999991, "type": 1}
+        with patch.dict(self.role_config["general"][str(protocol.pb_get_varint(raw, 1))], break23=9999991), patch.dict(self.role_config["breakskill"], {"9999991": row}):
+            packets = session.handle(1306, 22001, recharge.ids([42102, 2]))
+        self.assertEqual([struct.unpack(">IIII", packet[:16])[2] for packet in packets], [999999, 1999])
+        self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
 
     def test_activity_tabs_match_official_fields_without_account_history(self):
         self.replay(self.requests)
