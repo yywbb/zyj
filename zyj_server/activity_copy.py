@@ -4,7 +4,7 @@ from fractions import Fraction
 import json
 import random
 
-from . import activities, battle, pets, recharge
+from . import activities, battle, magic, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields
 
 
@@ -147,6 +147,8 @@ def prepare(opcode, save, body, config, now, seed):
         row["cleared"] = max(row["cleared"], difficulty)
     save["last_activity_battle"] = {"rules": report["rules"], "seed": seed, "aid": aid, "difficulty": difficulty,
                                      "won": report["result"], "rounds": report["round"], "damage_percent": percent}
+    if aid == 3:
+        magic.record_count(save, "stone_copy", 1, config)
     response = (encode_pb_field(1, 0, int(report["result"])) + encode_pb_field(2, 0, report["star"])
                 + encode_pb_field(4, 2, prize)
                 + encode_pb_field(5, 2, json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))

@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from . import guild_chat
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
@@ -62,6 +62,7 @@ class Session:
         penglai.get_state(self.save, role_config)
         single_boss.get_state(self.save, role_config)
         equip_baptize.get_state(self.save, role_config)
+        magic.get_state(self.save, role_config)
         sigil_state = sigil.get_state(self.save, role_config)
         self.sigil_auto_pending = sigil_state["auto_level"] if sigil_state["auto_state"] else None
         for gift_id in timebag.GIFTS:
@@ -304,7 +305,7 @@ class Session:
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
                                   *daily_events.CLAIMS,
-                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES):
+                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:
@@ -354,7 +355,7 @@ class Session:
 
         if opcode in (204, 300, 4016, 1304, 1350, *player.WORLD_QUERY_IDS, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
-                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES, *penglai.QUERIES, *single_boss.QUERIES, *sigil.QUERIES):
+                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES, *penglai.QUERIES, *single_boss.QUERIES, *sigil.QUERIES, *magic.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900

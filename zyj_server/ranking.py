@@ -4,7 +4,7 @@ import copy
 import json
 from pathlib import Path
 
-from . import formation, mieshendian, player, recharge, recruit, storage
+from . import formation, magic, mieshendian, player, recharge, recruit, storage
 from .protocol import encode_pb_field, get_comb_messages, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 
@@ -140,7 +140,7 @@ def entry(account, save, config, previous=None):
     if previous and previous["identity"] == identity:
         growth = max(growth, previous["scores"]["11"])
     scores = {1: state["level"], 2: state["power"], 5: 0, 6: stars, 7: 0, 18: pb_get_varint(general, 20) or 0,
-              11: growth, 12: sigils, 13: growth, 14: growth, 15: souls, 16: 0, 17: score}
+              11: growth, 12: sigils, 13: growth, 14: growth, 15: souls, 16: magic.rank_score(save, config), 17: score}
     if any(type(value) is not int or not 0 <= value < (1 << 31) for value in scores.values()):
         raise ValueError("本地榜单成绩超出范围")
     return {"account": account, "identity": identity, "baseline": baseline, "name": save["role_name"],

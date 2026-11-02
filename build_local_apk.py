@@ -1045,6 +1045,88 @@ end'''}
     return patched
 
 
+def patch_magic_scripts():
+    original = read_script("GameMagic").decode("utf-8")
+    for name in ("UIInstrumentQueryCallback", "NetInstrumentQueryCallback", "UIInstrumentUnlockCallback", "NetInstrumentUnlockCallback",
+                 "UIInstrumentForgePreview", "NetInstrumentForgePreview", "UIInstrumentForgeConfirm", "NetInstrumentForgeConfirm",
+                 "UIInstrumentForgeAutomaticCallback", "NetInstrumentForgeAutomaticCallback", "UIBreakForgePreview", "NetBreakForgePreview"):
+        assert original.count("function " + name + "(") == 1
+    patched = {}
+    for name, filename in (("GameMagic", "magic.lua"), ("UIMagic", "magic_ui.lua")):
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            patched[name] = stream.read()
+    code = read_script("Layer_magic").decode("utf-8").replace("\r\n", "\n")
+    assert code.count("return magic") == 1
+    code = code.replace("selecetID", "selectID")
+    for opcode, count in ((1361, 1), (1362, 6), (1363, 2), (1365, 1)):
+        marker = f"type = {opcode},"
+        assert code.count(marker) == count
+        extra = " id=self.selectID, token=self.localMagicToken," if opcode == 1363 else ""
+        code = code.replace(marker, marker + " view=self.localMagicView," + extra)
+    marker = "UIRequest({type = 1360})"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "UIRequest({type=1360,view=self.localMagicView})")
+    marker = 'g_gold = self.g_gold},nil)'
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'g_gold = self.g_gold,view=self.localMagicView},nil)')
+    code = code.replace("return magic", '''
+local localMagicInit = magic.init
+function magic.init(self,...)
+    self.localMagicView = (self.localMagicView or 0)+1
+    localMagicInit(self,...)
+    self.taskConfig = setmetatable({["0"]={desc="无额外条件",target="1"}},{__index=self.taskConfig})
+end
+local localMagicClear = magic.clear
+function magic.clear(self,...)
+    self.localMagicView = (self.localMagicView or 0)+1
+    self.localMagicToken = nil
+    return localMagicClear(self,...)
+end
+local localMagicLoad = magic.load
+function magic.load(self,data)
+    local unlocked = {}
+    for _,row in pairs(data.data.unlock) do unlocked[tostring(row.id)] = row end
+    data.data.unlock = unlocked
+    return localMagicLoad(self,data)
+end
+local localMagicSelect = magic.setNodeVisible
+function magic.setNodeVisible(self,id)
+    self.localMagicToken = nil
+    self.previeState = false
+    local current = self.data.unlock[tostring(id)]
+    local row = self.artifactConfigxian[tostring(id)][tostring(current and math.max(1,current.istupo) or 1)]
+    for index=4,7 do
+        self.globalData[index] = {}
+        for _,cost in pairs(gamedata.getIDandNUMs(index == 4 and row.breach_consume or row["forging_consume"..(index-4)])) do
+            self.globalData[index][tostring(cost.cid)] = cost.num
+        end
+    end
+    localMagicSelect(self,id)
+    self:setButtonShowType(0)
+    if current then UIRequest({type=1362,id=id,typeIndex=0,times=0,view=self.localMagicView}) end
+end
+return magic''')
+    patched["Layer_magic"] = code
+    code = read_script("window_instrumentForgeAutomatic").decode("utf-8").replace("\r\n", "\n")
+    marker = "function instrumentForgeAutomatic.open(self,touchPriority,data,callback)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localMagicView = data.view\n    self.localMagicWindow = (self.localMagicWindow or 0)+1\n")
+    marker = "function instrumentForgeAutomatic.close(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localMagicWindow = (self.localMagicWindow or 0)+1\n")
+    marker = "type = 1364,"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + " view=self.localMagicView, window=self.localMagicWindow,")
+    marker = '"第"..(a1+1).."次".." (锻造x10)"'
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'string.format("第%d组（实际%d次）",a1+1,data.count)')
+    marker = "local donum = self.donum + num"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "local donum = math.floor(self.donum + (tonumber(num) or 0))")
+    patched["window_instrumentForgeAutomatic"] = code
+    return patched
+
+
 def patch_guild_gameplay_scripts(patched):
     def load(name):
         path = "assets/scripts/" + name + ".so"
@@ -1271,6 +1353,9 @@ end"""
     end
     if error.ids[1] == 1013 or error.ids[1] == 1014 or error.ids[1] == 1126 then
         gamedata.ext.localFosterBusy = nil
+    end
+    if gamedata and gamedata.ext and gamedata.ext.localMagicBusy and gamedata.ext.localMagicBusy.opcode == error.ids[1] then
+        gamedata.ext.localMagicBusy = nil
     end
 ''')
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
@@ -2247,6 +2332,8 @@ end"""
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     for name, code in patch_general_foster_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    for name, code in patch_magic_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("fosterconfirm_pb", "pb").decode("utf-8").replace("\r\n", "\n")
     marker = 'FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD}'

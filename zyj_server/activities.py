@@ -10,7 +10,7 @@ UNSUPPORTED_OPCODES = (2081, 2082, 7092, 4017, 4811, 4812, 5011, 5012, 5013, 501
 OPCODES = (3610, 3611, 2410, 2411, 6517, 4600, *PAGE_OPCODES, *TRANSACTION_OPCODES)
 CLAIM_OPCODES = (3611, 2411, 5040)
 BEGIN_REWARDS = (*range(80001, 80015), 80030)
-LIVENESS_TASKS = (1, 3, 7, 8, 9, 11, 14, 16, 17, 22, 23, 37, 48)
+LIVENESS_TASKS = (1, 3, 7, 8, 9, 11, 14, 16, 17, 22, 23, 25, 37, 48)
 HINT_IDS = (40, *range(82, 110), 542, 30, 32, 36, 132, 245, 252, 429, 551)
 
 
@@ -133,7 +133,7 @@ def build_reward(save, specification, config, quantity=1):
             stamina += count
         elif cid == 1003:
             energy += count
-        elif (cid in (1004, 1005, 1008, 1019) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
+        elif (cid in (1004, 1005, 1008, 1019, 1025) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
               or str(cid) in config["treasure2_fragment"] or str(cid) in config["equip_fragment"]
                or str(cid) in config["pet3_fragment"] or str(cid) in config["redl_awake_item"] or str(cid) in config["fashioncoat"]
                or str(cid) in config["trump_gem"] or str(cid) in config["token"] or str(cid) in config["token_fragment"]):

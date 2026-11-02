@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import equip_baptize, godstone, pets, sigil
+from . import equip_baptize, godstone, magic, pets, sigil
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -85,6 +85,7 @@ def rosters(save, point, config):
     pet_bonus = pets.attributes(save, config)
     sigil_bonus, sigil_flat = sigil.bonuses(save, config)
     _, skill_flat = guild_skill.bonuses(save, config)
+    magic_bonus, magic_flat = magic.bonuses(save, config)
     for n, w, slot in fields:
         if n != 4 or w != 2 or not pb_get_varint(slot, 2):
             continue
@@ -109,10 +110,15 @@ def rosters(save, point, config):
         unit["flat_out"] += sigil_flat[0]
         unit["flat_out"] += skill_flat
         unit["flat_in"] += sigil_flat[1]
+        unit["flat_out"] += magic_flat[0]
+        unit["flat_in"] += magic_flat[1]
         stone = godstone.attributes(slot, config)
         unit["pet_rates"] = {name: pet_bonus.get(field, 0) - int(pet_bonus.get(field, 0)) + stone[field] - int(stone[field])
                              for name, field in godstone.ATTR_FIELDS.items() if field in godstone.RATE_FIELDS}
         unit["pet_rates"]["critical"] = sigil_bonus[10] - int(sigil_bonus[10])
+        for name, field in magic.FIELDS.items():
+            if field >= 10:
+                unit["pet_rates"][name] = unit["pet_rates"].get(name, 0) + magic_bonus[field] - int(magic_bonus[field])
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")
@@ -825,7 +831,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             attacker, defender = {**actor, "atk": max(1, stat(actor, "atk"))}, {**target, "def": stat(target, "def"), "hp": target["hp"] + target["cover_d"]}
             amount = damage(attacker, defender, config, skill_id, critical, multiplier=multiplier, combo=combined,
                             flat=actor["flat_out"] - target["flat_in"],
-                             critical_multiplier=Fraction(3, 2) + Fraction(actor.get("criticaldmg", 0), 100)
+                             critical_multiplier=Fraction(3, 2) + Fraction(actor.get("criticaldmg", 0) + actor.get("pet_rates", {}).get("criticaldmg", 0), 100)
                             + (Fraction(1, 10) if combo_id == 12627 else 0))
             hit = change_hp(target, amount, "parry" if parry else "C" if critical else "N",
                              skill["count"] if critical and skill else int(critical))
