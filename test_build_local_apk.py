@@ -59,7 +59,6 @@ class LanBuildTests(unittest.TestCase):
         sources = Path(__file__).parent / "scripts_clean"
 
         def read_reference_script(relative, folder="scripts"):
-            relative = "UISingleBoss" if relative == "UIsingleBoss" else relative
             return (sources / (relative + ".lua")).read_text(encoding="utf-8").encode("utf-8")
 
         with tempfile.TemporaryDirectory() as directory:
