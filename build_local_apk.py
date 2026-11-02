@@ -1229,6 +1229,59 @@ end
     return patched
 
 
+def patch_collection_scripts():
+    patched = {}
+    code = read_script("GameCollect").decode("utf-8").replace("\r\n", "\n")
+    assert "function UITeamRecomRewardCallBack(" in code
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "progress_network.lua"), encoding="utf-8") as stream:
+        patched["GameCollect"] = code + "\n" + stream.read()
+    for name, module, generation, opcodes, expected in (
+            ("Layer_collect", "collect", "localCollectionView", "1015|1103|3910|3911", 5),
+            ("Layer_achievement", "task", "localAchievementView", "2400|2401", 3)):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for signature in (f"function {module}.init(self,parent,toppos" + (", _type)" if module == "collect" else ")"),
+                          f"function {module}.clear(self)"):
+            marker = signature + (" -- 加了一个generalType 判断进哪个页面" if module == "collect" and ".init(" in signature else "") + "\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + f"    self.{generation}=(self.{generation} or 0)+1\n")
+        code, count = re.subn(r"(?m)^(\s*)UIRequest\(\{type\s*=\s*(" + opcodes + r")\b",
+                             r"\1UIRequest({type=\2, view=self." + generation, code)
+        assert count == expected
+        patched[name] = code
+    code = read_script("UICollect").decode("utf-8").replace("\r\n", "\n")
+    patched["UICollect"] = code + '''
+for _,name in ipairs({"UIGeneralCollect","UIEquipCollect","UITeamRecomQuery","UITeamRecomReward"}) do
+    local original=_G[name]
+    _G[name]=function(t)
+        if t.localSkip then return end
+        if t.view then
+            local layer=GameScene.layers.collect
+            if not layer or not layer.show or t.view~=layer.module.localCollectionView then return end
+        end
+        return original(t)
+    end
+end
+'''
+    code = read_script("UITask").decode("utf-8").replace("\r\n", "\n")
+    patched["UITask"] = code + '''
+local function localAchievementPage(t)
+    local layer=GameScene.layers.achievement
+    return not t.localSkip and layer and layer.show and (not t.view or t.view==layer.module.localAchievementView)
+end
+local localTaskQuery=UITaskQuery
+function UITaskQuery(t)
+    if localAchievementPage(t) then return localTaskQuery(t) end
+end
+function UITaskComplete(t)
+    if not localAchievementPage(t) then return end
+    showRewardPopupWindow(t.reward,nil,function()
+        if localAchievementPage(t) then UIRequest({type=2400,view=t.view}) end
+    end)
+end
+'''
+    return patched
+
+
 def patch_guild_gameplay_scripts(patched):
     def load(name):
         path = "assets/scripts/" + name + ".so"
@@ -1444,6 +1497,13 @@ end"""
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and gamedata.ext.localGuildBusy == error.ids[1] then gamedata.ext.localGuildBusy = nil end
+    if gamedata and gamedata.ext then
+        if gamedata.ext.localProgressBusy==error.ids[1] then gamedata.ext.localProgressBusy=nil end
+        local pending=gamedata.ext.localProgressPending or {}
+        local queue=pending[error.ids[1]] or {}
+        table.remove(queue,1)
+        if #queue==0 then pending[error.ids[1]]=nil end
+    end
     if gamedata and gamedata.ext then
         local pending=gamedata.ext.localFriendPending or {}
         local queue=pending[error.ids[1]] or {}
@@ -2447,6 +2507,8 @@ end"""
     for name, code in patch_magic_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     for name, code in patch_friends_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    for name, code in patch_collection_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("friends_pb", "pb").decode("utf-8").replace("\r\n", "\n")
     marker = "FRIENDS.fields = {FRIENDS_FRIENDS_FIELD, FRIENDS_MAX_FIELD}"

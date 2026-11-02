@@ -11,6 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
+from . import achievements, collection
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -75,7 +76,7 @@ def load_role_config(config_path):
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
                              "favorable", "favorable_level", "favorable_task", "shake_param",
                              "penglai3_map", "penglai3_type", "penglai3_dice", "penglai3_card", "penglai3_monster",
-                             "personalboss_att", "personalboss_date", "equip_baptize", "artifact", "artifact_baptize", "artifact_baptize_xian", "artifact_xian_config", "task",
+                             "personalboss_att", "personalboss_date", "equip_baptize", "artifact", "artifact_baptize", "artifact_baptize_xian", "artifact_xian_config", "task", "team_recommend",
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
@@ -609,6 +610,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             raise ValueError("时间查询不接受参数")
         # 客户端把第二项取反作为时区；沿用抓包的 UTC+8，不跟随宿主机时区。
         body = encode_pb_field(1, 0, now) + encode_pb_field(1, 0, (-8) & ((1 << 64) - 1))
+    elif opcode in (*collection.OPCODES, *achievements.OPCODES):
+        module = collection if opcode in collection.OPCODES else achievements
+        body = module.prepare(opcode, save, request_body, role_config)
+        if opcode in module.MUTATIONS:
+            apply_reward(save, body, role_config, now)
     elif opcode in online_rewards.OPCODES:
         body = online_rewards.prepare(opcode, save, request_body, role_config)
         if opcode == 2038:
@@ -622,6 +628,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body, costs = pets.prepare(opcode, save, request_body, role_config)
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
+        if opcode == 1046:
+            achievements.record(save, "petbreakcount", 1, role_config)
         if opcode == 1065:
             apply_reward(save, body, role_config, now)
         changes = {field: int(value) - int(previous[field]) for field, value in pets.attributes(save, role_config).items()
@@ -831,6 +839,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             apply_reward(save, reward, role_config, now)
         if opcode in (1111, 1114, 1125):
             activities.record_liveness(save, 9, save["last_rob"]["attempts"], role_config, now)
+            achievements.record(save, "robcount", save["last_rob"]["attempts"], role_config)
     elif opcode in WORLD_QUERY_IDS:
         body = bytes.fromhex(save["world_state"][str(opcode)])
         if opcode == 1002 and save.get("protagonist_snapshot"):
@@ -945,6 +954,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 raise ValueError("洗炼后的角色战力超出范围")
         apply_reward(save, reward, role_config, now)
         activities.record_liveness(save, 17, replaced, role_config, now)
+        if costs:
+            achievements.record(save, "equipbaptize", parse_ids_pb(request_body)[2], role_config)
         if save.get("protagonist_snapshot"):
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode in (*training.OPCODES, *treasure_refine.OPCODES):
@@ -1032,9 +1043,13 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     return body
 
 
-def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None):
+def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None, guild_level=None):
     before = copy.deepcopy(save)
     now = int(time.time())
+    if guild_level and responses and responses[0]["opcode"] in achievements.OPCODES:
+        state = achievements.get_state(save, role_config)
+        state["guild_level"] = guild_level()
+        save["achievement_state"] = state
     if guild_profit and responses and responses[0]["opcode"] in (1101, 1109, 999900):
         save["guild_profit"] = guild_profit(now)
     self_update = settle_self_stats(save, role_config)
@@ -1107,6 +1122,8 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
 
 
 def save_response_group(packets, save, before, save_path, step_counts, role_config, now):
+    collection.observe(save, role_config, before)
+    achievements.observe(save, role_config, before)
     activities.settle_liveness(save, role_config, now)
     state = save.get("role_state")
     if state:

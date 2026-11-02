@@ -367,6 +367,8 @@ def prepare_daily(opcode, body, state, save, viewer, config, now):
                 or daily["contribution"] + contribution >= (1 << 31)):
             raise ValueError("上香配置或贡献数量无效")
         change_contribution(daily, contribution)
+        from . import achievements
+        achievements.record(save, "gang_incense", 1, config)
         daily.update(pray=method, receipt=secrets.token_hex(16))
         row["pending_pray"] = {"account": str(viewer), "identity": save["created_at"], "token": daily["receipt"], "exp": exp,
                                "event": [now, 3, save["role_name"], str(method), str(exp)]}
@@ -479,6 +481,8 @@ def prepare_feature(opcode, body, state, save, viewer, config, now):
     row["fishpond"] = pond
     change_contribution(daily, contribution)
     daily["soap_used"] += sum(count for _, count in pairs)
+    from . import achievements
+    achievements.record(save, "gang_fishpond", sum(count for _, count in pairs), config)
     daily["soap_contribution"] += contribution
     reward = activities.build_reward(save, ";".join(f"{cid},{number}" for cid, number in sorted(prizes.items())), config)
     current = pond_status(row, daily, config, now)

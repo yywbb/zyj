@@ -1861,7 +1861,8 @@ class ReplayRoutingTests(unittest.TestCase):
         self.replay_through(35)
         request = dict(self.by_seq[36], seq=30, hex="0a0b089a0a120608f5c80208010a0908c901120410080801")
         responses = self.replay([request], chunk_size=7)
-        self.assertEqual(responses, self.expected_group(36, 30))
+        self.assertEqual(responses[:-1], self.expected_group(36, 30))
+        self.assertEqual(self.hint_changes(responses[-1]), {44: 1})
         saved = json.loads(self.save_path.read_text())
         self.assertEqual([saved[k] for k in ("level", "silver", "gold")], [2, 2960, 10])
         self.assertEqual(saved["guide"]["sections"]["1"], {"status": 1, "step": 8, "steps": list(range(1, 9))})
@@ -4925,6 +4926,7 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual((saved["role_state"]["stamina"], saved["level"]), (0, 2))
             self.assertEqual(saved["stamina_clock"]["next_at"], self.now + 720)
             self.assertEqual(saved["guide"]["sections"]["1"]["step"], 8)
+            self.assertIn(50001, saved["achievement_state"]["completed"])
             self.assertEqual(protocol.pb_get_varint(bytes.fromhex(saved["role_snapshot"]), 17), 360)
             sendall(packet)
 
@@ -4932,7 +4934,8 @@ class ReplayRoutingTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.run_client(conn)
         self.assertTrue(conn.closed)
-        self.assertEqual(conn.responses, self.expected_group(36))
+        self.assertEqual(conn.responses[:-1], self.expected_group(36))
+        self.assertEqual(self.hint_changes(conn.responses[-1]), {44: 1})
 
     def test_clock_rollback_does_not_grant_stamina_or_shorten_next_recovery(self):
         self.seed_stamina(0)
@@ -9574,7 +9577,7 @@ class ReplayRoutingTests(unittest.TestCase):
                         self.assertEqual(response["opcode"], request["opcode"])
                         self.assertEqual(response["seq"], request["seq"])
             self.assertEqual(push_count, 33)
-            self.assertEqual(hint_changes, [{40: 1}, {84: 1}])
+            self.assertEqual(hint_changes, [{44: 1}, {40: 1}, {84: 1}])
 
 
 class ApkToolTests(unittest.TestCase):

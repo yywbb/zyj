@@ -138,6 +138,7 @@ class AccountStore:
             with self.lock:
                 self.active[account]["identity"] = session.save["created_at"]
             session.guild_profit = lambda now: self.guild_profit(account, now)
+            session.guild_level = lambda: self.achievement_guild_level(account)
             return session
         except Exception as error:
             self.close_session(account)
@@ -379,6 +380,14 @@ class AccountStore:
                 state["checked_at"] = now
                 guild.write(path, state)
             return packets
+
+    def achievement_guild_level(self, account):
+        with self.lock:
+            saves = self.rank_saves()
+            state = guild.load(self.save_path.with_name("guilds.json"), saves)
+            guild.recover(state, saves)
+            _, row = guild.membership(state, account)
+            return guild.progress(row, self.role_config)[0] if row else 0
 
     def guild_profit(self, account, now):
         with self.lock:

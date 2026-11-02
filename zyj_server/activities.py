@@ -11,7 +11,7 @@ OPCODES = (3610, 3611, 2410, 2411, 6517, 4600, *PAGE_OPCODES, *TRANSACTION_OPCOD
 CLAIM_OPCODES = (3611, 2411, 5040)
 BEGIN_REWARDS = (*range(80001, 80015), 80030)
 LIVENESS_TASKS = (1, 3, 7, 8, 9, 11, 14, 16, 17, 22, 23, 25, 37, 48)
-HINT_IDS = (40, *range(82, 110), 542, 30, 32, 36, 132, 245, 252, 429, 551)
+HINT_IDS = (40, *range(82, 110), 542, 30, 32, 36, 132, 245, 252, 429, 551, 44)
 
 
 def get_state(save):
@@ -276,7 +276,7 @@ def get_reward_statuses(save, config, now):
 
 
 def get_hints(save, config, now):
-    from . import welfare
+    from . import achievements, welfare
 
     statuses, _ = get_reward_statuses(save, config, now)
     flags, _, boxes = liveness_statuses(save, config, now)
@@ -285,6 +285,7 @@ def get_hints(save, config, now):
     hints[84] = int(statuses[80030] == 1)
     hints.update(welfare.get_hints(save, config, now))
     hints[40] = int(1 in flags.values() or 1 in boxes)
+    hints[44] = int(bool(save.get("has_role")) and any(status == 1 for status, _ in achievements.statuses(save, config).values()))
     for pages in config["begin7day"].values():
         page = pages["1"]
         hints[82 + (page["day"] - 1) * 4] = int(any(statuses.get(page[f"task{i}"]) == 1 for i in (1, 2)))
