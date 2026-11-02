@@ -4292,6 +4292,145 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(lua.globals().gamedata.cache.props[20223].num, protocol.pb_get_varint(props[20223], 2))
         self.assertIsNone(lua.globals().gameConfig)
 
+    def change_equip_request(self, sid, iid):
+        body = protocol.encode_pb_field(1, 0, sid) + protocol.encode_pb_field(2, 0, iid)
+        return {"opcode": 1005, "seq": 20000, "hex": body.hex()}
+
+    def test_change_equip_replaces_all_six_parts_and_preserves_progress(self):
+        saved = self.seed_training_account()
+        cids = (21204, 22204, 23204, 24204, 26201, 25201)
+        player.apply_reward(saved, activities.build_reward(saved, ";".join(f"{cid},1" for cid in cids), self.role_config), self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        inventory = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 2, 1)
+        for field, cid in zip(range(4, 10), cids):
+            with self.subTest(cid=cid):
+                before = json.loads(self.save_path.read_text())
+                iid = max(key for key, raw in inventory.items() if protocol.parse_ids_pb(raw)[1] == cid)
+                items = [0] * 6
+                items[field - 4] = iid
+                expected = copy.deepcopy(before)
+                update = formation.change(expected, 1007, recharge.ids([1, 1, *items]), self.role_config)
+                request = self.change_equip_request(1, iid)
+                replies = self.replay([request, request], chunk_size=7)
+                self.assertEqual([row["opcode"] for row in replies], [1005, 205, 1005, 205])
+                self.assertEqual(replies[:2], replies[2:])
+                self.assertEqual(bytes.fromhex(replies[0]["hex"]), update)
+                after = json.loads(self.save_path.read_text())
+                self.assertEqual(after["role_state"], expected["role_state"])
+                self.assertEqual(after["guide"], before["guide"])
+                self.assertEqual({k: v for k, v in after["world_state"].items() if k != "1002"},
+                                 {k: v for k, v in before["world_state"].items() if k != "1002"})
+                protagonist = bytes.fromhex(after["protagonist_snapshot"])
+                general = self.entity_records(bytes.fromhex(after["world_state"]["1002"]), 1, 2)[7059]
+                self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(protagonist) if (n, w) == (10, 2)), general)
+                old_protagonist = bytes.fromhex(before["protagonist_snapshot"])
+                self.assertEqual([protocol.pb_get_varint(protagonist, n) for n in range(1, 10)],
+                                 [protocol.pb_get_varint(old_protagonist, n) for n in range(1, 10)])
+                self.assertEqual([row["opcode"] for row in self.replay([request])], [1005])
+                self.assertEqual(self.entity_records(self.query_world(1002), 2, 1), inventory)
+                self.assertEqual(json.loads(self.save_path.read_text())["world_state"], after["world_state"])
+
+    def test_change_equip_swaps_worn_items_and_moves_to_empty_parts_without_duplicates(self):
+        self.complete_tutorial()
+        before = json.loads(self.save_path.read_text())
+        world = bytes.fromhex(before["world_state"]["1002"])
+        slots = self.entity_records(world, 4, 1)
+        armors = {sid: protocol.pb_get_varint(slot, 5) or 0 for sid, slot in slots.items()}
+        for sid, iid in ((1, armors[3]), (1, armors[1]), (2, armors[1]), (1, armors[1])):
+            previous = self.entity_records(self.query_world(1002), 4, 1)
+            origin = next(index for index, slot in previous.items() if protocol.pb_get_varint(slot, 5) == iid)
+            replies = self.replay([self.change_equip_request(sid, iid)])
+            self.assertEqual([row["opcode"] for row in replies], [1005])
+            current = self.entity_records(self.query_world(1002), 4, 1)
+            self.assertEqual(protocol.pb_get_varint(current[sid], 5), iid)
+            self.assertEqual(protocol.pb_get_varint(current[origin], 5), protocol.pb_get_varint(previous[sid], 5) or 0)
+            equipped = [protocol.pb_get_varint(slot, field) for slot in current.values() for field in range(4, 10)
+                        if protocol.pb_get_varint(slot, field)]
+            self.assertEqual(len(equipped), len(set(equipped)))
+        after = self.entity_records(self.query_world(1002), 1, 2)
+        for iid, raw in self.entity_records(world, 1, 2).items():
+            self.assertEqual(dict((n, v) for n, w, v in protocol.iter_pb_fields(after[iid])),
+                             dict((n, v) for n, w, v in protocol.iter_pb_fields(raw)))
+        self.assertEqual(self.entity_records(self.query_world(1002), 2, 1), self.entity_records(world, 2, 1))
+        self.assertEqual(json.loads(self.save_path.read_text())["role_state"]["power"], before["role_state"]["power"])
+
+    def test_change_equip_invalid_requests_and_failed_save_are_atomic(self):
+        self.complete_tutorial()
+        valid = bytes.fromhex(self.change_equip_request(2, 10740)["hex"])
+        bodies = [bytes.fromhex(self.change_equip_request(sid, iid)["hex"])
+                  for sid, iid in ((0, 10740), (4, 10740), (8, 10740), (2, 0), (2, 987654), (2, 1 << 31))]
+        bodies += [b"", b"\x08", b"\x08\x02", b"\x0a\x00\x10\x01", valid + b"\x10\x01", valid + b"\x18\x00",
+                   b"\x08\x02\x08\x02", valid + b"\x08\x02"]
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            for body in bodies:
+                with self.subTest(body=body.hex()):
+                    packets = session.handle(1005, 20000, body)
+                    self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999999, 1999])
+                    self.assertEqual((session.save, self.save_path.read_bytes(), session.random_replies), (memory, disk, {}))
+            with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                session.handle(1005, 20001, valid)
+            self.assertEqual((session.save, self.save_path.read_bytes(), session.random_replies), (memory, disk, {}))
+
+    def test_change_equip_rejects_advanced_cheer_and_tutorial_requests(self):
+        self.complete_tutorial()
+        baseline = json.loads(self.save_path.read_text())
+        item = self.entity_records(bytes.fromhex(baseline["world_state"]["1002"]), 2, 1)[10740]
+        for reason in ("advanced", "cheer", "tutorial", "empty", "duplicate", "wrong_part", "locked_source", "unknown_cid", "short_item"):
+            with self.subTest(reason=reason):
+                saved = copy.deepcopy(baseline)
+                if reason == "advanced":
+                    values = protocol.parse_ids_pb(item)
+                    values[3] = 1
+                    player.record_slot_update(saved, protocol.encode_pb_field(2, 2, recharge.ids(values)))
+                elif reason == "cheer":
+                    cheer = protocol.encode_pb_field(1, 0, 1) + protocol.encode_pb_field(5, 0, 10740)
+                    player.record_slot_update(saved, protocol.encode_pb_field(5, 2, cheer))
+                elif reason == "tutorial":
+                    saved["guide"]["sections"]["1"]["status"] = 1
+                    saved["guide"]["sections"]["1"]["step"] = 1
+                elif reason == "empty":
+                    saved["role_state"]["level"] = 14
+                elif reason in ("duplicate", "wrong_part", "locked_source"):
+                    slots = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 4, 1)
+                    for sid in ((1, 3) if reason == "duplicate" else (4,) if reason == "locked_source" else (1,)):
+                        slot = protocol.pb_set_varint(slots[sid], 4 if reason == "wrong_part" else 5, 10740)
+                        player.record_slot_update(saved, protocol.encode_pb_field(4, 2, slot))
+                else:
+                    values = [10740, 999999, 1] if reason == "unknown_cid" else [10740]
+                    player.record_slot_update(saved, protocol.encode_pb_field(2, 2, recharge.ids(values)))
+                self.save_path.write_text(json.dumps(saved))
+                before = self.save_path.read_bytes()
+                request = self.change_equip_request(4 if reason == "empty" else 2, 10740)
+                self.assertEqual(self.replay([request])[0]["opcode"], 999999)
+                self.assertEqual(self.save_path.read_bytes(), before)
+        self.save_path.write_text(json.dumps(baseline))
+        body = bytes.fromhex(self.change_equip_request(2, 10740)["hex"])
+        comb = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 1005) + protocol.encode_pb_field(2, 2, body))
+        self.assertEqual(self.replay([{"opcode": 999900, "seq": 20000, "hex": comb.hex()}])[0]["opcode"], 999999)
+        self.assertEqual(self.save_path.read_bytes(), json.dumps(baseline).encode())
+
+    def test_actual_apk_manual_equip_callbacks_accept_native_request_and_slot_reply(self):
+        import test_activity_copy
+        self.complete_tutorial()
+        self.config = self.role_config
+        lua = test_activity_copy.ActivityCopyTests.network_lua(self)
+        for name in ("slotchangeequip_pb", "slots_pb"):
+            lua.execute(apk_builder.read_script(name, "pb"))
+        lua.execute(b'''gamedata.cache.equips={[10740]={cid=22102}}
+            function gamedata:SlotInfoProcess(info) self.lastSlots=info end''')
+        lua.execute(apk_builder.read_script("GameSlotChangeEquip"))
+        remote, opcode, body = lua.globals().UISlotChangeEquipCallBack(lua.table_from({b"slot": 2, b"equipeid": 10740}))
+        self.assertEqual((remote, opcode, body), (1, 1005, bytes.fromhex(self.change_equip_request(2, 10740)["hex"])))
+        replies = self.replay([{"opcode": opcode, "seq": 20000, "hex": body.hex()}])
+        self.assertEqual(replies[0]["opcode"], 1005)
+        result = lua.globals().NetSlotChangeEquipCallBack(lua.table_from({b"rbuf": bytes.fromhex(replies[0]["hex"])}))
+        self.assertEqual((result[b"type"], result[b"equipCID"]), (1005, 22102))
+        slots = {row[b"sid"]: row for _, row in lua.globals().gamedata[b"lastSlots"][b"slots"].items()}
+        self.assertEqual(slots[2][b"armor"], 10740)
+        self.assertIsNone(lua.globals().gameConfig)
+
     def test_quick_equip_uses_owned_inventory_and_survives_reconnect(self):
         self.complete_tutorial()
         saved = json.loads(self.save_path.read_text())

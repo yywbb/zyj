@@ -794,12 +794,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         ids = parse_ids_pb(body)
         if len(ids) >= 6:
             get_role_state(save, role_config).update(power=ids[1], g_power=ids[3], power_all=ids[5])
-    elif opcode in (1003, 1009, 1007, 1130, 1024, 1027, 1057):
+    elif opcode in (1003, 1005, 1009, 1007, 1130, 1024, 1027, 1057):
         if opcode == 1130:
             body, costs = formation.strengthen_stones(save, request_body, role_config)
             for cid, count in costs:
                 change_item_count(save, cid, -count, role_config, now)
-        if opcode in (1003, 1007, 1009) and not body:
+        if opcode in (1003, 1005, 1007, 1009) and not body:
             body = formation.change(save, opcode, request_body, role_config)
         record_slot_update(save, body)
         old_protagonist = bytes.fromhex(save["protagonist_snapshot"]) if save.get("protagonist_snapshot") else b""
@@ -821,7 +821,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 save["protagonist_snapshot"] = (pb_set_field(value, 10, 2, general) if general else value).hex()
                 if general:
                     get_role_state(save, role_config)["profile"] = pb_get_varint(general, 1)
-        if opcode in (1003, 1007, 1009, 1130) and save.get("protagonist_snapshot"):
+        if opcode in (1003, 1005, 1007, 1009, 1130) and save.get("protagonist_snapshot"):
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode == 1306:
         values = {n: v for n, w, v in iter_pb_fields(body)}
@@ -980,7 +980,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
-    local_update = (responses and responses[0]["opcode"] in (1003, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
+    local_update = (responses and responses[0]["opcode"] in (1003, 1005, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
                                                          *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb or pet_update or self_update:

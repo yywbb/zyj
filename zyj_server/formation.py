@@ -1,4 +1,4 @@
-"""本地换将/布阵/一键装备；增减装备与缘分，保留原有培养差值。"""
+"""本地换将/布阵/装备；增减装备与缘分，保留原有培养差值。"""
 
 from fractions import Fraction
 
@@ -70,7 +70,35 @@ def change(save, opcode, body, config):
         if not 1 <= index <= min(7, maximum):
             raise ValueError("阵位不存在或尚未解锁")
 
-    if opcode == 1007:
+    if opcode == 1005:
+        fields = list(iter_pb_fields(body))
+        values = {n: v for n, w, v in fields}
+        if (len(fields) != 2 or set(values) != {1, 2}
+                or any(w != 0 or not 0 < v < (1 << 31) for n, w, v in fields)):
+            raise ValueError("换装需要阵位及装备编号")
+        dest, iid = values[1], values[2]
+        validate_slot(dest)
+        if pb_get_varint(slots.get(dest, b""), 2) not in generals:
+            raise ValueError("请先上阵武将再装备")
+        if iid not in equips:
+            raise ValueError("装备不存在或不属于当前账号")
+        item = parse_ids_pb(equips[iid])
+        kinds = ("weapon", "armor", "accessory", "head", "treasure", "horse")
+        kind = config["equip"].get(str(item[1]), {}).get("type") if len(item) >= 3 else None
+        if kind not in kinds:
+            raise ValueError("装备部位不受支持")
+        field = 4 + kinds.index(kind)
+        if any(pb_get_varint(v, f) == iid for v in records(world, 5, 1).values() for f in range(4, 10)):
+            raise ValueError("请先将装备从助阵位撤下")
+        origins = [(index, f) for index, v in old.items() for f in range(4, 10) if pb_get_varint(v, f) == iid]
+        if len(origins) > 1 or any(f != field for _, f in origins):
+            raise ValueError("装备穿戴记录无效，请刷新后重试")
+        if origins and origins[0][0] != dest:
+            origin = origins[0][0]
+            validate_slot(origin)
+            slots[origin] = pb_set_varint(old[origin], field, pb_get_varint(old[dest], field) or 0)
+        slots[dest] = pb_set_varint(old[dest], field, iid)
+    elif opcode == 1007:
         fields = list(iter_pb_fields(body))
         if len(fields) != 8 or any(n != 1 or w != 0 or not 0 <= v < (1 << 31) for n, w, v in fields):
             raise ValueError("一键装备需要阵位、方式及六个装备编号")
