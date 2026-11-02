@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, friends, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -133,7 +133,8 @@ class AccountStore:
             session = Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
                            lambda body, opcode=3500, save=None: self.rank_query(account, body, opcode, save),
                            lambda previous=None: self.observe_rankings({account: previous} if previous else None),
-                           lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body))
+                           lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body),
+                           lambda session, opcode, seq, body: self.friend_request(account, session, opcode, seq, body))
             with self.lock:
                 self.active[account]["identity"] = session.save["created_at"]
             session.guild_profit = lambda now: self.guild_profit(account, now)
@@ -164,6 +165,93 @@ class AccountStore:
             except (OSError, ValueError) as error:
                 # 断线必须释放登录占用；损坏公会库仍由后续请求拒绝，不能空库覆盖。
                 print(f"[!] 公会离线时间未保存: {error}", flush=True)
+
+    def friend_request(self, account, session, opcode, seq, body):
+        with self.lock:
+            saves, uninitialized = {}, {}
+            for member in self.account_ids():
+                snapshot = self.snapshot(member)
+                data = snapshot["save"]
+                if snapshot["error"] or snapshot["has_save"] and type(data.get("has_role")) is not bool:
+                    raise ValueError("账号存档损坏，无法读取好友")
+                if data.get("has_role"):
+                    guild.validate_role(data)
+                    friends.daily(data)
+                    if not data.get("role_snapshot"):
+                        uninitialized[member] = data["created_at"]
+                    else:
+                        saves[member] = data
+            path = self.save_path.with_name("friends.json")
+            if account not in saves:
+                fresh = not session.save.get("has_role") or (uninitialized.get(account) == session.save["created_at"]
+                    and session.save["role_state"]["level"] == 1)
+                if not fresh or session.save.get("friend_state") or opcode not in (2300, 2313) or body:
+                    raise ValueError("请先创建并初始化本地角色")
+                state = friends.load(path, {**saves, account: session.save})
+                if state["players"].get(str(account), {}).get("identity") == session.save["created_at"]:
+                    raise ValueError("好友角色快照缺失，请恢复存档")
+                # 首次进城的2300早于Role快照，尚不可能被加为好友，只投影空列表。
+                reply = guild.ids([0]) if opcode == 2313 else protocol.encode_pb_field(2, 0, 0) + protocol.encode_pb_field(3, 0, 1000000 + account)
+                return [protocol.pack_frame(opcode, seq, reply)]
+            if not session.save.get("has_role") or saves[account]["created_at"] != session.save["created_at"]:
+                raise ValueError("角色身份已变化，请重新登录")
+            saves[account] = session.save
+            state = friends.load(path, saves)
+            for key, row in state["players"].items():
+                if uninitialized.get(int(key)) == row["identity"]:
+                    raise ValueError("好友角色快照缺失，请恢复存档")
+            original = copy.deepcopy(state)
+            friends.recover(state, saves)
+            now = max(int(time.time()), state["checked_at"])
+            mutation = opcode in friends.MUTATIONS
+            if mutation and (int(time.time()) + 28800) // 86400 < max(state["day"], friends.daily(session.save)["day"]):
+                raise ValueError("好友日期发生回拨，请校准时间后重试")
+            cached = session.random_replies.get(opcode) if mutation else None
+            if cached and cached[0] == (seq, body):
+                if session.save == cached[2] and state == cached[3] and (now + 28800) // 86400 == cached[4]:
+                    return list(cached[1])
+                raise ValueError("该好友操作已结算，状态已变化，请刷新后重新操作")
+            guild_path = self.save_path.with_name("guilds.json")
+            guild_names = {}
+            if guild_path.exists():
+                guilds = guild.load(guild_path, saves)
+                guild.recover(guilds, saves)
+                guild_names = {int(a): row["name"] for row in guilds["guilds"].values() for a in row["members"]}
+            before = copy.deepcopy(state)
+            working = copy.deepcopy(session.save) if mutation else session.save
+            reply, reward, cursor = friends.prepare(opcode, body, state, {**saves, account: working}, account,
+                self.role_config, now, getattr(session, "friend_chat_cursors", {}), self.active, guild_names)
+            packets = [protocol.pack_frame(opcode, seq, reply)]
+            if (opcode == 2302 and protocol.parse_ids_pb(reply) != [0]
+                    or opcode == 6038 and protocol.parse_ids_pb(reply) == [1]):
+                return packets
+            if mutation:
+                working["friend_state"] = friends.daily(working, now)
+                if reward:
+                    online_rewards.settle(working, self.role_config, session.connected_at, now)
+                    welfare.settle(working, now)
+                    player.settle_stamina(working, self.role_config, now)
+                    player.apply_reward(working, reward, self.role_config, now)
+                    packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
+                if state != before:
+                    friends.stage(state, before, account, working)
+                    friends.write(path, state)
+                packets = player.save_response_group(packets, working, session.save, session.save_path,
+                    self.step_counts, self.role_config, now)
+                session.save = working
+                saves[account] = working
+                friends.recover(state, saves)
+            if state != original and (mutation or path.exists()):
+                friends.write(path, state)
+            if cursor:
+                peer, identity, index = cursor
+                if not hasattr(session, "friend_chat_cursors"):
+                    session.friend_chat_cursors = {}
+                session.friend_chat_cursors[peer] = (identity, index)
+            if mutation:
+                session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state),
+                    (now + 28800) // 86400)
+            return packets
 
     def guild_request(self, account, session, opcode, seq, body):
         with self.lock:

@@ -285,6 +285,11 @@ class ReplayRoutingTests(unittest.TestCase):
         elif opcode == 2037:
             # 教程回归冻结时间，不能继承录制中已到期的在线奖励倒计时。
             self.assertEqual(protocol.parse_ids_pb(bytes.fromhex(actual)), [1, 60])
+        elif opcode == 2300:
+            # 本地新号没有录制中的假好友；公开查找ID不改变自己的原生RID。
+            raw = bytes.fromhex(actual)
+            self.assertFalse(any((n, w) == (1, 2) for n, w, _ in protocol.iter_pb_fields(raw)))
+            self.assertEqual((protocol.pb_get_varint(raw, 2), protocol.pb_get_varint(raw, 3)), (0, 1000001))
         elif opcode == 1350:
             # 这里比较新号初始化的历史应答，不能拿后续教程通关后的存档当期望。
             self.assertEqual(self.star_copy_groups(bytes.fromhex(actual)),

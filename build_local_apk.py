@@ -1127,6 +1127,108 @@ return magic''')
     return patched
 
 
+def patch_friends_scripts():
+    patched = {}
+    for name, filename in (("GameFriendManager", "friends_network.lua"), ("UIFriends", "friends_ui.lua")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        assert "function " + ("UIFriendReqCallBack" if name == "GameFriendManager" else "UIFriendChatQuery") + "(" in code
+        if name == "UIFriends":
+            code, count = re.subn(r"UIRequest\(\{type\s*=\s*(23[01][0-9]|300[234]|6038)\b", r"UIRequest({type=\1, view=t.view", code)
+            assert count == 15
+            code = code.replace("type=3002, view=t.view", "type=3002, view=t.view, refresh=true")
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            patched[name] = code + "\n" + stream.read()
+    code = read_script("Layer_friends").decode("utf-8").replace("\r\n", "\n")
+    marker = "ui.setLabelString(self.rootItems.myid,GameScene.roleinfo.showid or GameScene.roleinfo.id,14)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'ui.setLabelString(self.rootItems.myid,"...",14)')
+    old = '''        if not self.frinedData or not next(self.frinedData) then
+            UIRequest({type = 2300})
+        elseif GameScene:checkhint(37) then
+            UIRequest({type = 2300, param = 1})
+        end'''
+    assert code.count(old) == 1
+    code = code.replace(old, "        UIRequest({type = 2300})")
+    for key, opcode in (("recomendData", 2301), ("reqData", 2303), ("shieldData", 3002)):
+        condition = f"not self.{key} or not next(self.{key})" + (" or GameScene:checkhint(37)" if opcode == 2303 else "")
+        old = f"        if {condition} then\n            UIRequest({{type = {opcode}}})\n        end"
+        assert code.count(old) == 1
+        code = code.replace(old, f"        UIRequest({{type = {opcode}" + (", refresh=true" if opcode == 3002 else "") + "})")
+    for marker in ("function friends.init(self,parent,toppos,data)\n", "function friends.clear(self)\n"):
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    self.localFriendView=(self.localFriendView or 0)+1\n")
+    code, count = re.subn(r"UIRequest\(\{type\s*=\s*(23[01][0-9]|300[234]|6038|1022)\b", r"UIRequest({type=\1, view=self.localFriendView", code)
+    assert count == 26
+    patched["Layer_friends"] = code
+    code = read_script("window_friend").decode("utf-8").replace("\r\n", "\n")
+    for marker in ("function friend.open(self,touchPriority,data,callback)\n", "function friend.close(self)\n"):
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    self.localFriendGeneration=(self.localFriendGeneration or 0)+1\n")
+    marker = "function friend.open(self,touchPriority,data,callback)\n"
+    code = code.replace(marker, marker + "    self.localFriendKind=data.type\n")
+    code, count = re.subn(r"UIRequest\(\{type\s*=\s*(23[01][0-9])\b", r"UIRequest({type=\1, generation=self.localFriendGeneration", code)
+    assert count == 9
+    patched["window_friend"] = code
+    code = read_script("GameCheckOtherSlotsInfo").decode("utf-8").replace("\r\n", "\n")
+    assert code.count("function UICheckOtherSlotsInfoCallBack(") == 1
+    patched["GameCheckOtherSlotsInfo"] = code + '''
+local localOtherSend,localOtherReceive=UICheckOtherSlotsInfoCallBack,NetCheckOtherSlotsInfoCallBack
+function UICheckOtherSlotsInfoCallBack(req)
+    gamedata.ext.localOtherSlotsRequests=gamedata.ext.localOtherSlotsRequests or {}
+    table.insert(gamedata.ext.localOtherSlotsRequests,req)
+    return localOtherSend(req)
+end
+function NetCheckOtherSlotsInfoCallBack(fd)
+    local req=table.remove(gamedata.ext.localOtherSlotsRequests or {},1) or {}
+    gamedata.ext.otherlevel=req.level
+    local result=localOtherReceive(fd)
+    result.rid,result.generation=req.rid,req.generation
+    return result
+end
+'''
+    code = read_script("Layer_slotsinfo_other").decode("utf-8").replace("\r\n", "\n")
+    for marker in ("function slotsInfo.init(self,parent,toppos,param,index)\n", "function slotsInfo.clear(self)\n"):
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    self.localFriendGeneration=(self.localFriendGeneration or 0)+1\n")
+    marker = "UIRequest({type = 1020,"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + " generation=self.localFriendGeneration,")
+    patched["Layer_slotsinfo_other"] = code
+    code = read_script("UISlots").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UICheckOtherSlotsInfo(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    local page=GameScene.templayers.other_slotinfo
+    if not page or not page.show or t.generation~=page.localFriendGeneration or not page.palyerdata or t.rid~=page.palyerdata.rid then return end
+''')
+    patched["UISlots"] = code
+    code = read_script("GameBattleOther").decode("utf-8").replace("\r\n", "\n")
+    assert code.count("function UIBattleOtherCallback(") == 1
+    patched["GameBattleOther"] = code + '''
+local localSparSend,localSparReceive=UIBattleOtherCallback,NetBattleOtherCallback
+function UIBattleOtherCallback(req)
+    if gamedata.ext.localSparRequest then return 0,503,{type=503,msg="切磋战报生成中，请等待回复"} end
+    gamedata.ext.localSparRequest=req
+    return localSparSend(req)
+end
+function NetBattleOtherCallback(fd)
+    local req=gamedata.ext.localSparRequest or {}
+    gamedata.ext.localSparRequest=nil
+    local result=localSparReceive(fd)
+    result.view,result.rid=req.view,req.rid
+    return result
+end
+'''
+    code = read_script("UIBattleOther").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UIBattleOther(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    local layer=GameScene.layers.friends
+    if not layer or not layer.show or t.view~=layer.module.localFriendView then return end
+''')
+    code = code.replace("    UIRequest({type = 1001})\n", "")
+    patched["UIBattleOther"] = code
+    return patched
+
+
 def patch_guild_gameplay_scripts(patched):
     def load(name):
         path = "assets/scripts/" + name + ".so"
@@ -1342,6 +1444,15 @@ end"""
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and gamedata.ext.localGuildBusy == error.ids[1] then gamedata.ext.localGuildBusy = nil end
+    if gamedata and gamedata.ext then
+        local pending=gamedata.ext.localFriendPending or {}
+        local queue=pending[error.ids[1]] or {}
+        table.remove(queue,1)
+        if #queue==0 then pending[error.ids[1]]=nil end
+        if gamedata.ext.localFriendBusy==error.ids[1] then gamedata.ext.localFriendBusy=nil end
+        if error.ids[1]==1020 then table.remove(gamedata.ext.localOtherSlotsRequests or {},1) end
+        if error.ids[1]==1022 then gamedata.ext.localSparRequest=nil end
+    end
     if error.ids[1] == 1120 or error.ids[1] == 1121 or error.ids[1] == 1124 then
         gamedata.ext.localBaptizeBusy = false
     end
@@ -2335,6 +2446,23 @@ end"""
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     for name, code in patch_magic_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    for name, code in patch_friends_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    code = read_script("friends_pb", "pb").decode("utf-8").replace("\r\n", "\n")
+    marker = "FRIENDS.fields = {FRIENDS_FRIENDS_FIELD, FRIENDS_MAX_FIELD}"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''local public_rid = protobuf.FieldDescriptor()
+public_rid.name = "public_rid"
+public_rid.full_name = ".Friends.public_rid"
+public_rid.number = 3
+public_rid.index = 2
+public_rid.label = 1
+public_rid.has_default_value = false
+public_rid.default_value = 0
+public_rid.type = 5
+public_rid.cpp_type = 1
+FRIENDS.fields = {FRIENDS_FRIENDS_FIELD, FRIENDS_MAX_FIELD, public_rid}''')
+    patched["assets/pb/friends_pb.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("fosterconfirm_pb", "pb").decode("utf-8").replace("\r\n", "\n")
     marker = 'FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD}'
     assert code.count(marker) == 1

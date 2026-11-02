@@ -6,7 +6,7 @@ import struct
 import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import guild_chat
+from . import friends, guild_chat
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -21,7 +21,7 @@ def unavailable_response(opcode, seq, body, message):
 
 
 class Session:
-    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None, guild_request=None):
+    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None, guild_request=None, friend_request=None):
         self.replay = Replay(tables)
         self.save_path = save_path
         self.step_counts = step_counts
@@ -30,6 +30,7 @@ class Session:
         self.rank_query = rank_query
         self.rank_observer = rank_observer
         self.guild_request = guild_request
+        self.friend_request = friend_request
         self.guild_profit = None
         self.random_replies = {}
         self.connected_at = int(time.time())
@@ -56,6 +57,7 @@ class Session:
         qiankun.get_state(self.save)
         secret_shop.get_state(self.save, role_config)
         guild.daily_state(self.save)
+        friends.daily(self.save)
         pets.get_state(self.save, role_config)
         favorite.get_state(self.save, role_config)
         cornucopia.get_state(self.save, role_config)
@@ -179,6 +181,14 @@ class Session:
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
 
+        if opcode in friends.OPCODES:
+            try:
+                if self.friend_request is None:
+                    raise ValueError("好友需要绑定本地账号库")
+                return self.friend_request(self, opcode, seq, body)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, b"" if opcode == 2306 else body, str(error))
+
         if opcode in (*guild.OPCODES, *guild_chat.OPCODES):
             try:
                 if self.guild_request is None:
@@ -267,6 +277,8 @@ class Session:
         watch_comb = False
         pet_comb = False
         if opcode == 999900:
+            if any(mid in (*friends.MUTATIONS, 1020, 1022, 2305) for mid in get_comb_ids(body)):
+                return unavailable_response(opcode, seq, body, "好友操作请从对应页面单独发起")
             # 仅开放下列原生引导的完整二消息模板；保留顺序及额外字段校验。
             templates = [encode_pb_field(1, 2, encode_pb_field(1, 0, 3642) + empty)
                          + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x33\x10\x01"))
@@ -421,6 +433,24 @@ class Session:
         if (opcode == 999900 and any(mid in (1007, 1109) for mid in get_comb_ids(body))
                 and self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2):
             return unavailable_response(opcode, seq, body, "教程装备录制已过期，请使用当前阵容单独装备或强化。")
+        if self.friend_request and opcode == 999900:
+            queries = {mid: raw for mid, raw in get_comb_messages(body) if mid in (2300, 2313)}
+            if queries:
+                try:
+                    replies = {mid: self.friend_request(self, mid, seq, raw)[0][16:] for mid, raw in queries.items()}
+                except ValueError as error:
+                    return unavailable_response(opcode, seq, body, str(error))
+                responses = [dict(r) for r in responses]
+                for response in responses:
+                    if response["opcode"] == 999900:
+                        out = bytearray()
+                        for n, w, value in iter_pb_fields(bytes.fromhex(response["hex"])):
+                            if (n, w) == (1, 2):
+                                mid = get_comb_messages(encode_pb_field(n, w, value))[0][0]
+                                if mid in replies:
+                                    value = pb_set_field(value, 2, 2, replies[mid])
+                            out.extend(encode_pb_field(n, w, value))
+                        response["hex"] = out.hex()
         working = copy.deepcopy(self.save)
         initialize_sigils = opcode == 999900 and any(mid == 1002 for mid, raw in get_comb_messages(body))
         packets = player.prepare_recorded_responses(seq, responses, working, body,
