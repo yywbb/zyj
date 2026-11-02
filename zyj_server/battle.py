@@ -256,15 +256,9 @@ def _prepare_teams(teams, config):
                 attr, code = row["attr"], row["type_param"] or row["id"]
                 if row["id"] == 9100001:
                     code = 9100001
-                if row["type"] == 0 and code not in (9100001, 9100002):
-                    if attr not in (*stats, "ap", "dmg", "fdmg") or row["target"] not in ("1", "2", "3", "4", "5"):
-                        raise ValueError("尚不支持该突破属性")
-                elif code not in dynamic:
-                    raise ValueError(f"尚不支持该突破被动 {row['id']}")
-                else:
-                    old = unit["effects"].get(code)
-                    if old is None or row["value"] > old["value"]:
-                        unit["effects"][code] = row
+                old = unit["effects"].get(code)
+                if old is None or row["value"] > old["value"]:
+                    unit["effects"][code] = row
                 if attr in ("fdmg", "dmg") and row["method"] == "value":
                     unit["flat_in" if row["id"] in flat_defense else "flat_out"] += int(row["value"])
             unit["guard"] = 2 if 9000024 in unit["effects"] else 0
@@ -281,7 +275,7 @@ def _prepare_teams(teams, config):
             unit["out_multiplier"] *= 1 + value
         elif attr == "reduction":
             unit["in_multiplier"] *= max(0, 1 - value)
-        else:
+        elif attr in stats:
             unit[attr] = unit.get(attr, 0) + (unit["base"][attr] * value if method == "percent" and attr in ("atk", "def", "hp", "speed") else value)
 
     applied = set()
@@ -295,7 +289,11 @@ def _prepare_teams(teams, config):
                 if row["type"] == 0 or code == 9000001:
                     if row["attr"] == "fdmg" or row["method"] == "value" and row["attr"] == "dmg":
                         continue
+                    if not row["attr"] and code != 9000001:
+                        continue
                     scope = row["target"]
+                    if scope not in ("1", "2", "3", "4", "5"):
+                        continue
                     targets = ([provider] if scope == "3" else list(teams[not direct].values()) if scope in ("2", "4", "5") else list(team.values()))
                     for target in targets:
                         if (scope == "4" and target["pos"] > 7 or scope == "5" and target["pos"] < 8

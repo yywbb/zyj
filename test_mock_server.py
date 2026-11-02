@@ -9159,6 +9159,21 @@ class ReplayRoutingTests(unittest.TestCase):
                 self.assertEqual(self.save_path.read_bytes(), original)
                 self.assertEqual(session.save, memory)
 
+    def test_live_battle_supports_advanced_protagonist_breakthrough_skills(self):
+        self.replay(self.requests)
+        saved = json.loads(self.save_path.read_text())
+        # 将主角突破提升至 +23（包含 9100003 '愤怒'、9100004 '魔王战歌' 等高阶突破）
+        raw_lead = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[7059]
+        advanced_lead = protocol.pb_set_varint(raw_lead, 4, 23)
+        player.record_slot_update(saved, protocol.encode_pb_field(1, 2, advanced_lead))
+        self.save_path.write_text(json.dumps(saved))
+
+        session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+        body = bytes.fromhex(self.activity_request(1306, [42102, 2])["hex"])
+        packets = session.handle(1306, 22000, body)
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1306)
+        self.assertEqual(session.save["world_state"]["1300"], self.save_path.read_text().split('"1300": "')[1].split('"')[0])
+
     def test_activity_tabs_match_official_fields_without_account_history(self):
         self.replay(self.requests)
         capture = json.loads((Path(server.BASE_DIR) / "official_battle_capture_20261028_2014.json").read_text())
