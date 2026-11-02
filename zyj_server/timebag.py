@@ -5,7 +5,7 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 
 PET_GIFT = 130012
 GIFTS = {PET_GIFT: ("pet_gift_state", 59), 130013: ("stone_gift_state", 104), 130014: ("baptize_gift_state", 21),
-         130004: ("sigil_gift_state", 22), 130010: ("sigil_growth_gift_state", None)}
+         130004: ("sigil_gift_state", 22), 130010: ("sigil_growth_gift_state", None), 130015: ("treasure_gift_state", 23)}
 QUERIES = (2880,)
 MUTATIONS = (2881, 2882)
 OPCODES = QUERIES + MUTATIONS
@@ -60,7 +60,7 @@ def prepare(opcode, save, body, config, now, baseline=b""):
                 rows.append(current)
         return b"".join(encode_pb_field(1, 0, v & ((1 << 64) - 1)) for r in rows for v in r)
     if len(fields) != 1 or fields[0][:2] != (1, 0) or fields[0][2] not in GIFTS:
-        raise ValueError("此限时礼包请求无效；仅接通魔宠、神石、洗炼和魔符礼包")
+        raise ValueError("此限时礼包请求无效；仅接通魔宠、神石、洗炼、魔符和宝物精炼礼包")
     gift_id = fields[0][2]
     state = get_state(save, gift_id)
     if opcode == 2882:

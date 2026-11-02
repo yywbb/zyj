@@ -2,7 +2,7 @@
 
 from fractions import Fraction
 
-from . import battle, equip_baptize, godstone, pets, sigil
+from . import battle, equip_baptize, godstone, pets, sigil, treasure_refine
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -35,6 +35,9 @@ def bonuses(raw, slot, members, equips, config):
             values[battle.GENERAL_FIELDS[name]] += int(Fraction(str(gear[f"init{index}"])) + Fraction(str(gear[f"grow_{index}"])) * (item[2] - 1))
         for name, value in zip(("atk", "def", "hp"), (item + [0] * 13)[5:8]):
             values[battle.GENERAL_FIELDS[name]] += value
+        if gear["type"] in ("horse", "treasure"):
+            for field, value in treasure_refine.attributes(raw, item, config).items():
+                values[field] += value
     for index in range(1, 30):
         required = {int(v) for v in row.get(f"cond{index}ids", "").split(";") if v}
         if not required:

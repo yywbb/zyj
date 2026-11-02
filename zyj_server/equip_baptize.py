@@ -39,8 +39,8 @@ def validate(item, config):
         if any(value > caps[name] for name, value in zip(ATTRS, data[5:10])) or row["quality"] < 3 and data[10]:
             raise ValueError("装备洗炼属性超出上限")
     elif row["type"] in ("horse", "treasure"):
-        if data[3] or any(data[5:]):
-            raise ValueError("宝物高级属性暂不支持")
+        from . import treasure_refine
+        treasure_refine.validate(item, config)
     else:
         raise ValueError("装备类型暂不支持")
     return row

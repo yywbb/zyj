@@ -198,8 +198,10 @@ def prepare(opcode, save, body, config):
                 if baseline[:3] != [iid, item[1], 1] or any(baseline[3:]):
                     raise ValueError("装备重生基线无效")
                 gets.update(dict(receipt["costs"]))
-                costs.append((1001, config["renascence"][str(item[2])]["strengthencost"]
-                              + (int(config["global_kv"]["equip_baptize_cost"]["value"]) if len(item) > 10 and item[10] else 0)))
+                fee = (config["renascence"][str(item[2])]["treasurerecost"] + config["renascence"][str(item[3] if len(item) > 3 else 0)]["treasurerefinecost"]
+                       if row["type"] in ("horse", "treasure") else config["renascence"][str(item[2])]["strengthencost"]
+                       + (int(config["global_kv"]["equip_baptize_cost"]["value"]) if len(item) > 10 and item[10] else 0))
+                costs.append((1001, fee))
                 updates += encode_pb_field(6, 2, bytes.fromhex(receipt["before"]))
                 del state["receipts"][f"equip:{iid}"]
             else:

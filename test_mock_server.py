@@ -2954,7 +2954,7 @@ class ReplayRoutingTests(unittest.TestCase):
 
     def test_treasure_training_protects_worn_advanced_and_foreign_materials(self):
         baseline = self.seed_treasure_training()
-        for problem in ("worn", "cheer", "target_cheer", "refined_food", "refined_target", "starred_target",
+        for problem in ("worn", "cheer", "target_cheer", "refined_food", "starred_target",
                         "wrong_type", "coin", "props", "power", "experience"):
             saved = copy.deepcopy(baseline)
             equips = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 2, 1)
@@ -2966,10 +2966,10 @@ class ReplayRoutingTests(unittest.TestCase):
                 slot = (protocol.encode_pb_field(1, 0, 1) + protocol.encode_pb_field(2, 0, 0)
                         + protocol.encode_pb_field(8, 0, 1000100 if problem == "target_cheer" else 1000101))
                 player.record_slot_update(saved, protocol.encode_pb_field(5, 2, slot))
-            elif problem in ("refined_food", "refined_target", "starred_target", "wrong_type", "experience"):
+            elif problem in ("refined_food", "starred_target", "wrong_type", "experience"):
                 iid = 1000101 if problem in ("refined_food", "wrong_type") else 1000100
                 item = protocol.parse_ids_pb(equips[iid])
-                item[{"refined_food": 3, "refined_target": 3, "starred_target": 11, "wrong_type": 1, "experience": 4}[problem]] = (
+                item[{"refined_food": 3, "starred_target": 11, "wrong_type": 1, "experience": 4}[problem]] = (
                     25203 if problem == "wrong_type" else (1 << 31) - 1 if problem == "experience" else 1)
                 player.record_slot_update(saved, protocol.encode_pb_field(2, 2, recharge.ids(item)))
             elif problem == "coin":

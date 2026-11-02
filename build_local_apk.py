@@ -799,6 +799,19 @@ end''')
     if window.show and window.module.iid == t.equip.iid then
 ''')
         code = code[:start] + block + code[end:]
+    for name in ("UITreasureStrengthen", "UITreasureStrengthebyprop", "UITreasureRefine2"):
+        start = code.index(f"function {name}(")
+        end = code.index("\nend", start)
+        block = code[start:end]
+        assert block.count("    UIRequest({type = 10322})") == 1
+        block = block.replace("    UIRequest({type = 10322})", "").replace("    UIRequest({type = 1001})", "")
+        block = block.replace("    GameScene:addUpdate(1001)", "    GameScene:addUpdate(1200)")
+        marker = '    if GameScene.layers["treasureup"].show then\n'
+        assert block.count(marker) == 1
+        block = block.replace(marker, '''    local layer = GameScene.layers["treasureup"]
+    if layer.show and layer.module.data and layer.module.data.iid == t.equip.iid then
+''')
+        code = code[:start] + block + code[end:]
     patched["UIEquips"] = code
 
     code = read_script("window_equipBaptizeAutomatic").decode("utf-8").replace("\r\n", "\n")
@@ -924,6 +937,32 @@ def patch_sigil_scripts():
     return patched
 
 
+def patch_treasure_scripts():
+    code = read_script("GameTreasureUp").decode("utf-8").replace("\r\n", "\n")
+    for name, opcode in (("TreasureStrengthen", 1118), ("TreasureStrengthenByProp", 1210), ("TreasureRefine2", 1119)):
+        marker = f"function UI{name}CallBack("
+        start = code.index(marker)
+        end = code.index("\n", start)
+        code = code[:end + 1] + '''    if gamedata.ext.localTreasureBusy then
+        return 0,503,{type=503,msg="宝物正在结算，请等待回复；超时请重进游戏"}
+    end
+''' + code[end + 1:]
+        marker = f"    return 1, {opcode}, "
+        assert code.count(marker) == 1
+        code = code.replace(marker, "    gamedata.ext.localTreasureBusy = true\n" + marker)
+        marker = f"function Net{name}CallBack("
+        start = code.index(marker)
+        end = code.index("\n", start)
+        code = code[:end + 1] + "    gamedata.ext.localTreasureBusy = false\n" + code[end + 1:]
+    start = code.index("function UITreasureRefine2CallBack(")
+    end = code.index("\nfunction NetTreasureRefine2CallBack(", start)
+    block = code[start:end]
+    marker = "    for k,v in pairs(uireq.ids) do"
+    assert block.count(marker) == 1
+    code = code[:start] + block.replace(marker, "    for k,v in ipairs(uireq.ids) do") + code[end:]
+    return {"GameTreasureUp": code}
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -1010,6 +1049,9 @@ end"""
     end
     if error.ids[1] == 1140 or error.ids[1] == 1141 then
         gamedata.ext.localSigilBusy = false
+    end
+    if error.ids[1] == 1118 or error.ids[1] == 1119 or error.ids[1] == 1210 then
+        gamedata.ext.localTreasureBusy = false
     end
 ''')
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
@@ -1980,6 +2022,9 @@ end"""
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     for name, code in patch_sigil_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_treasure_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched

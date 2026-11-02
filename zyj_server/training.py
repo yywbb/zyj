@@ -3,7 +3,7 @@
 import random
 from fractions import Fraction
 
-from . import battle, equip_baptize, formation, qiankun
+from . import battle, equip_baptize, formation, qiankun, treasure_refine
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -220,12 +220,11 @@ def strengthen_treasure(save, opcode, body, config):
         values = parse_ids_pb(raw)
         if len(values) < 3 or not values[2]:
             raise ValueError("宝物等级存档无效")
-        row = config["equip"].get(str(values[1]), {})
+        row = equip_baptize.validate(values, config)
         if row.get("type") not in TREASURE_PROPS or row.get("quality") not in range(2, 7):
             raise ValueError("此物品不是可强化的普通宝物/坐骑")
-        if (values[2] > min(row["maxlevel"], len(config["treasure2_strengthen"]))
-                or any(values[3:4]) or any(values[5:])):
-            raise ValueError("精炼/升星等高级宝物尚不支持强化或吞噬")
+        if values[2] > min(row["maxlevel"], len(config["treasure2_strengthen"])):
+            raise ValueError("宝物强化等级超出配置上限")
         return values + [0] * max(0, 5 - len(values)), row
 
     values, row = item(target)
@@ -241,8 +240,8 @@ def strengthen_treasure(save, opcode, body, config):
             if iid == target or iid in occupied:
                 raise ValueError("不能吞噬目标自身或已穿戴的宝物")
             food, food_row = item(iid)
-            if food_row["type"] != row["type"]:
-                raise ValueError("只能吞噬同类宝物或坐骑")
+            if food_row["type"] != row["type"] or food[3]:
+                raise ValueError("只能吞噬同类且未精炼的宝物或坐骑")
             # 与原生预览一致：基础经验加已完成等级经验，不额外计入材料的剩余经验。
             amounts.append(food_row["exp"] + sum(config["treasure2_strengthen"][str(lv)][f'quality{food_row["quality"]}']
                                                 for lv in range(1, food[2] + 1)))
@@ -276,8 +275,5 @@ def strengthen_treasure(save, opcode, body, config):
     generals, power = equip_differences(save, equips, {target: changed}, config)
     save["world_state"]["1002"] = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world)
         if not ((n, w) == (2, 2) and pb_get_varint(v, 1) in foods)).hex()
-    # 吞噬实例不能按普通强化收据返还，避免重生退回不存在的材料。
-    receipts = qiankun.get_state(save)["receipts"]
-    for iid in (target, *foods):
-        receipts.pop(f"equip:{iid}", None)
+    treasure_refine.record_costs(save, equips[target], changed, [(1000, coin), *costs], [parse_ids_pb(equips[iid]) for iid in foods])
     return encode_pb_field(6, 2, changed) + generals, [(1000, coin), *costs], power

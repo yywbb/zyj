@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -51,7 +51,7 @@ def load_role_config(config_path):
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
-                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "build",
+                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
@@ -882,7 +882,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         activities.record_liveness(save, 17, replaced, role_config, now)
         if save.get("protagonist_snapshot"):
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
-    elif opcode in training.OPCODES:
+    elif opcode in (*training.OPCODES, *treasure_refine.OPCODES):
         if not body:
             if opcode == 1038:
                 body, costs, power_delta = training.use_exp(save, request_body, role_config)
@@ -891,8 +891,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 raw = next(v for n, w, v in iter_pb_fields(body) if (n, w) == (8, 2))
                 before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
                 qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config, save))
-            elif opcode in (1118, 1210):
-                body, costs, power_delta = training.strengthen_treasure(save, opcode, request_body, role_config)
+            elif opcode in (1118, 1119, 1210):
+                if opcode == 1119:
+                    body, costs, power_delta = treasure_refine.prepare(save, request_body, role_config)
+                else:
+                    body, costs, power_delta = training.strengthen_treasure(save, opcode, request_body, role_config)
                 for cid, count in costs:
                     change_item_count(save, cid, -count, role_config, now)
             else:
@@ -1013,18 +1016,18 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         for mid in WORLD_QUERY_IDS:
             if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
-    if responses and responses[0]["opcode"] in (*penglai.MUTATIONS, *equip_baptize.OPCODES) and save["world_state"]["1200"] != before["world_state"]["1200"]:
+    if responses and responses[0]["opcode"] in (*penglai.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES) and save["world_state"]["1200"] != before["world_state"]["1200"]:
         packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
     if responses and responses[0]["opcode"] == 1120 and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     baptize_cost = responses and responses[0]["opcode"] in equip_baptize.OPCODES and save["world_state"]["1002"] != before["world_state"]["1002"]
-    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS):
+    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1005, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
-                                                         *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, 1140, 1141) and not responses[0]["hex"])
+                                                         *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, 1140, 1141) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb or pet_update or self_update or sigil_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
