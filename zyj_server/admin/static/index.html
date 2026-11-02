@@ -3,27 +3,48 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>作妖计 · 本地管理</title>
+  <title>作妖计 · 本地管理中枢</title>
+  <link rel="stylesheet" href="/simplebar.min.css">
   <link rel="stylesheet" href="/style.css">
+  <script src="/simplebar.min.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <a class="skip" href="#main">跳到内容</a>
+  <a class="skip" href="#main">跳到主要内容</a>
   <header class="masthead">
-    <div class="brand">作妖计 <span>本地管理</span></div>
-    <p id="connection">正在连接服务端…</p>
-    <button id="refresh" type="button">刷新数据</button>
+    <div class="brand">
+      <span class="brand-title">作妖计</span>
+      <span class="brand-sub">本地管理中枢</span>
+      <span class="brand-badge">GM OPS</span>
+    </div>
+    <div class="masthead-status">
+      <span class="status-indicator"></span>
+      <p id="connection">正在连接服务端…</p>
+    </div>
+    <div class="masthead-actions">
+      <span class="server-endpoint">PORT 14600 / 14601</span>
+      <button id="refresh" type="button" title="刷新最新数据">
+        <span class="refresh-icon">⟳</span> 刷新数据
+      </button>
+    </div>
   </header>
   <div class="shell">
     <aside class="rail">
       <nav aria-label="管理页面">
-        <button id="nav-accounts" type="button" aria-current="page">账号档案</button>
-        <button id="nav-configs" type="button">游戏配置</button>
+        <button id="nav-accounts" type="button" aria-current="page">
+          <span class="nav-icon">👤</span> 账号档案
+        </button>
+        <button id="nav-configs" type="button">
+          <span class="nav-icon">⚙️</span> 游戏配置
+        </button>
       </nav>
       <div class="rail-note">
-        <strong>同一入口，各自进度</strong>
-        <p>手机与模拟器使用电脑的局域网 IP 连接游戏。</p>
-        <p>后台仅在这台电脑访问。列表读取最近一次落盘状态。</p>
+        <div class="note-header">
+          <span class="note-icon">📡</span>
+          <strong>本地联机说明</strong>
+        </div>
+        <p>手机与模拟器使用电脑局域网 IP 直连游戏端口 14600。</p>
+        <p>GM 后台仅在本机 14601 开放。读取最新落盘存档，独立隔离。</p>
       </div>
     </aside>
     <main id="main">
@@ -31,17 +52,27 @@
       <p id="pending" class="pending" hidden>配置已保存，等待服务端重启。请用当前配置重建并安装 APK，使客户端显示与服务端一致。</p>
       <section id="accounts-page" aria-labelledby="accounts-title">
         <div class="page-heading">
-          <div><h1 id="accounts-title">账号档案</h1><p>查看进度，管理离线存档。</p></div>
+          <div>
+            <h1 id="accounts-title">账号档案</h1>
+            <p>实时监控角色进度与阵容物资，安全执行离线备份与数据重置。</p>
+          </div>
           <span id="account-count"></span>
         </div>
         <div class="account-layout">
           <section class="account-index" aria-label="账号列表">
-            <label for="account-search">查找账号或角色</label>
-            <input id="account-search" type="search" placeholder="编号 / 角色名">
-            <div id="account-list"></div>
+            <div class="index-header">
+              <label for="account-search">查找账号或角色</label>
+              <input id="account-search" type="search" placeholder="输入编号或角色名搜索…">
+            </div>
+            <div class="account-list-box" id="account-list-container">
+              <div id="account-list"></div>
+            </div>
             <form id="account-jump" class="jump">
-              <label for="account-id">打开其他账号</label>
-              <div class="inline"><input id="account-id" type="number" min="1" max="1000" required placeholder="1–1000"><button>打开</button></div>
+              <label for="account-id">直达其他账号编号</label>
+              <div class="inline">
+                <input id="account-id" type="number" min="1" max="1000" required placeholder="1–1000">
+                <button type="submit">打开</button>
+              </div>
             </form>
           </section>
           <article id="account-detail" aria-label="账号详情" aria-live="polite">
@@ -50,30 +81,55 @@
         </div>
       </section>
       <section id="configs-page" aria-labelledby="configs-title" hidden>
-        <div class="page-heading"><div><h1 id="configs-title">游戏配置</h1><p>浏览原始配置与本地覆盖，保存后重启生效。</p></div></div>
+        <div class="page-heading">
+          <div>
+            <h1 id="configs-title">游戏配置</h1>
+            <p>查阅原始解包配置与本地补丁覆盖。修改保存后，重启服务端并重新打包 APK 生效。</p>
+          </div>
+        </div>
         <div class="config-help">
-          <strong>当前开放编辑</strong>
-          <p>恢复道具的恢复量、首日两项奖励、强化任务门槛与奖励。其他条目可查阅；已有领取记录保持有效。</p>
+          <div class="help-header">
+            <span class="help-icon">💡</span>
+            <strong>当前开放可编辑配置</strong>
+          </div>
+          <p>支持在线覆盖恢复道具量、首日任务奖励、强化任务门槛与掉落。其余条目仅供只读查阅。</p>
           <div id="config-shortcuts" class="actions"></div>
         </div>
         <form id="config-search" class="config-search">
-          <div><label for="config-name">配置表</label><input id="config-name" list="config-names" value="props" required autocomplete="off"><datalist id="config-names"></datalist></div>
-          <div><label for="config-query">搜索 ID 或内容</label><input id="config-query" type="search" maxlength="100" placeholder="例如 20014 或 体力丹"></div>
-          <button class="primary">查询</button>
+          <div class="search-field">
+            <label for="config-name">配置表名称</label>
+            <input id="config-name" list="config-names" value="props" required autocomplete="off">
+            <datalist id="config-names"></datalist>
+          </div>
+          <div class="search-field">
+            <label for="config-query">搜索 ID 或关键字</label>
+            <input id="config-query" type="search" maxlength="100" placeholder="例如 20014 或 体力丹">
+          </div>
+          <button class="primary" type="submit">查询配置</button>
         </form>
         <div id="config-rows" aria-live="polite"></div>
-        <div class="pager"><span id="config-count"></span><button id="previous" type="button" disabled>上一页</button><button id="next" type="button" disabled>下一页</button></div>
+        <div class="pager">
+          <span id="config-count"></span>
+          <button id="previous" type="button" disabled>上一页</button>
+          <button id="next" type="button" disabled>下一页</button>
+        </div>
       </section>
-      <footer>本地模拟服 · 自研战斗 v2 / 招募 / 模拟充值 / 独立存档</footer>
+      <footer>作妖计 · 本地模拟服 GM 控制台 · 自研战斗 v2 / 仙魔招募 / 模拟充值 / 独立多存档体系</footer>
     </main>
   </div>
   <dialog id="editor" aria-labelledby="editor-title">
     <form id="edit-form">
-      <div class="dialog-heading"><h2 id="editor-title">编辑配置</h2><button id="close-editor" type="button" aria-label="关闭配置编辑">关闭</button></div>
-      <p>只保存下方字段。数量变化时，请同步修改说明文字。</p>
+      <div class="dialog-heading">
+        <h2 id="editor-title">编辑配置</h2>
+        <button id="close-editor" type="button" aria-label="关闭配置编辑">✕</button>
+      </div>
+      <p class="dialog-sub">只保存下方高亮字段。涉及数量或道具变动时，建议同步维护说明描述。</p>
       <div id="edit-fields"></div>
       <p id="edit-error" role="alert" class="error" hidden></p>
-      <div class="actions"><button id="save-config" class="primary">保存配置</button><button id="revert-config" type="button">恢复原配置</button></div>
+      <div class="actions dialog-actions">
+        <button id="save-config" class="primary" type="submit">保存本地覆盖</button>
+        <button id="revert-config" type="button">恢复原配置</button>
+      </div>
     </form>
   </dialog>
 </body>

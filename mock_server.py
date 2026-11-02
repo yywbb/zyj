@@ -93,7 +93,8 @@ def handle_client(conn, addr, account_store):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="局域网多账号模拟服，监听 0.0.0.0:14600，不需要 ADB")
     parser.add_argument("--account", type=accounts.parse_account_id, default=1, help="重置目标账号（默认 1），不限制其他账号登录")
-    parser.add_argument("--admin-port", type=int, default=14601, help="本机网页后台端口（默认 14601，0 为自动分配）")
+    parser.add_argument("--admin-host", default=os.environ.get("ZYJ_ADMIN_HOST", "0.0.0.0"), help="网页管理后台监听地址（默认 0.0.0.0）")
+    parser.add_argument("--admin-port", type=int, default=14601, help="网页管理后台端口（默认 14601，0 为自动分配）")
     reset = parser.add_mutually_exclusive_group()
     reset.add_argument("--reset", action="store_true", help="清空目标账号存档后启动")
     reset.add_argument("--reset-guide", action="store_true", help="仅清空目标账号引导后启动")
@@ -120,12 +121,12 @@ def main(argv=None):
             action = "reset" if args.reset else "reset-guide"
             result = account_store.maintain(args.account, action, account_store.snapshot(args.account)["revision"])
             print_flush(f"[✓] 账号 {args.account} 已执行 {action}，原存档备份: {result['backup_id']}")
-        admin = start_admin(args.admin_port, account_store, configs)
+        admin = start_admin(args.admin_port, account_store, configs, host=args.admin_host)
 
         print_flush(f"\n=======================================================")
         print_flush(f"  《作妖记》局域网多账号模拟服已启动（无需 ADB）")
         print_flush(f"  监听地址: 0.0.0.0:{PORT}")
-        print_flush(f"  本机管理后台: http://127.0.0.1:{admin.server_port}")
+        print_flush(f"  管理后台: http://{args.admin_host}:{admin.server_port}")
         print_flush(f"  手机/模拟器直连电脑的局域网 IP:{PORT}；账号 1 沿用 {SAVE_PATH}")
         print_flush(f"  无密码，仅用于可信局域网，禁止直接暴露公网")
         print_flush(f"=======================================================\n")

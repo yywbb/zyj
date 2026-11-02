@@ -12,17 +12,19 @@ from . import views
 
 STATIC = Path(__file__).with_name("static")
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
-          "/style.css": ("style.css", "text/css")}
+          "/style.css": ("style.css", "text/css"),
+          "/simplebar.min.js": ("simplebar.min.js", "text/javascript"),
+          "/simplebar.min.css": ("simplebar.min.css", "text/css")}
 
 
 class AdminServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port, accounts, configs):
+    def __init__(self, port, accounts, configs, host="127.0.0.1"):
         self.accounts = accounts
         self.configs = configs
         self.token = secrets.token_urlsafe(32)
-        super().__init__(("127.0.0.1", port), AdminHandler)
+        super().__init__((host, port), AdminHandler)
 
 
 class AdminHandler(BaseHTTPRequestHandler):
@@ -45,6 +47,13 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _check_origin(self):
         port = self.server.server_port
+        if self.server.server_address[0] in ("0.0.0.0", "::"):
+            host_header = self.headers.get("Host", "")
+            if ":" in host_header:
+                hdr_port = host_header.split(":")[-1]
+                if hdr_port != str(port):
+                    raise PermissionError("主机端口不匹配")
+            return
         hosts = (f"127.0.0.1:{port}", f"localhost:{port}")
         if self.headers.get("Host") not in hosts:
             raise PermissionError("请通过启动日志中的本机地址访问后台。")
@@ -112,7 +121,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send(500, {"error": f"读写失败，操作未完成: {error}"})
 
 
-def start_admin(port, accounts, configs):
-    server = AdminServer(port, accounts, configs)
+def start_admin(port, accounts, configs, host="127.0.0.1"):
+    server = AdminServer(port, accounts, configs, host=host)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
