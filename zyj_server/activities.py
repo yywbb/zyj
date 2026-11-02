@@ -111,7 +111,7 @@ def _equipment(save):
 
 
 def build_reward(save, specification, config, quantity=1):
-    coin, gold, props, equipment = 0, 0, [], []
+    coin, gold, stamina, energy, props, equipment = 0, 0, 0, 0, [], []
     souls, gems = [], []
     roster = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))
     soul_iid = max([3000000, *(pb_get_varint(v, 1) for n, w, v in roster if n == 3 and w == 2)])
@@ -129,7 +129,11 @@ def build_reward(save, specification, config, quantity=1):
             coin += count
         elif cid == 1001:
             gold += count
-        elif (cid in (1004, 1005) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
+        elif cid == 1002:
+            stamina += count
+        elif cid == 1003:
+            energy += count
+        elif (cid in (1004, 1005, 1008, 1019) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
               or str(cid) in config["treasure2_fragment"] or str(cid) in config["equip_fragment"]
                or str(cid) in config["pet3_fragment"] or str(cid) in config["redl_awake_item"] or str(cid) in config["fashioncoat"]
                or str(cid) in config["trump_gem"] or str(cid) in config["token"] or str(cid) in config["token_fragment"]):
@@ -158,6 +162,8 @@ def build_reward(save, specification, config, quantity=1):
             raise ValueError(f"不支持的活动奖励类型: {cid}")
     return ((encode_pb_field(1, 0, coin) if coin else b"")
             + (encode_pb_field(2, 0, gold) if gold else b"")
+            + (encode_pb_field(3, 0, stamina) if stamina else b"")
+            + (encode_pb_field(4, 0, energy) if energy else b"")
             + encode_pb_field(5, 2, b"".join(props)) + b"".join(equipment)
             + encode_pb_field(7, 2, b"".join(souls)) + b"".join(gems) + encode_pb_field(10, 2, b""))
 

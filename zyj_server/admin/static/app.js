@@ -3,9 +3,9 @@
 const $ = (id) => document.getElementById(id);
 const resources = { gold: "元宝", coin: "银币", stamina: "体力", energy: "精力" };
 const tabs = { summary: "角色概况", roster: "武将与装备", inventory: "背包", progress: "副本与引导", business: "充值与活动", maintenance: "账号与备份" };
-const state = { token: "", accounts: [], account: 1, page: "overview", accountOffset: 0, configOffset: 0, catalogOffset: 0, operationsOffset: 0 };
-let info, editing, management, gmTarget = null, cart = [], pendingGrant = null, submitting = false;
-let navigation = 0, accountRequest = 0, configRequest = 0, catalogRequest = 0, gmRequest = 0, logRequest = 0;
+const state = { token: "", accounts: [], account: 1, page: "overview", accountOffset: 0, configOffset: 0, catalogOffset: 0, operationsOffset: 0, mailOffset: 0, mailCatalogOffset: 0 };
+let info, editing, management, gmTarget = null, cart = [], mailCart = [], pendingGrant = null, submitting = false;
+let navigation = 0, accountRequest = 0, configRequest = 0, catalogRequest = 0, gmRequest = 0, logRequest = 0, mailRequest = 0, mailCatalogRequest = 0;
 try { pendingGrant = JSON.parse(sessionStorage.getItem("gm-pending") || "null"); } catch { /* 浏览器存储不可用时仍保留本页回执。 */ }
 
 function node(tag, text, className) {
@@ -484,12 +484,164 @@ async function loadOperations(offset = 0) {
   state.operationsOffset = offset; $("operations-rows").replaceChildren(operationTable(result.rows)); pager("operations", offset, result.total);
 }
 
+function addMailItem(item) {
+  if (!mailCart.some((r) => r.cid === item.cid)) mailCart.push({ ...item, count: 1 });
+  renderMailCart();
+}
+function renderMailCart() {
+  $("mail-cart-count").textContent = `${mailCart.length} 种物品`;
+  $("mail-cart").replaceChildren(table(mailCart, [
+    ["物品", (r) => r.name || String(r.cid)],
+    ["数量", (r) => {
+      const input = node("input"); input.type = "number"; input.min = "1"; input.max = r.max || 1000000; input.step = "1"; input.required = true; input.value = r.count;
+      input.setAttribute("aria-label", `${r.name || r.cid}数量`); input.oninput = () => { r.count = Number(input.value); }; return input;
+    }],
+    ["操作", (r) => button("移除", () => { mailCart = mailCart.filter((item) => item.cid !== r.cid); renderMailCart(); })]
+  ], "从左侧目录添加本次要发放的物品。"));
+}
+async function loadMailCatalog(offset = 0) {
+  const request = ++mailCatalogRequest;
+  const result = await api(`/api/catalog?${new URLSearchParams({ q: $("mail-catalog-query").value.trim(), kind: $("mail-catalog-kind").value, offset })}`);
+  if (request !== mailCatalogRequest) return;
+  state.mailCatalogOffset = offset;
+  $("mail-catalog-rows").replaceChildren(table(result.rows, [
+    ["物品", (r) => { const span = node("span", r.name); span.title = r.description; return span; }],
+    ["ID / 类型", (r) => `${r.cid} / ${r.kind}`],
+    ["操作", (r) => button("添加", () => addMailItem(r))]
+  ], "未找到物品，请修改名称、ID 或类型。"));
+  pager("mail-catalog", offset, result.total);
+}
+function renderMailCommonItems() {
+  if (!info || !info.common_items || $("mail-common-items").children.length) return;
+  for (const item of info.common_items) {
+    $("mail-common-items").append(button(item.name, () => addMailItem(item)));
+  }
+}
+async function loadMails(offset = 0) {
+  const request = ++mailRequest;
+  const result = await api(`/api/mails?offset=${offset}&limit=25`);
+  if (request !== mailRequest) return;
+  state.mailOffset = offset;
+  const columns = [
+    ["编号", (r) => String(r.id)],
+    ["目标", (r) => r.target === 0 ? badge("全服所有玩家", "online") : link(`账号 ${r.target}`, `#account/${r.target}/summary`)],
+    ["邮件标题", (r) => r.title],
+    ["正文说明", (r) => {
+      const p = node("span", r.content || "（无正文）");
+      p.title = r.content || "";
+      return p;
+    }],
+    ["附件物品与充值", (r) => {
+      const parts = [];
+      if (r.card === 1) parts.push("【25元月卡】");
+      else if (r.card === 2) parts.push("【98元终身卡】");
+      if (r.attachments) {
+        for (const [cid, cnt] of Object.entries(r.attachments)) {
+          const item = info?.common_items?.find((it) => it.cid === Number(cid)) || {
+            name: cid === "1001" ? "元宝" : cid === "1000" ? "银币" : cid === "1002" ? "体力" : cid === "1003" ? "精力" : cid === "1008" ? "贵族经验" : `物品${cid}`
+          };
+          parts.push(`${item.name || cid} x${number(cnt)}`);
+        }
+      }
+      return parts.length ? parts.join("，") : "无附件";
+    }],
+    ["发送时间", (r) => date(r.created_at)],
+    ["操作", (r) => button("撤回/删除", async () => {
+      if (confirm(`确认撤回/删除系统邮件 #${r.id} (${r.title})？`)) {
+        await api(`/api/mails/${r.id}/delete`, { reason: "GM 撤回邮件" });
+        message(`系统邮件 #${r.id} 已删除。`);
+        await loadMails(state.mailOffset);
+      }
+    })]
+  ];
+  $("mail-list-rows").replaceChildren(table(result.rows, columns, "暂无已发送的系统邮件。"));
+  pager("mail-list", offset, result.total, 25);
+}
+async function loadMailsPage() {
+  renderMailCommonItems();
+  renderMailCart();
+  await Promise.all([loadMailCatalog(0), loadMails(0)]);
+}
+async function submitSendMail(event) {
+  event.preventDefault();
+  const targetType = $("mail-target-type").value;
+  const target = targetType === "all" ? 0 : Number($("mail-target-account").value);
+  if (targetType === "single" && (!target || target < 1 || target > 1000)) {
+    throw new Error("请指定 1~1000 的目标账号编号");
+  }
+  const title = $("mail-title").value.trim();
+  if (!title) throw new Error("请填写邮件标题");
+  const content = $("mail-content").value.trim();
+
+  const rechargePreset = $("mail-recharge-preset").value;
+  let rechargeInfo = { rmb: 0, gold: 0, card: 0 };
+  if (rechargePreset === "25_card1") {
+    rechargeInfo = { rmb: 25, gold: 250, card: 1 };
+  } else if (rechargePreset === "98_card2") {
+    rechargeInfo = { rmb: 98, gold: 980, card: 2 };
+  } else if (rechargePreset === "6") {
+    rechargeInfo = { rmb: 6, gold: 66, card: 0 };
+  } else if (rechargePreset === "30") {
+    rechargeInfo = { rmb: 30, gold: 330, card: 0 };
+  } else if (rechargePreset === "68") {
+    rechargeInfo = { rmb: 68, gold: 750, card: 0 };
+  } else if (rechargePreset === "128") {
+    rechargeInfo = { rmb: 128, gold: 1280, card: 0 };
+  } else if (rechargePreset === "198") {
+    rechargeInfo = { rmb: 198, gold: 2280, card: 0 };
+  } else if (rechargePreset === "328") {
+    rechargeInfo = { rmb: 328, gold: 3780, card: 0 };
+  } else if (rechargePreset === "648") {
+    rechargeInfo = { rmb: 648, gold: 7780, card: 0 };
+  } else if (rechargePreset === "custom") {
+    rechargeInfo = {
+      rmb: Number($("mail-recharge-rmb").value) || 0,
+      gold: Number($("mail-recharge-gold").value) || 0,
+      card: 0
+    };
+  }
+
+  const resources = {
+    gold: Number($("mail-res-gold").value) || 0,
+    coin: Number($("mail-res-coin").value) || 0,
+    stamina: Number($("mail-res-stamina").value) || 0,
+    energy: Number($("mail-res-energy").value) || 0
+  };
+
+  const reason = $("mail-reason").value.trim() || "GM 发送邮件";
+
+  const payload = {
+    target,
+    title,
+    content,
+    resources,
+    items: mailCart.map(({ cid, count }) => ({ cid, count })),
+    recharge: rechargeInfo,
+    reason
+  };
+
+  const result = await api("/api/mails", payload);
+  message(`系统邮件 #${result.id} 发送成功！`);
+  $("mail-title").value = "";
+  $("mail-content").value = "";
+  $("mail-res-gold").value = "";
+  $("mail-res-coin").value = "";
+  $("mail-res-stamina").value = "";
+  $("mail-res-energy").value = "";
+  $("mail-recharge-preset").value = "0";
+  $("mail-recharge-custom-box").hidden = true;
+  $("mail-recharge-gold-box").hidden = true;
+  mailCart = [];
+  renderMailCart();
+  await loadMails(0);
+}
+
 async function route() {
   const [target = "overview", id, tab] = location.hash.slice(1).split("/");
-  const page = target === "account" ? "accounts" : ["overview", "accounts", "gm", "configs", "operations"].includes(target) ? target : "overview";
-  state.page = page; navigation++; accountRequest++; gmRequest++;
+  const page = target === "account" ? "accounts" : ["overview", "accounts", "gm", "mails", "configs", "operations"].includes(target) ? target : "overview";
+  state.page = page; navigation++; accountRequest++; gmRequest++; mailRequest++; mailCatalogRequest++;
   grantLock();
-  for (const name of ["overview", "accounts", "gm", "configs", "operations"]) {
+  for (const name of ["overview", "accounts", "gm", "mails", "configs", "operations"]) {
     $(`${name}-page`).hidden = name !== page;
     if (name === page) $(`nav-${name}`).setAttribute("aria-current", "page"); else $(`nav-${name}`).removeAttribute("aria-current");
   }
@@ -510,6 +662,7 @@ async function route() {
     }
     return Promise.all([loadGmAccount(account), loadCatalog(0)]);
   }
+  if (page === "mails") return loadMailsPage();
   if (page === "configs") return loadConfigs(0);
   $("operations-account").value = id || ""; return loadOperations(0);
 }
@@ -543,6 +696,21 @@ $("revert-config").onclick = () => run(() => saveConfig(true));
 $("operations-search").onsubmit = (event) => { event.preventDefault(); run(() => loadOperations(0)); };
 $("operations-previous").onclick = () => run(() => loadOperations(Math.max(0, state.operationsOffset - 50)));
 $("operations-next").onclick = () => run(() => loadOperations(state.operationsOffset + 50));
+$("mail-target-type").onchange = () => { $("mail-target-account-box").hidden = $("mail-target-type").value !== "single"; };
+$("mail-recharge-preset").onchange = () => {
+  const isCustom = $("mail-recharge-preset").value === "custom";
+  $("mail-recharge-custom-box").hidden = !isCustom;
+  $("mail-recharge-gold-box").hidden = !isCustom;
+};
+$("mail-form").onsubmit = (event) => run(() => submitSendMail(event));
+$("mail-catalog-search").onclick = () => run(() => loadMailCatalog(0));
+$("mail-catalog-query").onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); run(() => loadMailCatalog(0)); } };
+$("mail-catalog-kind").onchange = () => run(() => loadMailCatalog(0));
+$("mail-catalog-previous").onclick = () => run(() => loadMailCatalog(Math.max(0, state.mailCatalogOffset - 50)));
+$("mail-catalog-next").onclick = () => run(() => loadMailCatalog(state.mailCatalogOffset + 50));
+$("mail-refresh-list").onclick = () => run(() => loadMails(0));
+$("mail-list-previous").onclick = () => run(() => loadMails(Math.max(0, state.mailOffset - 25)));
+$("mail-list-next").onclick = () => run(() => loadMails(state.mailOffset + 25));
 $("refresh").onclick = () => run(async () => { await status(); await route(); });
 document.querySelector(".skip").onclick = (event) => { event.preventDefault(); $("main").focus(); };
 window.addEventListener("hashchange", () => { if (info) run(route); });

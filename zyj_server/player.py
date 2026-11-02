@@ -4,6 +4,7 @@ import copy
 import functools
 import json
 import os
+from pathlib import Path
 import random
 import tempfile
 import time
@@ -103,6 +104,16 @@ def load_save(save_path, step_counts):
         except Exception as e:
             print_flush(f"[!] 读取存档失败 ({e})，保留原文件并停止加载")
             raise ValueError("存档读取失败，拒绝用空进度覆盖") from e
+    try:
+        from . import db
+        p = Path(save_path)
+        aid = int(p.parent.name) if p.parent.name.isdigit() and 1 <= int(p.parent.name) <= 1000 else 1
+        db_path = db.get_db_path(save_path)
+        data = db.load_player(db_path, aid) if db_path.exists() else None
+        if data is not None:
+            return migrate_guide(data, step_counts)
+    except Exception:
+        pass
     return get_default_save()
 
 
@@ -111,6 +122,16 @@ def save_role(save_data, save_path, step_counts):
     try:
         save_data["last_login"] = time.time()
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # 同步写入 SQLite (若数据库存在则同步)
+        try:
+            from . import db
+            db_path = db.get_db_path(save_path)
+            if db_path.exists():
+                p = Path(save_path)
+                aid = int(p.parent.name) if p.parent.name.isdigit() and 1 <= int(p.parent.name) <= 1000 else 1
+                db.save_player(db_path, aid, save_data)
+        except Exception:
+            pass
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(save_path), delete=False) as f:
             temporary_path = f.name
             json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -489,7 +510,16 @@ def apply_reward(save, body, role_config, now=None):
                     if cid is None or count is None:
                         raise ValueError("道具变更缺少 ID/数量")
                     count = (count & 0xffffffff) - (1 << 32) if count & (1 << 31) else count
-                    if str(cid) in role_config["fashioncoat"]:
+                    if cid == 1008:
+                        if field == 5 and count > 0:
+                            current_time = int(time.time()) if now is None else now
+                            rstate = recharge.get_state(save)
+                            rstate["rmb"] += count
+                            save["role_state"]["vip"] = recharge.vip(rstate, role_config)
+                            welfare.get_state(save)["daily_rmb"] += count
+                            if 1 <= activities.begin7day_day(save, current_time) <= 7:
+                                activities.get_state(save)["begin7day_rmb"] += count
+                    elif str(cid) in role_config["fashioncoat"]:
                         if field != 5 or count != 1:
                             raise ValueError("时装奖励数量无效")
                         if str(cid) not in fashion.get_state(save, role_config)["levels"]:

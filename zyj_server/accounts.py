@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, guild, guild_chat, guild_games, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -59,6 +59,8 @@ class AccountStore:
         self.lock = threading.RLock()
         # shortcut: 限流仅在本进程内保留；支持多进程部署时再共享计数。
         self.failed_logins = {}
+        from . import db
+        self.db_path = db.get_db_path(self.save_path)
 
     def path(self, account):
         if type(account) is not int or not 1 <= account <= 1000:
@@ -84,6 +86,12 @@ class AccountStore:
             record = {"algorithm": "pbkdf2_sha256", "iterations": PASSWORD_ITERATIONS,
                       "salt": salt.hex(), "hash": digest.hex()}
             storage.atomic_write(path, json.dumps(record).encode("utf-8"))
+            try:
+                from . import db
+                if self.db_path.exists():
+                    db.save_credentials(self.db_path, account, record)
+            except Exception:
+                pass
             return {"account": account, "registered": True}
 
     def authenticate(self, account, password):
@@ -323,7 +331,8 @@ class AccountStore:
         if opcode == 3625:
             return ranking.temple_query(body, saves, viewer, self.role_config)
         if opcode in (3100, 3101, 3102):
-            return ranking.prepare_mail(opcode, save, body, self.observe_rankings(), viewer, self.role_config)
+            return mail.prepare(opcode, save, body, self.save_path.with_name("mails.json"),
+                                self.observe_rankings(), viewer, self.role_config, int(time.time()))
         if opcode in (5602, 5603):
             if body:
                 raise ValueError("成长基线查询不接受参数")
@@ -406,6 +415,12 @@ class AccountStore:
             previous = storage.backup(directory, path.read_bytes()) if path.exists() else None
             if action == "reset":
                 path.unlink()
+                try:
+                    from . import db
+                    if self.db_path.exists():
+                        db.delete_player(self.db_path, account)
+                except Exception:
+                    pass
             elif restored is not None and not player.save_role(restored, path, self.step_counts):
                 raise OSError("保存失败，原存档已保留")
             return {"backup_id": previous, "account": account, "action": action}

@@ -126,6 +126,14 @@ def main(argv=None):
     configs = configuration.ConfigStore(CONFIG_ZIP)
     step_counts = guide.load_guide_step_counts(CONFIG_ZIP)
     role_config = player.load_role_config(CONFIG_ZIP)
+    # 初始化 SQLite 数据库与自动数据迁移
+    try:
+        from zyj_server import db
+        db_path = os.path.join(BASE_DIR, "zyj.db")
+        db.init_db(db_path, BASE_DIR)
+        print_flush(f"[✓] SQLite 数据库已就绪: {db_path} (WAL 模式)")
+    except Exception as dbe:
+        print_flush(f"[!] SQLite 数据库初始化异常: {dbe}")
     frames = replay.load_recordings(RECORD_PATH)
     tables = replay.build_routing_tables(frames)
     account_store = accounts.AccountStore(SAVE_PATH, tables, step_counts, role_config)

@@ -13,7 +13,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from zyj_server import accounts, configuration, formation, guide, player, protocol, replay, storage
+from zyj_server import accounts, configuration, formation, guide, player, protocol, recharge, replay, storage
 from zyj_server.admin import gm, views
 from zyj_server.admin.http import start_admin
 from zyj_server.session import Session
@@ -1505,6 +1505,320 @@ class AdminHttpTests(AdminFixture):
         changed = next(r for r in records["rows"] if r["action"] == "config")
         self.assertEqual(changed["result"]["changes"], [{"name": "param1", "before": "25", "after": "31"}])
         self.assertEqual(self.request("/api/configs/props?q=20014")[2]["rows"][0]["original"]["param1"], "25")
+
+    def test_gm_mail_http_endpoints_send_list_and_delete(self):
+        # 1. 初始邮件列表为空
+        code, _, list_res = self.request("/api/mails")
+        self.assertEqual(code, 200)
+        self.assertEqual(list_res["total"], 0)
+
+        # 2. 发送邮件到指定账号 1，包含金币、体力、道具和充值
+        payload1 = {
+            "target": 1,
+            "title": "测试个人补偿",
+            "content": "补偿内容说明",
+            "resources": {"gold": 1000, "coin": 50000, "stamina": 30},
+            "items": [{"cid": 20014, "count": 5}],
+            "recharge": {"rmb": 648, "gold": 6480, "card": 0},
+            "reason": "测试账号1补发充值与资源"
+        }
+        code, _, res1 = self.request("/api/mails", payload1)
+        self.assertEqual(code, 200)
+        self.assertEqual(res1["title"], "测试个人补偿")
+        self.assertEqual(res1["target"], 1)
+        self.assertEqual(res1["recharge_rmb"], 648)
+        self.assertEqual(res1["attachments"]["1008"], 648)
+        self.assertEqual(res1["attachments"]["1001"], 7480) # 1000 + 6480
+        self.assertEqual(res1["attachments"]["20014"], 5)
+        mail1_id = res1["id"]
+
+        # 3. 发送全服邮件 (target = 'all' 或 0)
+        payload2 = {
+            "target": "all",
+            "title": "全服狂欢礼包",
+            "content": "全服人人有份",
+            "resources": {"gold": 2000},
+            "items": [],
+            "recharge": {"card": 1},
+            "reason": "测试全服发放月卡"
+        }
+        code, _, res2 = self.request("/api/mails", payload2)
+        self.assertEqual(code, 200)
+        self.assertEqual(res2["target"], 0)
+        self.assertEqual(res2["card"], 1)
+        self.assertEqual(res2["recharge_rmb"], 25)
+        mail2_id = res2["id"]
+
+        # 4. 获取邮件列表并测试筛选与分页
+        code, _, list_res = self.request("/api/mails")
+        self.assertEqual(code, 200)
+        self.assertEqual(list_res["total"], 2)
+        self.assertEqual([m["id"] for m in list_res["rows"]], [mail2_id, mail1_id])
+
+        # 按账号筛选
+        code, _, filter_res = self.request("/api/mails?account=1")
+        self.assertEqual(filter_res["total"], 2) # 全服邮件 (0) + 账号 1
+        code, _, filter_res2 = self.request("/api/mails?account=2")
+        self.assertEqual(filter_res2["total"], 1) # 仅全服邮件 (0)
+
+        # 5. 校验非法邮件参数拦截
+        self.assertEqual(self.request("/api/mails", {"title": "", "target": 1})[0], 400)
+        self.assertEqual(self.request("/api/mails", {"title": "有效标题", "target": 9999})[0], 400)
+
+        # 6. 删除/撤回邮件
+        code, _, del_res = self.request(f"/api/mails/{mail1_id}/delete", {"reason": "撤回个人邮件"})
+        self.assertEqual(code, 200)
+        self.assertTrue(del_res["deleted"])
+
+        # 再次查询确认已删除
+        code, _, list_res2 = self.request("/api/mails")
+        self.assertEqual(list_res2["total"], 1)
+        self.assertEqual(list_res2["rows"][0]["id"], mail2_id)
+
+        # 7. 确认操作流水中有 mail 和 mail-delete 记录
+        operations = self.request("/api/operations")[2]["rows"]
+        actions = [op["action"] for op in operations]
+        self.assertIn("mail", actions)
+        self.assertIn("mail-delete", actions)
+
+    def test_gm_mail_game_protocol_query_claim_recharge_and_delete(self):
+        # 准备账号 1 和账号 2
+        self.save(1)
+        self.save(2)
+
+        # GM 发送全服邮件包含 500 元宝和 68 元充值 (680元宝+68VIP经验)
+        self.request("/api/mails", {
+            "target": "all",
+            "title": "全服充值福利",
+            "content": "祝大家游戏愉快",
+            "resources": {"gold": 500},
+            "recharge": {"rmb": 68, "gold": 680},
+            "reason": "测试全服充值"
+        })
+
+        # GM 发送指定账号 1 的专属月卡邮件
+        self.request("/api/mails", {
+            "target": 1,
+            "title": "专属月卡体验",
+            "content": "专属月卡已送达",
+            "recharge": {"card": 1},
+            "items": [{"cid": 20014, "count": 10}],
+            "reason": "测试账号1月卡与招募令"
+        })
+
+        # 模拟账号 1 客户端登录并与服务端通信
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        session = self.store.open_session(1, PASSWORD, ("127.0.0.1", 12345))
+        try:
+            # 1. 客户端请求 3100 邮件列表
+            packets = session.handle(3100, 1, b"")
+            self.assertEqual(len(packets), 1)
+            magic, plen, opcode, seq = struct.unpack(">IIII", packets[0][:16])
+            self.assertEqual(opcode, 3100)
+            body = packets[0][16:]
+            fields = list(protocol.iter_pb_fields(body))
+            # 账号 1 应该收到两封邮件（全服邮件 + 个人月卡邮件）
+            self.assertEqual(len([f for f in fields if f[0] == 2]), 2)
+
+            mail_ids = []
+            for _, _, raw_mail in [f for f in fields if f[0] == 2]:
+                m_fields = dict((n, v) for n, w, v in protocol.iter_pb_fields(raw_mail))
+                mid = m_fields[1]
+                mail_ids.append(mid)
+                status = m_fields[4]
+                self.assertEqual(status, 0) # 未领取
+
+            self.assertEqual(len(mail_ids), 2)
+            personal_mid = max(mail_ids)
+            global_mid = min(mail_ids)
+
+            # 2. 未领取有附件的邮件，删除应被拒绝 (999999)
+            del_packet = session.handle(3102, 2, protocol.encode_pb_field(1, 0, personal_mid))
+            self.assertEqual(struct.unpack(">IIII", del_packet[0][:16])[2], 999999)
+
+            # 3. 领取账号 1 的个人邮件 (月卡 + 10个招募令)
+            before_gold = session.save["role_state"]["gold"]
+            claim_packet = session.handle(3101, 3, protocol.encode_pb_field(1, 0, personal_mid))
+            self.assertEqual(struct.unpack(">IIII", claim_packet[0][:16])[2], 3101)
+
+            # 验证月卡效果与物品到账
+            rstate = recharge.get_state(session.save)
+            self.assertTrue(rstate["month_until"] > 0)
+            self.assertEqual(rstate["card_rmb"], 25)
+            self.assertEqual(rstate["rmb"], 25)
+            self.assertEqual(session.save["role_state"]["vip"], recharge.vip(rstate, CONFIG))
+            self.assertEqual(session.save["role_state"]["gold"], before_gold + 250)
+            # 验证招募令到账
+            props_1200 = session.save["world_state"]["1200"]
+            token_count = next(protocol.pb_get_varint(v, 2) for n, w, v in protocol.iter_pb_fields(bytes.fromhex(props_1200))
+                               if n == 1 and w == 2 and protocol.pb_get_varint(v, 1) == 20014)
+            self.assertEqual(token_count, 10)
+
+            # 4. 重复领取应被拒绝 (999999)
+            dup_packet = session.handle(3101, 4, protocol.encode_pb_field(1, 0, personal_mid))
+            self.assertEqual(struct.unpack(">IIII", dup_packet[0][:16])[2], 999999)
+
+            # 5. 领取全服邮件 (68元充值 + 500+680元宝)
+            claim2_packet = session.handle(3101, 5, protocol.encode_pb_field(1, 0, global_mid))
+            self.assertEqual(struct.unpack(">IIII", claim2_packet[0][:16])[2], 3101)
+            self.assertEqual(session.save["recharge_state"]["rmb"], 25 + 68)
+            self.assertEqual(session.save["role_state"]["vip"], recharge.vip(session.save["recharge_state"], CONFIG))
+            self.assertEqual(session.save["role_state"]["gold"], before_gold + 250 + 1180)
+
+            # 6. 删除已领取的邮件
+            del_packet2 = session.handle(3102, 6, protocol.encode_pb_field(1, 0, personal_mid))
+            self.assertEqual(struct.unpack(">IIII", del_packet2[0][:16])[2], 3102)
+
+            # 再次查询 3100，个人邮件已不在列表中，全服邮件状态为已领取 (status=2)
+            packets2 = session.handle(3100, 7, b"")
+            remaining_mails = [f for f in protocol.iter_pb_fields(packets2[0][16:]) if f[0] == 2]
+            self.assertEqual(len(remaining_mails), 1)
+            remaining_fields = dict((n, v) for n, w, v in protocol.iter_pb_fields(remaining_mails[0][2]))
+            self.assertEqual(remaining_fields[1], global_mid)
+            self.assertEqual(remaining_fields[4], 2) # status=2 (已领取)
+        finally:
+            self.store.close_session(1)
+
+        # 模拟账号 2 客户端登录
+        self.store.register(2, PASSWORD, self.store.snapshot(2)["revision"])
+        session2 = self.store.open_session(2, PASSWORD, ("127.0.0.1", 12346))
+        try:
+            # 账号 2 只能收到全服邮件，收不到账号 1 的专属月卡邮件
+            packets = session2.handle(3100, 1, b"")
+            mails_acc2 = [f for f in protocol.iter_pb_fields(packets[0][16:]) if f[0] == 2]
+            self.assertEqual(len(mails_acc2), 1)
+            # 测试一键全部领取 (ids = [-1])
+            all_claim_body = protocol.encode_pb_field(1, 0, (1 << 64) - 1)
+            all_claim_packet = session2.handle(3101, 2, all_claim_body)
+            self.assertEqual(struct.unpack(">IIII", all_claim_packet[0][:16])[2], 3101)
+            self.assertEqual(session2.save["recharge_state"]["rmb"], 68)
+
+            # 测试一键全部删除 (ids = [-1])
+            all_del_packet = session2.handle(3102, 3, all_claim_body)
+            self.assertEqual(struct.unpack(">IIII", all_del_packet[0][:16])[2], 3102)
+
+            # 再次查询，邮件箱已空
+            self.assertEqual(session2.handle(3100, 4, b"")[0][16:], b"")
+        finally:
+            self.store.close_session(2)
+
+
+class DatabaseHybridJsonTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.root = Path(self.temp_dir)
+        self.db_path = self.root / "zyj.db"
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_missing_save_read_does_not_create_database(self):
+        saved = player.load_save(self.root / "role_save.json", COUNTS)
+        self.assertFalse(saved["has_role"])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_sqlite_hybrid_json_player_save_load_and_indexing(self):
+        from zyj_server import db
+        db.init_db(self.db_path)
+
+        p1 = {
+            "role_name": "玩家甲", "has_role": True, "level": 30,
+            "role_state": {"level": 30, "power": 300000, "vip": 5, "coin": 50000, "gold": 1000},
+            "created_at": 1700000000, "last_login": 1700005000
+        }
+        p2 = {
+            "role_name": "玩家乙", "has_role": True, "level": 50,
+            "role_state": {"level": 50, "power": 800000, "vip": 8, "coin": 90000, "gold": 5000},
+            "created_at": 1700001000, "last_login": 1700006000
+        }
+        db.save_player(self.db_path, 1, p1)
+        db.save_player(self.db_path, 2, p2)
+
+        # 验证读取完整存档
+        loaded1 = db.load_player(self.db_path, 1)
+        self.assertEqual(loaded1["role_name"], "玩家甲")
+        self.assertEqual(loaded1["role_state"]["power"], 300000)
+
+        # 验证轻量索引摘要
+        summary = db.get_player_summary(self.db_path, 2)
+        self.assertEqual(summary["level"], 50)
+        self.assertEqual(summary["power"], 800000)
+        self.assertEqual(summary["vip"], 8)
+
+        # 验证按战力排名查询 (B-Tree 索引)
+        top_power = db.list_top_players(self.db_path, "power", 10)
+        self.assertEqual(len(top_power), 2)
+        self.assertEqual(top_power[0]["account_id"], 2)
+        self.assertEqual(top_power[1]["account_id"], 1)
+
+        # 验证按等级排名查询
+        top_level = db.list_top_players(self.db_path, "level", 10)
+        self.assertEqual(top_level[0]["account_id"], 2)
+
+        # 验证删除
+        db.delete_player(self.db_path, 1)
+        self.assertIsNone(db.load_player(self.db_path, 1))
+
+    def test_sqlite_credentials_and_mails_persistence(self):
+        from zyj_server import db
+        db.init_db(self.db_path)
+
+        # 凭据存储测试
+        cred = {"algorithm": "pbkdf2_sha256", "iterations": 600000, "salt": "11"*16, "hash": "22"*32}
+        db.save_credentials(self.db_path, 5, cred)
+        self.assertTrue(db.has_credentials(self.db_path, 5))
+        self.assertFalse(db.has_credentials(self.db_path, 6))
+        self.assertEqual(db.load_credentials(self.db_path, 5)["salt"], "11"*16)
+
+        # 邮件存储测试
+        m1 = {"id": 800000001, "target": 0, "title": "全服通告", "content": "内容", "attachments": {"1001": 100}, "created_at": 100}
+        m2 = {"id": 800000002, "target": 5, "title": "专属奖励", "content": "奖励", "attachments": {"1000": 500}, "created_at": 200}
+        db.save_mail(self.db_path, m1)
+        db.save_mail(self.db_path, m2)
+
+        # 账号 5 可查到 m1 和 m2
+        res5 = db.list_mails(self.db_path, 5)
+        self.assertEqual(res5["total"], 2)
+        self.assertEqual(res5["rows"][0]["id"], 800000002)
+
+        # 账号 1 只能查到全服邮件 m1
+        res1 = db.list_mails(self.db_path, 1)
+        self.assertEqual(res1["total"], 1)
+        self.assertEqual(res1["rows"][0]["id"], 800000001)
+
+        # 删除邮件
+        self.assertTrue(db.delete_mail(self.db_path, 800000001))
+        self.assertEqual(db.list_mails(self.db_path, 1)["total"], 0)
+
+    def test_sqlite_migration_from_disk_files(self):
+        from zyj_server import db
+        # 1. 预先在磁盘写入 JSON 文件
+        p1 = {"role_name": "磁盘老角色", "has_role": True, "level": 15, "role_state": {"level": 15, "power": 88888}}
+        (self.root / "role_save.json").write_text(json.dumps(p1), encoding="utf-8")
+
+        acc2_dir = self.root / "accounts" / "2"
+        acc2_dir.mkdir(parents=True)
+        p2 = {"role_name": "二号角色", "has_role": True, "level": 20, "role_state": {"level": 20, "power": 120000}}
+        (acc2_dir / "role_save.json").write_text(json.dumps(p2), encoding="utf-8")
+        (acc2_dir / "credentials.json").write_text(json.dumps({
+            "algorithm": "pbkdf2_sha256", "iterations": 600000, "salt": "aa"*16, "hash": "bb"*32
+        }), encoding="utf-8")
+
+        # 2. 调用 init_db 并指定 base_dir 触发自动迁移
+        db.init_db(self.db_path, self.root)
+
+        # 3. 验证数据已成功导入 SQLite
+        loaded1 = db.load_player(self.db_path, 1)
+        self.assertIsNotNone(loaded1)
+        self.assertEqual(loaded1["role_name"], "磁盘老角色")
+
+        loaded2 = db.load_player(self.db_path, 2)
+        self.assertIsNotNone(loaded2)
+        self.assertEqual(loaded2["role_name"], "二号角色")
+
+        cred2 = db.load_credentials(self.db_path, 2)
+        self.assertIsNotNone(cred2)
+        self.assertEqual(cred2["hash"], "bb"*32)
 
 
 if __name__ == "__main__":
