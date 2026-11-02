@@ -615,6 +615,78 @@ def patch_cornucopia_scripts():
     return {"GameActivityCornucopia": code}
 
 
+def patch_single_boss_scripts():
+    code = read_script("GameSingleBoss").decode("utf-8").replace("\r\n", "\n")
+    marker = 'local ids_pb = require("ids_pb")\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + 'local somethings_pb = require("somethings_pb")\n')
+    start = code.index("function UISingleBossQuaryCallback(uireq)\n")
+    end = code.index("\nfunction NetSingleBossQuaryCallback", start)
+    assert "return 1, 3700, nil" in code[start:end]
+    code = code[:start] + "function UISingleBossQuaryCallback(uireq)\n    return 1, 3700, nil\nend\n" + code[end:]
+    marker = "    gamedata:SingleBoss(idsData)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    gamedata.cache.singleBoss.bought = idsData.ids[6] or 0
+    gamedata.cache.vipstatus.personalboss_times = gamedata.cache.singleBoss.bought
+''')
+    marker = "    t.reward = gamedata:SomethingProcess(getData)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    local counts = getData.pext1[1]
+    t.attempts = counts and counts.ids[1] or 0
+    t.wins = counts and counts.ids[2] or 0
+''')
+    patched = {"GameSingleBoss": code}
+
+    code = read_script("GameSlotArrange").decode("utf-8").replace("\r\n", "\n")
+    marker = "    if gamedata.cache.commonSlots[uireq.id..uireq.param] then"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    if uireq.id ~= 140 and gamedata.cache.commonSlots[uireq.id..uireq.param] then")
+    patched["GameSlotArrange"] = code
+
+    code = read_script("UIsingleBoss").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UISingleBossQuary(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    GameScene.vipstatus.personalboss_times = t.boss.bought or 0\n")
+    marker = "function UIKingmanOnekeyChallengeBack(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    UIRequest({type = 3700})
+    runGamePrompt({msg = "实际挑战"..(t.attempts or 0).."次，胜利"..(t.wins or 0).."次；失败不消耗次数"})
+''')
+    patched["UIsingleBoss"] = code
+
+    code = read_script("Layer_singleBoss").decode("utf-8").replace("\r\n", "\n")
+    start = code.index('            -- gameWindows:openWindow("kingfoot",{type = "kingselect", data = self.data})\n')
+    end = code.index("        end\n    end, CCControlEventTouchUpInside)", start)
+    assert "UIRequest({type = 3701,id = bossconfig.id})" in code[start:end]
+    code = code[:start] + '            gameWindows:openWindow("kingfoot",{type = "kingselect", data = self.data})\n' + code[end:]
+    marker = "        if self.data.isFirst and self.data.isFirst == 1 then\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''        if self.battletimes <= 0 then
+            singlebossBuyTimes()
+            return
+        end
+''' + marker)
+    for node in ("oneFinishBtn", "oneFinishText"):
+        marker = f"    self.rootItems.{node}:setVisible(false)"
+        assert code.count(marker) == 1
+        code = code.replace(marker, f"    self.rootItems.{node}:setVisible(true)")
+    patched["Layer_singleBoss"] = code
+
+    code = read_script("window_kingmanOnekeyChallenge").decode("utf-8").replace("\r\n", "\n")
+    marker = "\tself.data = data.boss or {}\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if (self.data.openlevel or 0) == 0 then
+        gameWindows:closeWindow("kingmanOnekeyChallenge")
+        return
+    end
+    self.bosstpye = self.data.openlevel
+    self:setBossLevelTable(self.data.bosstype)
+    self.rootItems.buylevel:setString(tostring(self.attConfigData[tostring(self.bosstpye)].level))
+''')
+    patched["window_kingmanOnekeyChallenge"] = code
+    return patched
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -1011,7 +1083,7 @@ end
         table.insert(UserBuyData.ids, uireq.count)
     end'''
             assert buy.count(marker) == 1
-            buy = buy.replace(marker, '''    if uireq.cid == 1 or uireq.cid == 2 or uireq.cid == 3 then
+            buy = buy.replace(marker, '''    if uireq.cid == 1 or uireq.cid == 2 or uireq.cid == 3 or uireq.cid == 6 then
         table.insert(UserBuyData.ids, uireq.count or 1)
         table.insert(UserBuyData.ids, uireq.gold or 0)
     elseif uireq.count then
@@ -1474,7 +1546,7 @@ end''' + code[end:]
         query(opcode)
     end
     for name,opcode in pairs({bloodbattle=3620, zhuxiantaiShop=3627, watchstar=2062,
-                              starcopy_map=1350, gang_shangxiang=2250, shopList=4890}) do
+                              starcopy_map=1350, gang_shangxiang=2250, shopList=4890, singleboss=3700}) do
         if self.layers[name] and self.layers[name].show then query(opcode) end
     end
     local chapter = self.layers.copy_chapter
@@ -1536,6 +1608,9 @@ end"""
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     for name, code in patch_cornucopia_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_single_boss_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched

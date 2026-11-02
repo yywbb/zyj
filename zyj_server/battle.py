@@ -214,7 +214,15 @@ def _prepare_teams(teams, config):
                 raise ValueError("战斗突破或技能等级无效")
             general = config["general"][str(unit["cid"])]
             skill = config["skill"].get(str(unit["skill"]))
+            if "boss_cycle" in unit:
+                if (not unit.get("npc") or str(unit["cid"]) not in config.get("personalboss_att", {})
+                        or not isinstance(unit["boss_cycle"], list) or not unit["boss_cycle"]
+                        or any(type(sid) is not int or sid not in range(12640, 12648)
+                               or str(sid) not in config["combskill"] for sid in unit["boss_cycle"])
+                        or unit.get("boss_passive", 0) not in (0, 12648)):
+                    raise ValueError("个人Boss技能循环无效")
             if not skill and not (unit["cid"] in QUEENS and unit["skill"] == 0
+                                  or "boss_cycle" in unit and unit["skill"] == 0
                                   or str(unit["cid"]) in config.get("huodong_monster", {}) and unit["skill"] == 12858):
                 raise ValueError("武将技能不存在")
             if skill and (skill["kind"] not in ("attack", "gain") or skill["range"] not in ("single", "all", "first", "second", "random", "three")
@@ -312,6 +320,11 @@ def _prepare_teams(teams, config):
                     add(provider, "parry", value)
                 elif code == 9000489:
                     add(provider, "dmg", value)
+    for direct, team in teams.items():
+        if any(unit.get("boss_aura") for unit in team.values()):
+            for target in teams[not direct].values():
+                # 本地解释采用Boss文案的减攻80%，不误解析矛盾的生命光环引用。
+                target["atk"] = max(1, int(target["atk"] * Fraction(1, 5)))
     for team in teams.values():
         for unit in team.values():
             # 命中/额外暴伤可被临时减至负值，不能吞掉零基础属性上的Boss减益。
@@ -433,10 +446,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         unit["buffs"][(skill["effect"], attr)] = (Fraction(amount), round_number + duration)
         return dest(unit, B={"R": attr, "u": skill["effect"], "w": True})
 
-    def stun(unit):
-        if unit["dizzy"] or effect(unit, 9000789) >= 1 or unit["states"].get("xiyin", 0) > round_number:
+    def stun(unit, duration=1):
+        duration -= int(effect(unit, 9000789))
+        if duration <= unit["dizzy"] or unit["states"].get("xiyin", 0) > round_number:
             return False
-        unit["dizzy"] = True
+        unit["dizzy"] = duration
         return True
 
     def status_damage(unit, kind, amount, duration):
@@ -517,6 +531,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
 
     def living(team):
         return [u for _, u in sorted(team.items()) if u["hp"] > 0]
+
+    def queen_recovery(target):
+        provider = next((u for _, u in sorted(teams[target["direct"]].items()) if u["cid"] in QUEENS and u["hp"] > 0), None)
+        return (stat(provider, "atk") * 12 + provider["maxhp"] * 4) // 100 if provider else 0
 
     def state_event(unit, kind, enabled):
         if kind in ("xiyin", "fire"):
@@ -643,9 +661,69 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if changes:
             event(changes)
 
+    def boss_act(actor):
+        cycle = actor["boss_cycle"]
+        index = actor.get("boss_turn", 0)
+        actor["boss_turn"] = index + 1
+        sid = cycle[index % len(cycle)]
+        skill = config["combskill"][str(sid)]
+        enemies = living(teams[not actor["direct"]])
+        source = {"r": actor["direct"], "p": [actor["pos"]], "t": "x", "S": sid}
+        if sid == 12646:
+            actor["def"] += actor["base"]["def"] // 5
+            event([dest(actor, B={"R": "def", "u": "promote", "w": True})], source)
+            return []
+        if sid == 12640:
+            selected = sorted(enemies, key=lambda u: (u["pos"] != actor["pos"], u["pos"] > 7, u["pos"]))[:1]
+        elif sid in (12641, 12642):
+            selected = [u for u in enemies if u["pos"] < 8] or enemies
+        elif sid == 12645:
+            selected = rng.sample(enemies, min(1, len(enemies)))
+        else:
+            selected = enemies
+        destinations, killed = [], 0
+        for target in selected:
+            if sid == 12644:
+                destinations.append(change_ap(target, -skill["ap_reduce"]))
+                continue
+            if sid in (12640, 12647):
+                amount = target["hp"]
+            elif sid == 12642:
+                amount = target["maxhp"] // 2
+            else:
+                amount = damage({**actor, "atk": stat(actor, "atk")},
+                                {**target, "def": stat(target, "def"), "hp": target["hp"] + target["cover_d"]},
+                                config, sid, multiplier=modifiers(actor, target) * guard(target),
+                                flat=actor["flat_out"] - target["flat_in"], combo=True)
+            change = change_hp(target, amount, hits=skill["count"], shield=sid not in (12640, 12647))
+            if target["hp"] > 0:
+                if sid == 12641:
+                    target["ap"] = max(0, target["ap"] - skill["ap_reduce"])
+                    change.update(ap=target["ap"], E=True)
+                if sid == 12645 and stun(target, 2):
+                    change["u"] = {"u": "dizzy", "w": True}
+            killed += int(target["hp"] == 0)
+            destinations.append(change)
+        event(destinations, source)
+        if sid != 12644:
+            for target in selected:
+                amount = queen_recovery(target)
+                if target["hp"] > 0 and amount:
+                    event([change_hp(target, -amount)])
+        if sid == 12641:
+            event([change_hp(actor, actor["maxhp"] // 100, shield=False)])
+        actor["strikes"] += 1
+        kill_recovery(actor, killed)
+        deaths()
+        return []
+
     def act(actor, forced_target=None, reaction=False, followup=None, chain=0):
         if actor["skill"] == 12858:
             return []  # 活动Boss配置的空技能，不退化成普通攻击。
+        if "boss_cycle" in actor and not reaction:
+            if actor["states"].get("skilllock", 0) > round_number:
+                return []  # 无配置普攻；封印期间停手，不推进技能循环。
+            return boss_act(actor)
         enemies, friends = teams[not actor["direct"]], teams[actor["direct"]]
         skill, participants = None, [actor["pos"]]
         base_skill = config["skill"].get(str(actor["skill"]))
@@ -780,9 +858,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 if reduction:
                     target["ap"] = max(0, target["ap"] - reduction)
                     destinations.append(dest(target, ap=target["ap"], E=True))
-                provider = next((u for _, u in sorted(teams[target["direct"]].items()) if u["cid"] in QUEENS and u["hp"] > 0), None)
-                if provider:
-                    recovered.append((target, (stat(provider, "atk") * 12 + provider["maxhp"] * 4) // 100))
+                amount = queen_recovery(target)
+                if amount:
+                    recovered.append((target, amount))
                 if not reaction and not target["dizzy"]:
                     if parry:
                         reactions.append((target, actor))
@@ -915,6 +993,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             break
         for team in teams.values():
             for unit in living(team):
+                if unit.get("boss_passive") == 12648:
+                    unit["atk"] += unit["base"]["atk"] // 5
+                    event([change_ap(unit, config["combskill"]["12648"]["ap_give"]),
+                           dest(unit, B={"R": "atk", "u": "promote", "w": True})],
+                          {"r": unit["direct"], "p": [unit["pos"]], "t": "x", "S": 12648})
                 for kind, until in list(unit["states"].items()):
                     if until <= round_number:
                         del unit["states"][kind]
@@ -944,8 +1027,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if actor["hp"] <= 0 or finished():
                 continue
             if actor["dizzy"]:
-                actor["dizzy"] = False
-                event([dest(actor, m=[], u={"u": "dizzy", "w": False})])
+                actor["dizzy"] -= 1
+                if not actor["dizzy"]:
+                    event([dest(actor, m=[], u={"u": "dizzy", "w": False})])
                 continue
             for reactor, target in act(actor):
                 if finished():

@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 
-from .. import formation, player, recruit, storage, training
+from .. import formation, player, qiankun, recruit, storage, training
 from ..protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 from ..session import Session
 from . import views
@@ -123,7 +123,7 @@ def _manage(save, action, data, config, step_counts, now):
         player.prepare_recorded_response(1003, b"", save, body, step_counts, config, now)
     elif action == "remove-general":
         protagonist = pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
-        if iid == protagonist or row["actor"] == "lead" or iid in slots:
+        if iid == protagonist or row["actor"] == "lead" or iid in qiankun.protected(save):
             raise ValueError("只能移除非主角的闲置武将，请先下阵")
         save["world_state"]["1002"] = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world)
             if not (n == 1 and w == 2 and pb_get_varint(v, 2) == iid)).hex()

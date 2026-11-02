@@ -9,7 +9,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, configuration, cornucopia, daily_events, development, fashion, favorite, formation, friend_copy, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -68,6 +68,7 @@ def load_role_config(config_path):
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
                              "favorable", "favorable_level", "favorable_task", "shake_param",
                              "penglai3_map", "penglai3_type", "penglai3_dice", "penglai3_card", "penglai3_monster",
+                             "personalboss_att", "personalboss_date",
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
@@ -599,8 +600,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             record_protagonist_general(save, raw)
         if update:
             record_slot_update(save, update)
-    elif opcode in (*cornucopia.OPCODES, *penglai.OPCODES):
-        module = cornucopia if opcode in cornucopia.OPCODES else penglai
+    elif opcode in (*cornucopia.OPCODES, *penglai.OPCODES, *single_boss.OPCODES):
+        module = cornucopia if opcode in cornucopia.OPCODES else penglai if opcode in penglai.OPCODES else single_boss
         body, costs, reward = module.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
@@ -658,6 +659,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             raise ValueError("贵族状态查询不接受参数")
         body = welfare.rewrite_vip(body, save, resource_purchase.settle(save, now))
         body = arena.rewrite_vip(body, save, role_config, now)
+        body = single_boss.rewrite_vip(body, save, role_config, now)
     elif opcode == 301:
         price = resource_purchase.prepare(save, request_body, role_config, now)
         change_item_count(save, 1001, -price, role_config, now)

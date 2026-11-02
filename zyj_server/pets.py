@@ -219,7 +219,8 @@ def prepare(opcode, save, body, config):
         reward, cost = Counter(), 0
         for _, _, iid in fields:
             pet = next((p for p in state["pets"] if p[0] == iid), None)
-            if not pet or iid == state["active"] or pet[2:] == [0, 1]:
+            occupied = {team[7] for team in save.get("single_boss_state", {}).get("teams", {}).values() if team}
+            if not pet or iid == state["active"] or iid in occupied or pet[2:] == [0, 1]:
                 raise ValueError("请先卸下魔宠，且只能重生已养成的本人魔宠")
             receipt = state["receipts"].get(str(iid))
             if receipt is None or receipt["pet"] != pet:
