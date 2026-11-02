@@ -3,7 +3,7 @@
 import random
 from fractions import Fraction
 
-from . import battle, formation, qiankun
+from . import battle, equip_baptize, formation, qiankun
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -103,9 +103,7 @@ def strengthen(save, opcode, body, config, seed):
         if iid not in equips:
             raise ValueError("强化装备不存在")
         item = parse_ids_pb(equips[iid])
-        if len(item) < 3 or any(item[3:]):
-            raise ValueError("此装备的进阶属性尚未支持强化")
-        row = config["equip"][str(item[1])]
+        row = equip_baptize.validate(item, config)
         if row["type"] not in ("weapon", "armor", "head", "accessory"):
             raise ValueError("暂不支持此装备类型强化")
         if any(row[f"attr{i}"] and (row[f"method{i}"] != "value" or row[f"attr{i}"] not in battle.GENERAL_FIELDS) for i in (1, 2)):
@@ -149,7 +147,7 @@ def strengthen(save, opcode, body, config, seed):
         updated[iid] = b"".join(encode_pb_field(1, 0, v) for v in items[iid])
         reward += encode_pb_field(6, 2, updated[iid])
         old = parse_ids_pb(equips[iid])
-        qiankun.record_training(save, "equip", equips[iid], updated[iid], [(1000, actual_costs[iid])], old[2] == 1)
+        qiankun.record_training(save, "equip", equips[iid], updated[iid], [(1000, actual_costs[iid])], old[2] == 1 and not any(old[3:]))
     reward += encode_pb_field(12, 2, b"".join(encode_pb_field(1, 0, critical[i]) for i in sorted(critical)))
     generals_update, power_delta = equip_differences(save, equips, updated, config)
     return reward + generals_update, power_delta
@@ -177,6 +175,7 @@ def equip_differences(save, equips, changes, config):
                 raise ValueError("强化后的武将属性超出范围")
             increase += changed // 10 - value // 10 if field == 8 else changed - value if field in (6, 7, 9) else 0
             raw = pb_set_varint(raw, field, changed)
+        increase += sum(equip_baptize.flat(slot, updated, config)) - sum(equip_baptize.flat(slot, equips, config))
         power = (pb_get_varint(raw, 20) or 0) + increase
         if not 0 <= power < (1 << 31):
             raise ValueError("强化后的武将战力超出范围")

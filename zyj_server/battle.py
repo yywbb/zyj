@@ -4,7 +4,7 @@ import copy
 import random
 from fractions import Fraction
 
-from . import godstone, pets
+from . import equip_baptize, godstone, pets
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -79,6 +79,7 @@ def rosters(save, point, config):
     fields = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))
     generals = {pb_get_varint(v, 2): v for n, w, v in fields if n == 1 and w == 2}
     attack, defense = {}, {}
+    equips = {pb_get_varint(v, 1): v for n, w, v in fields if n == 2 and w == 2}
     pet_bonus = pets.attributes(save, config)
     for n, w, slot in fields:
         if n != 4 or w != 2 or not pb_get_varint(slot, 2):
@@ -100,6 +101,7 @@ def rosters(save, point, config):
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
             raise ValueError("阵位或上阵武将重复")
         unit["skill"] = config["general"][str(unit["cid"])]["skillid"]
+        unit["flat_out"], unit["flat_in"] = equip_baptize.flat(slot, equips, config)
         stone = godstone.attributes(slot, config)
         unit["pet_rates"] = {name: pet_bonus.get(field, 0) - int(pet_bonus.get(field, 0)) + stone[field] - int(stone[field])
                              for name, field in godstone.ATTR_FIELDS.items() if field in godstone.RATE_FIELDS}
@@ -235,7 +237,7 @@ def _prepare_teams(teams, config):
                 raise ValueError("初始怒气无效")
             unit.update(pos=pos, direct=direct, ap=initial_ap, dizzy=False, dot=None, firing=None, buffs={}, states={},
                         emergency=False, strikes=0, guard=0, effects={}, passive_rows=rows,
-                        flat_out=0, flat_in=0, cover_d=unit.get("cover_d", 0))
+                        flat_out=unit.get("flat_out", 0), flat_in=unit.get("flat_in", 0), cover_d=unit.get("cover_d", 0))
             unit["cover_d2"] = unit["cover_d"]
             added, reduced = unit.get("adddmgpct", 0), unit.get("subdmgpct", 0)
             if min(added, reduced, unit["cover_d"]) < 0 or not 0 <= unit.get("cover_p", 0) <= 100:

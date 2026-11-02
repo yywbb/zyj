@@ -2,7 +2,7 @@
 
 from fractions import Fraction
 
-from . import battle, godstone, pets
+from . import battle, equip_baptize, godstone, pets
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -24,14 +24,7 @@ def bonuses(raw, slot, members, equips, config):
         if iid not in equips:
             raise ValueError("阵位装备不存在")
         item = parse_ids_pb(equips[iid])
-        if len(item) < 3:
-            raise ValueError("此装备的进阶属性暂不支持换阵")
-        gear = config["equip"][str(item[1])]
-        extra = item[3:]
-        if gear["type"] in ("horse", "treasure") and len(extra) > 1 and 0 <= extra[1] < (1 << 31):
-            extra[1] = 0
-        if any(extra):
-            raise ValueError("此装备的进阶属性暂不支持换阵")
+        gear = equip_baptize.validate(item, config)
         equipped.add(item[1])
         for index in (1, 2):
             name = gear[f"attr{index}"]
@@ -40,6 +33,8 @@ def bonuses(raw, slot, members, equips, config):
             if name not in battle.GENERAL_FIELDS or gear[f"method{index}"] != "value":
                 raise ValueError("不支持的装备加成")
             values[battle.GENERAL_FIELDS[name]] += int(Fraction(str(gear[f"init{index}"])) + Fraction(str(gear[f"grow_{index}"])) * (item[2] - 1))
+        for name, value in zip(("atk", "def", "hp"), (item + [0] * 13)[5:8]):
+            values[battle.GENERAL_FIELDS[name]] += value
     for index in range(1, 30):
         required = {int(v) for v in row.get(f"cond{index}ids", "").split(";") if v}
         if not required:
@@ -214,6 +209,7 @@ def apply_slots(save, slots, config):
             elif field == 8:
                 power_delta += changed // 10 - value // 10
             raw = pb_set_varint(raw, field, changed)
+        power_delta += sum(equip_baptize.flat(after.get(iid, b""), equips, config)) - sum(equip_baptize.flat(before.get(iid, b""), equips, config))
         power = (pb_get_varint(raw, 20) or 0) + power_delta
         if not 0 <= power < (1 << 31):
             raise ValueError("换阵后的武将战力超出范围")

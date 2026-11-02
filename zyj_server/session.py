@@ -5,7 +5,7 @@ import functools
 import struct
 import time
 
-from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, guide, guild, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, single_boss, star_copy, timebag, training, watchstar, welfare, world_boss
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -59,6 +59,7 @@ class Session:
         cornucopia.get_state(self.save, role_config)
         penglai.get_state(self.save, role_config)
         single_boss.get_state(self.save, role_config)
+        equip_baptize.get_state(self.save, role_config)
         for gift_id in timebag.GIFTS:
             timebag.get_state(self.save, gift_id)
         if self.save.get("has_role"):
@@ -299,7 +300,7 @@ class Session:
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
                                   *daily_events.CLAIMS,
-                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS):
+                                  *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:

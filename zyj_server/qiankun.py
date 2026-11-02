@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from . import activities, fashion, favorite, formation, recharge, recruit
+from . import activities, equip_baptize, fashion, favorite, formation, recharge, recruit
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 QUERIES = (3704, 3850, 7030, 3780)
@@ -187,9 +187,7 @@ def prepare(opcode, save, body, config):
             if count != -1 or iid not in equips or iid in occupied:
                 raise ValueError("装备不存在或已穿戴，不能炼化或重生")
             item = parse_ids_pb(equips[iid])
-            if len(item) < 3 or any(item[3:]):
-                raise ValueError("高级装备消耗未验证，安全保护：未扣款、未重置")
-            row = config["equip"][str(item[1])]
+            row = equip_baptize.validate(item, config)
             if row["quality"] not in range(2, 8) or str(item[2]) not in config["equip_strengthen"]:
                 raise ValueError("此装备等级或品质暂不支持炼化重生")
             if opcode == 1117:
@@ -200,10 +198,13 @@ def prepare(opcode, save, body, config):
                 if baseline[:3] != [iid, item[1], 1] or any(baseline[3:]):
                     raise ValueError("装备重生基线无效")
                 gets.update(dict(receipt["costs"]))
-                costs.append((1001, config["renascence"][str(item[2])]["strengthencost"]))
+                costs.append((1001, config["renascence"][str(item[2])]["strengthencost"]
+                              + (int(config["global_kv"]["equip_baptize_cost"]["value"]) if len(item) > 10 and item[10] else 0)))
                 updates += encode_pb_field(6, 2, bytes.fromhex(receipt["before"]))
                 del state["receipts"][f"equip:{iid}"]
             else:
+                if any(item[3:]):
+                    raise ValueError("洗炼过的装备请先安全重生，炼化未执行")
                 if row.get("whether_refining", 1) != 1 or row["type"] in ("horse", "treasure") and item[2] != 1:
                     raise ValueError("此装备请先重生或不允许炼化")
                 gets.update({int(cid): int(num) for e in row["resolve"].split(";") if e for cid, num in [e.split(",")]})
@@ -211,6 +212,7 @@ def prepare(opcode, save, body, config):
                 if row["type"] not in ("horse", "treasure"):
                     gets[1000] += config["equip_strengthen"][str(item[2])][f'Trafficking{row["quality"]}']
                 removed[2].add(iid)
+            equip_baptize.get_state(save, config)["pending"].pop(str(iid), None)
         elif opcode == 6901:
             row = config["redl_awake_item"].get(str(iid))
             if not row or row["decompose"] != 1 or count <= 0 or state["red_fragments"].get(str(iid), 0) < count:

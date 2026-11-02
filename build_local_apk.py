@@ -687,6 +687,127 @@ def patch_single_boss_scripts():
     return patched
 
 
+def patch_equip_baptize_scripts():
+    code = read_script("GameEquipRefine").decode("utf-8").replace("\r\n", "\n")
+    for name in ("Preview", "Confirm", "Automatic"):
+        marker = f"function UIEquipBaptize{name}CallBack(uireq)\n"
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + '''    if gamedata.ext.localBaptizeBusy then
+        return 0,503,{type=503,msg="洗炼正在结算，请等待回复；超时请重进游戏"}
+    end
+''')
+        marker = f"function NetEquipBaptize{name}CallBack(fd)\n"
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    gamedata.ext.localBaptizeBusy = false\n")
+    marker = "    gamedata.ext.EquipBaptizeid = uireq.iid\n\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if uireq.method == 0 and uireq.xlnum == 0 then
+        gamedata.ext.EquipBaptizeXprops = {}
+        gamedata.ext.localBaptizeBusy = true
+        return 1,1120,equipBaptizeData:SerializeToString()
+    end
+''')
+    marker = "    local equip = gamedata:equipData(equipsData)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    equip.preview_token = equipsData.ids[14] or 0\n")
+    start = code.index("    table.insert(equipBaptizeData.ids, uireq.method)", code.index("function UIEquipBaptizeConfirmCallBack"))
+    end = code.index("    return 1, 1121,", start)
+    assert "if uireq.iid then" in code[start:end]
+    code = code[:start] + '''    local iid = uireq.iid or uireq.id
+    if not iid or not uireq.token or uireq.token <= 0 then
+        return 0,503,{type=503,msg="请重新打开装备查看洗炼预览"}
+    end
+    table.insert(equipBaptizeData.ids, uireq.method)
+    table.insert(equipBaptizeData.ids, iid)
+    table.insert(equipBaptizeData.ids, uireq.token)
+    gamedata.ext.EquipBaptizeid = iid
+
+''' + code[end:]
+    for mid in (1120, 1121, 1124):
+        marker = f"    return 1, {mid}, equipBaptizeData:SerializeToString()"
+        assert code.count(marker) == 1
+        code = code.replace(marker, "    gamedata.ext.localBaptizeBusy = true\n" + marker)
+    patched = {"GameEquipRefine": code}
+
+    code = read_script("Layer_equip_up").decode("utf-8").replace("\r\n", "\n")
+    marker = 'function equipUp.setPage_strengthen(self)\n\tprint("显示洗练页面")\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    self.localBaptizeToken = nil
+    self.xlselectbtn = self.xlselectbtn or 1
+    self.dotimes = GameScene.roleinfo.level >= tonumber(gamedata.config.global_kv.baptize_leve_limit.value) and 50 or 10
+''')
+    for method in (0, 1):
+        marker = f"UIRequest({{type = 1121, id = self.data.iid, method = {method},}})"
+        assert code.count(marker) == 1
+        code = code.replace(marker, f"UIRequest({{type = 1121, iid = self.data.iid, method = {method}, token = self.localBaptizeToken}})")
+    marker = "    self.rootItems.xl_Button3:addHandleOfControlEvent(function()\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''        if self.hasXLPreview then
+            runGamePrompt({msg = "请先保留或替换当前洗炼预览"})
+            return
+        end
+''')
+    marker = "    self.rootItems.xl_addStone:setTouchPriority(self.touchPriority)\t\nend"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker[:-3] + '''    if equipquality >= 3 then
+        UIRequest({type=1120,iid=self.data.iid,method=0,xlnum=0})
+    end
+end''')
+    marker = "function equipUp.setXilianPreview(self,data)\n    if not data then return end\n    self.hasXLPreview = true\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''function equipUp.setXilianPreview(self,data)
+    if not data or not self.data or self.data.iid ~= data.iid or self.selectpage ~= "xilian" then return end
+    self.localBaptizeToken = data.preview_token
+    self.hasXLPreview = (data.preview_token or 0) > 0
+    if not self.hasXLPreview then return end
+''')
+    start = code.index("    if not hasup then", code.index("function equipUp.setXilianPreview("))
+    end = code.index("\nend", start)
+    assert "if not hasdown then" in code[start:end]
+    code = code[:start] + '''    self.rootItems.xl_Button_no:setEnabled(true)
+    ui.removeGray("CCControlButton",self.rootItems.xl_Button_no)
+    ui.removeGray("CCLabelTTF",self.rootItems.xl_Lab_no)
+    self.rootItems.xl_Button_yes:setEnabled(hasup or hasdown)
+    if hasup or hasdown then
+        ui.removeGray("CCControlButton",self.rootItems.xl_Button_yes)
+        ui.removeGray("CCLabelTTF",self.rootItems.xl_Lab_yes)
+    else
+        ui.addGray("CCControlButton",self.rootItems.xl_Button_yes)
+        ui.addGray("CCLabelTTF",self.rootItems.xl_Lab_yes)
+    end
+''' + code[end:]
+    patched["Layer_equip_up"] = code
+
+    code = read_script("UIEquips").decode("utf-8").replace("\r\n", "\n")
+    for name in ("Preview", "Confirm", "Automatic"):
+        start = code.index(f"function UIEquipBaptize{name}(t)\n")
+        end = code.index("\nend", start)
+        block = code[start:end]
+        assert block.count("    UIRequest({type = 10322})") == 1
+        block = block.replace("    UIRequest({type = 10322})", "").replace("    UIRequest({type = 1001})", "")
+        if name != "Preview":
+            marker = '    if GameScene.layers["equipsup"].show then\n'
+            assert block.count(marker) == 1
+            block = block.replace(marker, '''    local layer = GameScene.layers["equipsup"]
+    if layer.show and layer.module.data and layer.module.data.iid == t.equip.iid then
+''')
+        if name == "Automatic":
+            marker = '    if gameWindows.windows["equipbaptize"].show then\n'
+            assert block.count(marker) == 1
+            block = block.replace(marker, '''    local window = gameWindows.windows["equipbaptize"]
+    if window.show and window.module.iid == t.equip.iid then
+''')
+        code = code[:start] + block + code[end:]
+    patched["UIEquips"] = code
+
+    code = read_script("window_equipBaptizeAutomatic").decode("utf-8").replace("\r\n", "\n")
+    marker = "    local donum = self.donum + num\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    local donum = math.floor((self.donum + num)/10)*10\n")
+    patched["window_equipBaptizeAutomatic"] = code
+    return patched
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -765,6 +886,12 @@ end"""
     marker = "    return { type = 9999, errornum = error.ids[2], msg = cnMessage }"
     assert code.count(marker) == 1
     code = code.replace(marker, "    return { type = 9999, errornum = error.ids[2], msg = cnMessage, request_opcode = error.ids[1] }")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if error.ids[1] == 1120 or error.ids[1] == 1121 or error.ids[1] == 1124 then
+        gamedata.ext.localBaptizeBusy = false
+    end
+''')
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("UILogin").decode("utf-8").replace("\r\n", "\n")
     marker = "function judgeSelectedServerIDValid(t)\n"
@@ -1611,6 +1738,9 @@ end"""
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     for name, code in patch_single_boss_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, code in patch_equip_baptize_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     return patched
