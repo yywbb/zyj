@@ -6,7 +6,7 @@ import struct
 import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import cheer, cup, friends, guild_chat, soul
+from . import cheer, cup, equip_evolve, friends, guild_chat, soul
 from . import achievements, collection
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
@@ -66,6 +66,7 @@ class Session:
         cup.get_state(self.save)
         world_boss.get_state(self.save)
         soul.get_state(self.save)
+        equip_evolve.get_version(self.save)
         collection.get_state(self.save, role_config)
         achievements.get_state(self.save, role_config)
         pets.get_state(self.save, role_config)
@@ -345,7 +346,7 @@ class Session:
                                   *watchstar.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS,
-                                  *daily_events.CLAIMS, *collection.MUTATIONS, *achievements.MUTATIONS, *soul.MUTATIONS,
+                                  *daily_events.CLAIMS, *collection.MUTATIONS, *achievements.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES,
                                    *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)

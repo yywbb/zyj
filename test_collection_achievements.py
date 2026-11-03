@@ -141,12 +141,12 @@ class CollectionAchievementTests(unittest.TestCase):
 
     def test_every_supported_config_condition_checks_its_threshold_in_both_directions(self):
         supported = [row for row in self.config["task"].values() if row["type"] in achievements.SUPPORTED_TYPES]
-        self.assertEqual(len(supported), 748)
+        self.assertEqual(len(supported), 814)
         for row in supported:
             with self.subTest(cid=row["id"], kind=row["type"]):
                 kind = row["type"]
                 target = list(map(int, row["target"].split(",")))
-                view = {"scalars": {}, "partners": [], "treasures": [], "sigils": [], "copies": {}, "config": self.config}
+                view = {"scalars": {}, "partners": [], "treasures": [], "sigils": [], "evolves": [], "copies": {}, "config": self.config}
                 if kind == "copy":
                     self.assertIn(str(target[1]), self.config["copy"][str(target[0])])
                     raw = protocol.encode_pb_field(1, 0, target[1]) + protocol.encode_pb_field(3, 0, 1)
@@ -158,6 +158,8 @@ class CollectionAchievementTests(unittest.TestCase):
                     view["partners"] *= target[1]
                 elif kind in ("treasurerefine", "treasurestrengthen"):
                     view["treasures"] = [[i + 1, 26102, target[0], target[0]] for i in range(target[1])]
+                elif kind.startswith("equip_evolve"):
+                    view["evolves"] = [target[0]] * int(kind[len("equip_evolve"):])
                 elif kind.startswith("sigil"):
                     view["sigils"] = [target[0]] * int(kind[5:])
                 else:
@@ -169,6 +171,8 @@ class CollectionAchievementTests(unittest.TestCase):
                     view["partners"].pop()
                 elif kind in ("treasurerefine", "treasurestrengthen"):
                     view["treasures"].pop()
+                elif kind.startswith("equip_evolve"):
+                    view["evolves"][0] -= 1
                 elif kind.startswith("sigil"):
                     view["sigils"][0] -= 1
                 else:

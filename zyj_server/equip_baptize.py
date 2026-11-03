@@ -33,8 +33,10 @@ def validate(item, config):
         raise ValueError("装备编号或等级无效")
     data = item + [0] * (13 - len(item))
     if row["type"] in KINDS:
-        if any(data[i] for i in (3, 4, 11, 12)):
-            raise ValueError("装备进阶、注灵或升星暂不支持")
+        from . import equip_evolve
+        if data[4] or data[12]:
+            raise ValueError("装备经验或注灵数据暂不支持")
+        equip_evolve.validate(data, row, config)
         caps = limits(row, data[2])
         if any(value > caps[name] for name, value in zip(ATTRS, data[5:10])) or row["quality"] < 3 and data[10]:
             raise ValueError("装备洗炼属性超出上限")

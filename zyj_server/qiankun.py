@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from . import activities, equip_baptize, fashion, favorite, formation, general_foster, recharge, recruit
+from . import activities, equip_baptize, equip_evolve, fashion, favorite, formation, general_foster, recharge, recruit
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 QUERIES = (3704, 3850, 7030, 3780)
@@ -22,7 +22,8 @@ def get_state(save):
             raise ValueError("重生材料记录无效")
         for value in (item["before"], item["after"]):
             list(iter_pb_fields(bytes.fromhex(value)))
-        if any(not isinstance(p, list) or len(p) != 2 or any(type(v) is not int or not 0 < v < (1 << 31) for v in p)
+        if any(not isinstance(p, list) or len(p) != 2 or type(p[0]) is not int or not 0 < p[0] < (1 << 31)
+               or type(p[1]) is not int or not 0 < p[1] < (1 << (63 if p[0] == 1000 else 31))
                for p in item["costs"]):
             raise ValueError("重生材料数量无效")
     if any(type(k) is not str or not k.isdecimal() or not 18001 <= int(k) <= 19000
@@ -201,12 +202,12 @@ def prepare(opcode, save, body, config):
                 if not receipt or receipt["after"] != equips[iid].hex():
                     raise ValueError("此装备缺少完整消耗记录，安全保护：未扣款、未重生")
                 baseline = parse_ids_pb(bytes.fromhex(receipt["before"]))
-                if baseline[:3] != [iid, item[1], 1] or any(baseline[3:]):
+                if (len(baseline) < 3 or baseline[0] != iid or baseline[2] != 1 or any(baseline[3:])
+                        or item[1] not in equip_evolve.chain(baseline[1], config)):
                     raise ValueError("装备重生基线无效")
                 gets.update(dict(receipt["costs"]))
                 fee = (config["renascence"][str(item[2])]["treasurerecost"] + config["renascence"][str(item[3] if len(item) > 3 else 0)]["treasurerefinecost"]
-                       if row["type"] in ("horse", "treasure") else config["renascence"][str(item[2])]["strengthencost"]
-                       + (int(config["global_kv"]["equip_baptize_cost"]["value"]) if len(item) > 10 and item[10] else 0))
+                       if row["type"] in ("horse", "treasure") else equip_evolve.rebirth_fee(item, config))
                 costs.append((1001, fee))
                 updates += encode_pb_field(6, 2, bytes.fromhex(receipt["before"]))
                 del state["receipts"][f"equip:{iid}"]
@@ -260,5 +261,8 @@ def prepare(opcode, save, body, config):
             state["receipts"].pop(f'{"general" if n == 1 else "equip"}:{iid}', None)
             if n == 1:
                 general_foster.remove(save, iid)
+    # shortcut: 银币余额仍受int32限制，扩展Role余额协议后再放开大额整笔退款。
+    if gets[1000] + save["role_state"]["coin"] >= (1 << 31):
+        raise ValueError("实际退款银币超出当前余额容量；未扣款、未重生，请保留装备和收据")
     reward = activities.build_reward(save, ";".join(f"{cid},{num}" for cid, num in gets.items() if num), config) + updates
     return reward, [(cid, num) for cid, num in costs if num], reward

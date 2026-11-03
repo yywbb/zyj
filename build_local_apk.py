@@ -1854,6 +1854,75 @@ end
     put("window_buyItem", code)
 
 
+def patch_equip_evolve_scripts(patched):
+    def load(name, folder="scripts"):
+        path = f"assets/{folder}/{name}.so"
+        if path not in patched:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        raw = xxtea_decrypt(patched[path], XXTEA_KEY)
+        return raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, filename in (("GameEquipStage", "equip_evolve_network.lua"), ("UIEquipStage", "equip_evolve_ui.lua")):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, load(name) + "\n" + stream.read())
+
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    if gamedata and gamedata.ext and gamedata.ext.localFormationBusy"
+    assert code.count(marker) == 1
+    index = code.index(marker)
+    code = code[:index] + '''    if gamedata and gamedata.ext and gamedata.ext.localEquipGrowthBusy and gamedata.ext.localEquipGrowthBusy.opcode == error.ids[1] then
+        gamedata.ext.localEquipGrowthBusy = nil
+    end
+''' + code[index:]
+    put("GameErrorMessage", code, "common_lua")
+
+    for name, prefix, methods, target in (
+        ("Layer_equip_up", "equipUp", ("init", "reload", "reloaddata", "clear", "shiftPage"), "self.data"),
+        ("Layer_equipstage", "equipstage", ("init", "reloadStatus", "clear"), "self.chooseData[1]"),
+    ):
+        code = load(name)
+        for method in methods:
+            start = code.index(f"function {prefix}.{method}(self")
+            end = code.index("\n", start)
+            code = code[:end+1] + "    self.localEquipGrowthGeneration = (self.localEquipGrowthGeneration or 0) + 1\n" + code[end+1:]
+        start = code.index("                local limilvconfig = gamedata.config.equip_evolvelv")
+        end = code.index("                UIRequest({type = 1122", start)
+        assert "limilvconfig" in code[start:end] and "stage" in code[start:end]
+        code = code[:start] + f'''                local targetCID,targetLevel = LocalEquipGrowthNext({target})
+                if not targetCID then runGamePrompt({{msg="装备已达最高进阶"}});return end
+                local quality = gamedata.config.equip[tostring(targetCID)].quality
+                local needed = gamedata.config.equip_evolvelv[tostring(targetLevel)]["lv"..quality]
+                if GameScene.roleinfo.level < needed then runGamePrompt({{msg="下一阶需要队伍"..needed.."级"}});return end
+''' + code[end:]
+        if prefix == "equipstage":
+            for method in ("setHasItems", "setNothingItems"):
+                start = code.index(f"function {prefix}.{method}(")
+                end = code.index("\nfunction ", start+1)
+                block = code[start:end]
+                line = block.index("\n")
+                block = block[:line+1] + "    local generation = self.localEquipGrowthGeneration\n" + block[line+1:]
+                marker = "        local callback = function(selectedData)\n"
+                assert block.count(marker) == 1
+                block = block.replace(marker, marker + "            if not self.rootNode or self.localEquipGrowthGeneration ~= generation then return end\n")
+                code = code[:start] + block + code[end:]
+        put(name, code)
+
+    code = load("UIProps")
+    for order, next_order in ((14002, 14003), (14003, 14004)):
+        start = code.index(f"    elseif t.order == {order} then")
+        end = code.index(f"    elseif t.order == {next_order} then", start)
+        block = code[start:end]
+        for name in ("equipsup", "equipstage"):
+            marker = f'if GameScene.layers["{name}"].show then'
+            if marker in block:
+                block = block.replace(marker, f'if LocalEquipGrowthPage(t.growthView,"{name}") then')
+        code = code[:start] + block + code[end:]
+    put("UIProps", code)
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -3003,6 +3072,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_guild_gameplay_scripts(patched)
     patch_cheer_scripts(patched)
     patch_soul_scripts(patched)
+    patch_equip_evolve_scripts(patched)
     return patched
 
 

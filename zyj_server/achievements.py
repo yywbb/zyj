@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from . import cup, formation, godstone, recruit
+from . import cup, equip_evolve, formation, godstone, recruit
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 QUERIES = (2400,)
@@ -14,6 +14,7 @@ SUPPORTED_TYPES = {
     "copystar", "generalbreak", "treasurerefine", "treasurestrengthen", "magicstonelevellimit", "petnum", "vip",
     "stone_copy", "blackmarketgoldbuycount", "artifact", "personalboss1", "personalboss2", "battle_power", "fashioncoat",
     *COUNTERS, *(f"sigil{i}" for i in (1, 3, 5, 10, 15, 20, 25, 30, 35, 40)),
+    *(f"equip_evolve{i}" for i in (1, 4, 8, 12, 20, 28)),
 }
 
 
@@ -79,7 +80,8 @@ def snapshot(save, config):
                   fashioncoat=len(save.get("fashion_state", {}).get("levels", {})),
                   equip_strengthen=max((item[2] for item in ordinary), default=0))
     return {"scalars": scalar, "partners": partners, "treasures": treasures, "copies": copies,
-            "sigils": [parse_ids_pb(raw)[2] for raw in formation.records(world, 7, 1).values()], "config": config}
+            "sigils": [parse_ids_pb(raw)[2] for raw in formation.records(world, 7, 1).values()],
+            "evolves": [equip_evolve.score(item, config) for item in ordinary if str(item[1]) in config["equip_evolve"]], "config": config}
 
 
 def progress(row, view):
@@ -95,6 +97,10 @@ def progress(row, view):
                        else pb_get_varint(raw, 4) or 0) >= target[0] for raw in view["partners"])
     elif kind in ("treasurerefine", "treasurestrengthen"):
         current = sum(item[3 if kind == "treasurerefine" else 2] >= target[0] for item in view["treasures"])
+    elif kind.startswith("equip_evolve"):
+        levels = sorted(view["evolves"], reverse=True)
+        number = int(kind[len("equip_evolve"):])
+        current = levels[number - 1] if len(levels) >= number else 0
     elif kind.startswith("sigil"):
         number = int(kind[5:])
         levels = sorted(view["sigils"], reverse=True)

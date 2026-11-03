@@ -145,7 +145,9 @@ def strengthen(save, opcode, body, config, seed):
     updated = {}
     reward = encode_pb_field(1, 0, (-spent) & ((1 << 64) - 1))
     for iid in sorted(critical):
-        updated[iid] = b"".join(encode_pb_field(1, 0, v) for v in items[iid])
+        replacement = iter(items[iid])
+        updated[iid] = b"".join(encode_pb_field(n, w, next(replacement) if (n, w) == (1, 0) else value)
+                                 for n, w, value in iter_pb_fields(equips[iid]))
         reward += encode_pb_field(6, 2, updated[iid])
         old = parse_ids_pb(equips[iid])
         qiankun.record_training(save, "equip", equips[iid], updated[iid], [(1000, actual_costs[iid])], old[2] == 1 and not any(old[3:]))

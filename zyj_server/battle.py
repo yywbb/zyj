@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import equip_baptize, godstone, magic, pets, sigil, soul
+from . import equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -127,6 +127,10 @@ def rosters(save, point, config):
         for name, field in soul.FIELDS.items():
             if field >= 10:
                 unit["pet_rates"][name] = unit["pet_rates"].get(name, 0) + soul_stats[field] - int(soul_stats[field])
+        equipment_stats = equip_evolve.attributes(raw, slot, equips, config)
+        for name, field in equip_evolve.FIELDS.items():
+            if field >= 10:
+                unit["pet_rates"][name] = unit["pet_rates"].get(name, 0) + equipment_stats[field] - int(equipment_stats[field])
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")

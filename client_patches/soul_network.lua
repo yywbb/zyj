@@ -47,7 +47,7 @@ for _,entry in ipairs({
     local opcode,send,receive = entry[1],_G[entry[2]],_G[entry[3]]
     local mutation = opcode ~= 2501
     _G[entry[2]] = function(req)
-        if mutation and (gamedata.ext.localSoulBusy or gamedata.ext.localFormationBusy) then
+        if mutation and (gamedata.ext.localSoulBusy or gamedata.ext.localFormationBusy or gamedata.ext.localEquipGrowthBusy) then
             return 0,503,{type=503,msg="命格或阵容正在结算，请等待回复；超时请重进游戏"}
         end
         local mode,mid,raw = send(req)

@@ -4,7 +4,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import battle, cheer, equip_baptize, godstone, magic, pets, sigil, soul, treasure_refine
+from . import battle, cheer, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -12,7 +12,7 @@ def records(body, field, key):
     return {pb_get_varint(v, key): v for n, w, v in iter_pb_fields(body) if n == field and w == 2}
 
 
-def bonuses(raw, slot, members, equips, config, *, cheer_tiers=()):
+def bonuses(raw, slot, members, equips, config, *, cheer_tiers=(), equip_growth=True):
     row = config["general"][str(pb_get_varint(raw, 1))]
     level = pb_get_varint(raw, 3)
     values = {field: 0 for field in range(6, 17)}
@@ -30,6 +30,8 @@ def bonuses(raw, slot, members, equips, config, *, cheer_tiers=()):
         item = parse_ids_pb(equips[iid])
         gear = equip_baptize.validate(item, config)
         equipped.add(item[1])
+        if equip_growth and str(item[1]) in config.get("equip_evolve", {}):
+            equipped.update(equip_evolve.related(item[1], config))
         for index in (1, 2):
             name = gear[f"attr{index}"]
             if not name:
@@ -42,6 +44,9 @@ def bonuses(raw, slot, members, equips, config, *, cheer_tiers=()):
         if gear["type"] in ("horse", "treasure"):
             for field, value in treasure_refine.attributes(raw, item, config).items():
                 values[field] += value
+    if equip_growth:
+        for field, value in equip_evolve.attributes(raw, slot, equips, config).items():
+            values[field] += int(value)
     for index in range(1, 30):
         required = {int(v) for v in row.get(f"cond{index}ids", "").split(";") if v}
         if not required:
