@@ -66,10 +66,10 @@ def migrate_self_stats(save, config):
     return b"".join(updates)
 
 
-def grow_protagonist(raw, row, cid, trained, slot, members, equips, config, *, cheer_tiers=()):
+def grow_protagonist(raw, row, cid, trained, slot, members, equips, config, *, cheer_tiers=(), wing_state=None):
     changed = pb_set_varint(pb_set_varint(raw, 1, cid), 4, row["level"])
-    previous, _ = formation.bonuses(raw, slot, members, equips, config, cheer_tiers=cheer_tiers)
-    current, relations = formation.bonuses(changed, slot, members, equips, config, cheer_tiers=cheer_tiers)
+    previous, _ = formation.bonuses(raw, slot, members, equips, config, cheer_tiers=cheer_tiers, wing_state=wing_state)
+    current, relations = formation.bonuses(changed, slot, members, equips, config, cheer_tiers=cheer_tiers, wing_state=wing_state)
     changes = {field: current[field] - previous[field] for field in current}
     old, new = config["general"][str(pb_get_varint(raw, 1))], config["general"][str(cid)]
     level = pb_get_varint(raw, 3)
@@ -112,7 +112,7 @@ def prepare(opcode, save, body, config):
                 for target in range(stage + 1, 24):
                     grow = config["protagonist_grow"][str(target)]
                     raw, _, _ = grow_protagonist(raw, grow, grow[f"general{choice}"], trained,
-                                                 slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config))
+                                                 slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config), wing_state=save.get("wing_state"))
                     trained = {}
                     previews.append(encode_pb_field(1, 2, raw))
                 return b"".join(previews), costs, update
@@ -135,7 +135,7 @@ def prepare(opcode, save, body, config):
                 current, cid = coats[str(current)]["coat_id"], coats[str(cid)]["coat_id"]
             if pb_get_varint(raw, 1) != current:
                 raise ValueError("主角形态与当前进阶不一致，请重新登录")
-            raw, increase, relations = grow_protagonist(raw, row, cid, trained, slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config))
+            raw, increase, relations = grow_protagonist(raw, row, cid, trained, slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config), wing_state=save.get("wing_state"))
             snapshot = pb_set_varint(snapshot, 3, stage + 1)
             for field in (4, 5, 6):
                 snapshot = pb_set_varint(snapshot, field, 0)

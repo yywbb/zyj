@@ -4,7 +4,7 @@ import copy
 import json
 from pathlib import Path
 
-from . import formation, magic, mieshendian, player, recharge, recruit, storage
+from . import formation, magic, mieshendian, player, recharge, recruit, storage, wing
 from .protocol import encode_pb_field, get_comb_messages, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 
@@ -70,8 +70,8 @@ def query(body, saves, viewer, config, state=None, opcode=3500):
         return b"".join(encode_pb_field(1, 2, event_player(row, viewer, method)) for row in rows[start - 1:start - 1 + count])
     if opcode == 3503 or method not in (0, 1, 2, 5, 6, 7, 8, 19):
         raise ValueError("历史榜需要明确的活动编号")
-    # shortcut: 翅膀/面具尚无本地成长记录，保持空榜；实现对应系统时再接入真实数值。
-    if method in (5, 7):
+    # shortcut: 魔罩尚无本地成长记录；接入实际成长后开放其榜单。
+    if method == 7:
         return b""
     rows = []
     for account, save in saves.items():
@@ -88,6 +88,12 @@ def query(body, saves, viewer, config, state=None, opcode=3500):
             score = pb_get_varint(values[28], 1)
         elif method == 1:
             score, secondary = state["level"], state["power"]
+        elif method == 5:
+            current = wing.get_state(save, config)
+            if not current["stage"]:
+                continue
+            score = wing.score(save, config)
+            params.extend((current["stage"], current["stars"]))
         elif method == 6:
             copies = bytes.fromhex(save["world_state"]["1300"])
             score = sum(pb_get_varint(point, 3) or 0 for n, w, copy in iter_pb_fields(copies) if (n, w) == (1, 2)
@@ -139,7 +145,7 @@ def entry(account, save, config, previous=None):
     growth = max(0, state["power"] - baseline)
     if previous and previous["identity"] == identity:
         growth = max(growth, previous["scores"]["11"])
-    scores = {1: state["level"], 2: state["power"], 5: 0, 6: stars, 7: 0, 18: pb_get_varint(general, 20) or 0,
+    scores = {1: state["level"], 2: state["power"], 5: wing.score(save, config), 6: stars, 7: 0, 18: pb_get_varint(general, 20) or 0,
               11: growth, 12: sigils, 13: growth, 14: growth, 15: souls, 16: magic.rank_score(save, config), 17: score}
     if any(type(value) is not int or not 0 <= value < (1 << 31) for value in scores.values()):
         raise ValueError("本地榜单成绩超出范围")
@@ -205,6 +211,8 @@ def observe(path, saves, config, now, previous=None):
 def event_player(row, viewer, method):
     score = row["scores"][str(method)]
     extra = row["general"] if method == 18 else [row["artifact_cid"], score] if method == 17 else [score, 0]
+    if method == 5:
+        extra = [score // 100, score % 100]
     rid = row["rid"] if row["account"] == viewer else 1000000 + row["account"]
     return (b"".join(encode_pb_field(n, 0, v) for n, v in
                     ((1, rid), (3, row["level"]), (4, row["vip"]), (5, row["profile"]), (7, score)))
@@ -226,9 +234,9 @@ def summary(body, state, viewer):
     values.append((my["scores"][str(method)] if my else 0, str(rank)))
     params = b""
     for score, name in values:
-        params += encode_pb_field(1, 2, encode_pb_field(1, 0, score) + encode_pb_field(2, 2, name.encode("utf-8")))
+        params += encode_pb_field(1, 2, encode_pb_field(1, 0, score // 100 if method == 5 else score) + encode_pb_field(2, 2, name.encode("utf-8")))
         if method == 5:
-            params += parameters([0])
+            params += parameters([score % 100])
     baseline = state["players"].get(str(viewer), {}).get("baseline", 0)
     return b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid) + encode_pb_field(2, 2, raw))
                     for mid, raw in ((1, params), (2, recharge.ids([baseline]))))

@@ -74,7 +74,7 @@ def get_state(state, config, now):
 
 
 def freeze(save):
-    snapshot = copy.deepcopy({k: save[k] for k in ("role_state", "role_name", "pet_state", "guild_skills") if k in save})
+    snapshot = copy.deepcopy({k: save[k] for k in ("role_state", "role_name", "pet_state", "guild_skills", "wing_state") if k in save})
     snapshot["world_state"] = {"1002": save["world_state"]["1002"]}
     return snapshot
 

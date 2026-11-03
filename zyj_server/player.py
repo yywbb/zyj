@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, collection, cup, equip_evolve, soul
+from . import achievements, collection, cup, equip_evolve, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -57,7 +57,7 @@ def load_role_config(config_path):
                               "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "treasure2_star", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold",
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
-                             "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
+                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
                              "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake",
                              "month_welfare", "month_growup", "week_growup_1", "week_growup_2_1",
@@ -661,6 +661,16 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = timebag.prepare(opcode, save, request_body, role_config, now, body)
         if opcode == 2881:
             apply_reward(save, body, role_config, now)
+    elif opcode in wing.OPCODES:
+        body, costs, update, delta = wing.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if update:
+            apply_sigil_update(save, update, delta, role_config)
+        state = wing.get_state(save, role_config)
+        snapshot = bytes.fromhex(save["protagonist_snapshot"])
+        save["protagonist_snapshot"] = pb_set_varint(pb_set_varint(snapshot, 8, state["stage"]), 9, state["color"]).hex()
+        record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode in pets.OPCODES:
         previous = pets.attributes(save, role_config)
         body, costs = pets.prepare(opcode, save, request_body, role_config)
@@ -1176,18 +1186,18 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     soul_change = responses and (responses[0]["opcode"] in soul.OPCODES or responses[0]["opcode"] == 1007 and parse_ids_pb(request_body)[1:2] == [2])
     if soul_change and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1002, 0, bytes.fromhex(save["world_state"]["1002"])))
-    if responses and responses[0]["opcode"] in (*penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
+    if responses and responses[0]["opcode"] in (*penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *wing.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
         packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
-    if responses and responses[0]["opcode"] in (1120, 1365, *equip_evolve.OPCODES) and save["world_state"]["1002"] != before["world_state"]["1002"]:
+    if responses and responses[0]["opcode"] in (1120, 1365, *equip_evolve.OPCODES, *wing.MUTATIONS) and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     baptize_cost = responses and responses[0]["opcode"] in equip_baptize.OPCODES and save["world_state"]["1002"] != before["world_state"]["1002"]
-    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 1305, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES):
+    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 1305, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES, *wing.MUTATIONS):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1004, 1005, 1006, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, *soul.MUTATIONS, *equip_evolve.OPCODES, 1077,
-                                                         *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, 1140, 1141) and not responses[0]["hex"])
+                                                         *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *wing.MUTATIONS, 1140, 1141) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb or pet_update or self_update or sigil_update or cheer_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
@@ -1276,7 +1286,7 @@ def prepare_battle_responses(seq, save, request_body, save_path, step_counts, ro
                       max(map(int, role_config["general_exp"])))
         for _, unit in sorted(attack.items()):
             raw, increase, up = training.grow_general(records[unit["iid"]], point["xp"] * attempts, slots[unit["iid"]],
-                                                     members, equips, role_config, maximum, cheer_tiers=cheer.tiers(save, role_config))
+                                                      members, equips, role_config, maximum, cheer_tiers=cheer.tiers(save, role_config), wing_state=save.get("wing_state"))
             record_slot_update(save, encode_pb_field(1, 2, raw))
             record_protagonist_general(save, raw)
             generals.append(encode_pb_field(6, 2, raw))

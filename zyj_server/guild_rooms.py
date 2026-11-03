@@ -133,7 +133,7 @@ def gain_exp(save, role_exp, general_exp, config):
     update, delta = b"", 0
     maximum = min(level * int(config["global_kv"]["general_level"]["value"]), max(map(int, config["general_exp"])))
     for iid in sorted(i for i in slots if i):
-        raw, increase, _ = training.grow_general(generals[iid], general_exp, slots[iid], members, equips, config, maximum, cheer_tiers=cheer.tiers(save, config))
+        raw, increase, _ = training.grow_general(generals[iid], general_exp, slots[iid], members, equips, config, maximum, cheer_tiers=cheer.tiers(save, config), wing_state=save.get("wing_state"))
         update += encode_pb_field(1, 2, raw)
         delta += increase
     player.apply_sigil_update(save, update, delta, config)

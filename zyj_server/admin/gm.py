@@ -140,7 +140,7 @@ def _manage(save, action, data, config, step_counts, now):
         needed = sum(config["general_exp"][str(lv)][f'{row["quality"]}exp'] for lv in range(level, data["level"]))
         gained = max(0, needed - (pb_get_varint(raw, 5) or 0))
         members = cheer.members(save, config)
-        raw, increase, _ = training.grow_general(raw, gained, slots.get(iid, b""), members, equips, config, data["level"], cheer_tiers=cheer.tiers(save, config))
+        raw, increase, _ = training.grow_general(raw, gained, slots.get(iid, b""), members, equips, config, data["level"], cheer_tiers=cheer.tiers(save, config), wing_state=save.get("wing_state"))
         player.apply_reward(save, encode_pb_field(8, 2, raw), config, now)
         if save.get("protagonist_snapshot"):
             player.record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))

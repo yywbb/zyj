@@ -1935,6 +1935,67 @@ def patch_equip_evolve_scripts(patched):
     put("UIProps", code)
 
 
+def patch_wing_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, filename in (("GameWing", "wing_network.lua"), ("UIWing", "wing_ui.lua")):
+        code = load(name)
+        if name == "UIWing":
+            marker = "    UIRequest({type = 1001})"
+            assert code.count(marker) == 2
+            code = code.replace(marker, "")
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, code + "\n" + stream.read())
+    for name, prefix, methods in (("Layer_wing_main", "wing_main", ("init", "clear")),
+                                  ("window_wingColor", "wingcolorset", ("open", "close"))):
+        code = load(name)
+        for method in methods:
+            marker = f"function {prefix}.{method}(self"
+            start = code.index(marker)
+            end = code.index("\n", start)
+            code = code[:end+1] + "    self.localWingGeneration = (self.localWingGeneration or 0)+1\n" + code[end+1:]
+        if prefix == "wing_main":
+            marker = 'self.wingdata.expnumtable[tostring(self.poptimes)]'
+            assert code.count(marker) >= 4
+            code = code.replace(marker, 'self.wingdata.expnumtable[self.poptimes]')
+            marker = '        UIRequest({type = 3742,marknum = 0,spend = {},first = 1})'
+            assert code.count(marker) == 1
+            code = code.replace(marker, '''        local needed = gamedata.config.wing_stage["1"].battle_lv
+        if GameScene.roleinfo.level < needed then runGamePrompt({msg="激活需要队伍"..needed.."级"});return end
+''' + marker)
+            code = code.replace('gameConfig.strings:string_common("fixedString","wing",11)', '"升星（每次最多100羽毛，升1星即停）"')
+            matches = list(re.finditer(r"^function wing_main\.[^(]+\(self[^\n]*\n", code, re.M))
+            for index in range(len(matches)-1, -1, -1):
+                start = matches[index].start()
+                end = matches[index+1].start() if index+1 < len(matches) else code.index("return wing_main", start)
+                block = code[start:end]
+                pattern = r"(?m)^([^\n]*?)(CCCallFunc:create\(function\(\)|setAnimationCompletedCallback\(function\(\))"
+                block = re.sub(pattern, lambda m: m.group(0) if m.group(1).lstrip().startswith("--") else
+                               m.group(0) + "\n            if not self.rootNode or self.localWingGeneration ~= generation then return end\n", block)
+                if block != code[start:end]:
+                    at = block.index("\n") + 1
+                    block = block[:at] + "    local generation = self.localWingGeneration\n" + block[at:]
+                    code = code[:start] + block + code[end:]
+        put(name, code)
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext then
+        if gamedata.ext.localWingBusy == error.ids[1] then gamedata.ext.localWingBusy=nil end
+        table.remove((gamedata.ext.localWingPending or {})[error.ids[1]] or {},1)
+    end
+''')
+    put("GameErrorMessage", code, "common_lua")
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -3108,6 +3169,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_cheer_scripts(patched)
     patch_soul_scripts(patched)
     patch_equip_evolve_scripts(patched)
+    patch_wing_scripts(patched)
     return patched
 
 

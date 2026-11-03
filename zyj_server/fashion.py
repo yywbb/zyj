@@ -1,6 +1,6 @@
 """主角商城时装的拥有、穿戴、隐藏与配置强化。"""
 
-from . import formation, recharge, shop
+from . import formation, recharge, shop, wing
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_varint
 
 
@@ -74,6 +74,7 @@ def prepare(opcode, save, body, config, now, grant=False):
     if not raw:
         raise ValueError("缺少主角属性")
     old = attributes(levels, config)
+    old_wing = wing.attributes(raw, save.get("wing_state"), config)
     costs, upgraded, coin, stones = [], 0, 0, 0
     if opcode == 1071:
         if body or not state["equipped"]:
@@ -141,6 +142,14 @@ def prepare(opcode, save, body, config, now, grant=False):
         raise ValueError("此主角暂不支持商城时装")
     current = coats[str(base)]["coat_id"] if state["equipped"] and state["show"] else base
     raw = pb_set_varint(raw, 1, current)
+    if save.get("wing_state", {}).get("stage"):
+        from . import development
+        new_wing = wing.attributes(raw, save["wing_state"], config)
+        raw, delta = development.adjust(raw, {f: new_wing[f] - old_wing[f] for f in new_wing})
+        for field in ("power", "power_all"):
+            save["role_state"][field] += delta
+            if not 0 <= save["role_state"][field] < (1 << 31):
+                raise ValueError("翅膀资质与时装变更后的战力超出范围")
     save["role_state"]["profile"] = current
     # 原生“显示时装”复选框：1 不勾选，2 勾选；隐藏仍保留拥有属性。
     save["protagonist_snapshot"] = pb_set_varint(protagonist, 7, (2 if state["show"] else 1) if state["equipped"] else 0).hex()

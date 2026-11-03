@@ -166,7 +166,7 @@ def profile(save, account):
 
 
 def frozen(save, account, config):
-    names = ("role_state", "role_name", "pet_state", "sigil_state", "guild_skills", "magic_state")
+    names = ("role_state", "role_name", "pet_state", "sigil_state", "guild_skills", "magic_state", "wing_state")
     snapshot = copy.deepcopy({k: save[k] for k in names if k in save})
     snapshot["world_state"] = {"1002": friends.public_slots(save).hex()}
     attack, defense = battle.rosters(copy.deepcopy(snapshot), config["copy"]["42101"]["1"], config)

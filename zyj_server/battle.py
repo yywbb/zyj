@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine
+from . import equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 
@@ -87,6 +87,9 @@ def rosters(save, point, config):
     _, skill_flat = guild_skill.bonuses(save, config)
     magic_bonus, magic_flat = magic.bonuses(save, config)
     souls, _ = soul.read_world(save, config)
+    wings = wing.get_state(save, config)
+    protagonist_raw = bytes.fromhex(save.get("protagonist_snapshot", "")) or next((v for n, w, v in fields if (n, w) == (6, 2)), b"")
+    protagonist = pb_get_varint(protagonist_raw, 1)
     for n, w, slot in fields:
         if n != 4 or w != 2 or not pb_get_varint(slot, 2):
             continue
@@ -107,6 +110,8 @@ def rosters(save, point, config):
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
             raise ValueError("阵位或上阵武将重复")
         unit["skill"] = config["general"][str(unit["cid"])]["skillid"]
+        if iid == protagonist and wings["stage"]:
+            unit.update(w_l=wings["stage"], w_c=wings["color"])
         unit["flat_out"], unit["flat_in"] = equip_baptize.flat(slot, equips, config)
         unit["flat_out"] += sigil_flat[0]
         unit["flat_out"] += skill_flat
@@ -443,6 +448,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                                       "level1": unit["level"], "level2": unit["advance"], "level3": 0,
                                       "h": unit["hp"], "j": unit["hp"], "ap": unit["ap"], "d": {"i": unit["skill"]},
                                       **({key: unit[key] for key in ("cover_d", "cover_d2", "cover_p", "cover_l")} if unit["cover_d"] else {})}
+            if unit.get("w_l"):
+                meta[str(unit["iid"])].update(w_l=unit["w_l"], w_c=unit.get("w_c", 0))
         report["meta"][side] = {"n": "本地玩家" if direct else next(iter(team.values())).get("name", "守关队伍"),
                                 "g": meta, "pet": {}, "cheer": cheers[direct]}
         report["b"]["init"][side] = initial

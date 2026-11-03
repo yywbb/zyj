@@ -4,7 +4,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import battle, cheer, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine
+from . import battle, cheer, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -12,13 +12,15 @@ def records(body, field, key):
     return {pb_get_varint(v, key): v for n, w, v in iter_pb_fields(body) if n == field and w == 2}
 
 
-def bonuses(raw, slot, members, equips, config, *, cheer_tiers=(), equip_growth=True):
+def bonuses(raw, slot, members, equips, config, *, cheer_tiers=(), equip_growth=True, wing_state=None):
     row = config["general"][str(pb_get_varint(raw, 1))]
     level = pb_get_varint(raw, 3)
     values = {field: 0 for field in range(6, 17)}
     if slot:
         values.update({field: int(value) for field, value in godstone.attributes(slot, config).items()})
         for field, value in cheer.attributes(raw, cheer_tiers, config).items():
+            values[field] += value
+        for field, value in wing.attributes(raw, wing_state, config).items():
             values[field] += value
     equipped, relations = set(), b""
     for field in range(4, 10):
@@ -253,8 +255,8 @@ def apply_slots(save, slots, config, *, cheers=None, souls=None):
     souls = old_souls if souls is None else souls
     for iid in sorted(before.keys() | after.keys()):
         raw = generals[iid]
-        previous, _ = bonuses(raw, before.get(iid, b""), old_members, equips, config, cheer_tiers=old_tiers)
-        current, relations = bonuses(raw, after.get(iid, b""), new_members, equips, config, cheer_tiers=new_tiers)
+        previous, _ = bonuses(raw, before.get(iid, b""), old_members, equips, config, cheer_tiers=old_tiers, wing_state=save.get("wing_state"))
+        current, relations = bonuses(raw, after.get(iid, b""), new_members, equips, config, cheer_tiers=new_tiers, wing_state=save.get("wing_state"))
         previous_soul, old_flat, _ = soul.bonuses(before.get(iid, b""), old_souls, config)
         current_soul, new_flat, _ = soul.bonuses(after.get(iid, b""), souls, config)
         for field in previous_soul:

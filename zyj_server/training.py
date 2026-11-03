@@ -12,12 +12,12 @@ EXP_PROPS = (20196, 20197, 20198, 20199)
 TREASURE_PROPS = {"horse": (26407, 26408, 26409, 26413), "treasure": (26410, 26411, 26412, 26414)}
 
 
-def grow_general(raw, gained, slot, members, equips, config, maximum=None, *, cheer_tiers=()):
+def grow_general(raw, gained, slot, members, equips, config, maximum=None, *, cheer_tiers=(), wing_state=None):
     unit = {name: pb_get_varint(raw, field) or 0 for name, field in battle.GENERAL_FIELDS.items()}
     values, increase, up = battle.grown_general(unit, gained, config, maximum)
     if up:
-        previous, _ = formation.bonuses(raw, slot, members, equips, config, cheer_tiers=cheer_tiers)
-        current, _ = formation.bonuses(pb_set_varint(raw, 3, values[3]), slot, members, equips, config, cheer_tiers=cheer_tiers)
+        previous, _ = formation.bonuses(raw, slot, members, equips, config, cheer_tiers=cheer_tiers, wing_state=wing_state)
+        current, _ = formation.bonuses(pb_set_varint(raw, 3, values[3]), slot, members, equips, config, cheer_tiers=cheer_tiers, wing_state=wing_state)
         for field in range(6, 17):
             delta = current[field] - previous[field]
             if not delta:
@@ -66,7 +66,7 @@ def use_exp(save, body, config):
     if gained - max(amount for amount, count in zip(amounts, counts) if count) >= needed:
         raise ValueError("经验丹数量超过当前等级上限所需")
     members = cheer.members(save, config)
-    raw, increase, _ = grow_general(raw, gained, slots.get(iid, b""), members, equips, config, maximum, cheer_tiers=cheer.tiers(save, config))
+    raw, increase, _ = grow_general(raw, gained, slots.get(iid, b""), members, equips, config, maximum, cheer_tiers=cheer.tiers(save, config), wing_state=save.get("wing_state"))
     costs = [(cid, count) for cid, count in zip(EXP_PROPS, counts) if count]
     return encode_pb_field(8, 2, raw), costs, increase if iid in slots else 0
 
