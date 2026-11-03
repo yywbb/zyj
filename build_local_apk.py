@@ -1996,6 +1996,59 @@ def patch_wing_scripts(patched):
     put("GameErrorMessage", code, "common_lua")
 
 
+def patch_cover_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, filename, folder in (("GameSlots", "cover_network.lua", "scripts"), ("UISlots", "cover_ui.lua", "scripts"),
+                                   ("UIActivitySafeMaskShop", "cover_shop_ui.lua", "scripts"),
+                                   ("localcoverupdate_pb", "localcoverupdate_pb.lua", "pb")):
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, (load(name, folder) + "\n" if folder == "scripts" else "") + stream.read(), folder)
+    code = load("Layer_safemask")
+    matches = list(re.finditer(r"^function safemask\.[^(]+\(self[^\n]*\n", code, re.M))
+    for index in range(len(matches)-1, -1, -1):
+        start = matches[index].start()
+        end = matches[index+1].start() if index+1 < len(matches) else code.index("return safemask", start)
+        block = code[start:end]
+        pattern = r"(?m)^([^\n]*?)(CCCallFunc:create\(function\(\)|setAnimationCompletedCallback\(function\(\))"
+        changed = re.sub(pattern, lambda m: m.group(0) if m.group(1).lstrip().startswith("--") else
+                         m.group(0) + "\n        if not self.rootNode or generation ~= self.localCoverGeneration then return end\n", block)
+        if changed != block:
+            at = changed.index("\n") + 1
+            code = code[:start] + changed[:at] + "    local generation = self.localCoverGeneration\n" + changed[at:] + code[end:]
+    for method in ("init", "clear"):
+        start = code.index(f"function safemask.{method}(self")
+        end = code.index("\n", start)
+        code = code[:end+1] + "    self.localCoverGeneration=(self.localCoverGeneration or 0)+1\n" + code[end+1:]
+    put("Layer_safemask", code)
+    code = load("Layer_activity_safemaskshop")
+    marker = 'os.date("*t", gamedata:time())'
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'os.date("!*t", gamedata:time()+28800)')
+    for method in ("init", "clear"):
+        start = code.index(f"function safemaskshop.{method}(self")
+        end = code.index("\n", start)
+        code = code[:end+1] + "    self.localCoverGeneration=(self.localCoverGeneration or 0)+1\n" + code[end+1:]
+    put("Layer_activity_safemaskshop", code)
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext then
+        if gamedata.ext.localCoverBusy==error.ids[1] then gamedata.ext.localCoverBusy=nil end
+        table.remove((gamedata.ext.localCoverPending or {})[error.ids[1]] or {},1)
+    end
+''')
+    put("GameErrorMessage", code, "common_lua")
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -3170,6 +3223,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_soul_scripts(patched)
     patch_equip_evolve_scripts(patched)
     patch_wing_scripts(patched)
+    patch_cover_scripts(patched)
     return patched
 
 

@@ -4,7 +4,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import battle, cheer, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
+from . import battle, cheer, cover, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -252,6 +252,7 @@ def apply_slots(save, slots, config, *, cheers=None, souls=None):
     skill_bonus, skill_flat = guild_skill.bonuses(save, config)
     magic_bonus, magic_flat = magic.bonuses(save, config)
     old_souls, _ = soul.read_world(save, config)
+    covers, _ = cover.bonuses(save, config)
     souls = old_souls if souls is None else souls
     for iid in sorted(before.keys() | after.keys()):
         raw = generals[iid]
@@ -274,6 +275,11 @@ def apply_slots(save, slots, config, *, cheers=None, souls=None):
         for field, value in magic_bonus.items():
             previous[field] += int(value) if iid in before else 0
             current[field] += int(value) if iid in after else 0
+        old_cover = covers.get(pb_get_varint(before.get(iid, b""), 1))
+        new_cover = covers.get(pb_get_varint(after.get(iid, b""), 1))
+        for field in (6, 7, 8):
+            previous[field] += old_cover["stats"][field] if old_cover else 0
+            current[field] += new_cover["stats"][field] if new_cover else 0
         power_delta = 0
         for field in range(6, 17):
             value = pb_get_varint(raw, field) or 0
@@ -290,6 +296,7 @@ def apply_slots(save, slots, config, *, cheers=None, souls=None):
         power_delta += skill_flat * (int(iid in after) - int(iid in before))
         power_delta += sum(magic_flat) * (int(iid in after) - int(iid in before))
         power_delta += sum(new_flat) - sum(old_flat)
+        power_delta += (new_cover["power"] if new_cover else 0) - (old_cover["power"] if old_cover else 0)
         power = (pb_get_varint(raw, 20) or 0) + power_delta
         if not 0 <= power < (1 << 31):
             raise ValueError("换阵后的武将战力超出范围")

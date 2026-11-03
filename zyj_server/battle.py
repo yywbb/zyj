@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
+from . import cover, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 
@@ -88,6 +88,7 @@ def rosters(save, point, config):
     magic_bonus, magic_flat = magic.bonuses(save, config)
     souls, _ = soul.read_world(save, config)
     wings = wing.get_state(save, config)
+    covers, _ = cover.bonuses(save, config)
     protagonist_raw = bytes.fromhex(save.get("protagonist_snapshot", "")) or next((v for n, w, v in fields if (n, w) == (6, 2)), b"")
     protagonist = pb_get_varint(protagonist_raw, 1)
     for n, w, slot in fields:
@@ -110,6 +111,9 @@ def rosters(save, point, config):
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
             raise ValueError("阵位或上阵武将重复")
         unit["skill"] = config["general"][str(unit["cid"])]["skillid"]
+        mask = covers[index]
+        if mask["level"]:
+            unit.update(cover_l=mask["level"], cover_d=mask["value"], cover_p=mask["percent"], skill_resilience=mask["skill_resilience"])
         if iid == protagonist and wings["stage"]:
             unit.update(w_l=wings["stage"], w_c=wings["color"])
         unit["flat_out"], unit["flat_in"] = equip_baptize.flat(slot, equips, config)
@@ -193,6 +197,11 @@ def damage(attacker, defender, config, skill_id=None, critical=False, *, multipl
     base = max(Fraction(attacker["atk"], 20), attacker["atk"] - defender["def"] * defense_factor)
     # 憾地 count=19：逐段向下取整再合计，不能把总伤害取整一次。
     total = int(base * coefficient * (critical_multiplier if critical else 1) * multiplier / hits) * hits
+    reduction = Fraction(str(defender.get("skill_resilience", 0)))
+    if not 0 <= reduction <= 1:
+        raise ValueError("技能减伤比例无效")
+    if skill_id is not None:
+        final_multiplier *= 1 - reduction
     return min(defender["hp"], max(0, int((total + flat) * final_multiplier)))
 
 

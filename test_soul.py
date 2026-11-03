@@ -352,6 +352,8 @@ class SoulTests(unittest.TestCase):
         with zipfile.ZipFile(builder.SRC_APK) as archive:
             modules = {name[len("assets/"):].rsplit("/",1)[-1][:-3]:name for name in archive.namelist()
                        if name.startswith(("assets/scripts/","assets/pb/","assets/common_lua/")) and name.endswith(".so")}
+        modules.update({path.rsplit("/", 1)[-1][:-3]: path for path in scripts
+                        if path.startswith(("assets/scripts/", "assets/pb/", "assets/common_lua/")) and path.endswith(".so")})
         def script(name):
             name = name.decode()
             path = modules.get(name)

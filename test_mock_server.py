@@ -294,6 +294,13 @@ class ReplayRoutingTests(unittest.TestCase):
             # 这里比较新号初始化的历史应答，不能拿后续教程通关后的存档当期望。
             self.assertEqual(self.star_copy_groups(bytes.fromhex(actual)),
                              {0: [0], **{mid: [mid, -1] for mid in range(42101, 42106)}})
+        elif opcode == 3730:
+            raw = bytes.fromhex(actual)
+            self.assertEqual(protocol.parse_ids_pb(raw), [0] * 21)
+            extra = {n: v for n, w, v in protocol.iter_pb_fields(raw) if w == 2}
+            self.assertEqual(set(extra), {100, 101})
+            self.assertEqual(protocol.parse_ids_pb(extra[100]), [0] * 21)
+            self.assertEqual(protocol.parse_ids_pb(extra[101]), [0] * 7)
         elif opcode == 1044:
             # 魔宠碎片来自当前库存，不继承录制初始化中独立赠送的50片。
             saved = json.loads(self.save_path.read_text())
