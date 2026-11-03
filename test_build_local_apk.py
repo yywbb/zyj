@@ -116,6 +116,21 @@ class LanBuildTests(unittest.TestCase):
         self.assertIn("if t.location == 0 then LoginScene:rememberLocalLogin() end", decrypted("assets/scripts/UILogin.so"))
         self.assertIn("LoginScene:failLocalLogin(t.msg, true)", decrypted("assets/scripts/UIErrorMessage.so"))
 
+    def test_home_page_hides_unsupported_minigame_without_querying(self):
+        from lupa.lua51 import LuaRuntime
+        code = self.client_scripts()["assets/scripts/Layer_main.so"]
+        start = code.index("function main.checkminigame(self)")
+        end = code.index("\nend", start) + len("\nend")
+        lua = LuaRuntime()
+        lua.execute('''main={}; UIRequest=function() error("unexpected request") end
+            GameScene={checkopenlevelbyId=function() return true end}''')
+        lua.execute(code[start:end])
+        lua.execute('''local hidden=false
+            main.checkminigame({setNode=function(self,visible,node)
+                assert(not visible and node=="minigamenode"); hidden=true
+            end})
+            assert(hidden)''')
+
     def test_guild_incense_queries_live_and_midnight_restores_buttons(self):
         try:
             from lupa.lua51 import LuaRuntime

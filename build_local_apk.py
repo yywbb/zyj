@@ -3224,6 +3224,14 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_equip_evolve_scripts(patched)
     patch_wing_scripts(patched)
     patch_cover_scripts(patched)
+    code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
+    start = code.index("function main.checkminigame(self)\n")
+    end = code.index("\nend", start) + len("\nend")
+    assert "UIRequest({type = 1600})" in code[start:end]
+    code = code[:start] + '''function main.checkminigame(self)
+    self:setNode(false,"minigamenode")
+end''' + code[end:]
+    patched["assets/scripts/Layer_main.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     return patched
 
 

@@ -203,6 +203,29 @@ def build_routing_tables(frames):
     if guild_groups:
         comb_routes.setdefault((get_comb_ids(guild_request), guild_request), guild_groups)
 
+    # 34级首页加入翅膀；只派生原生缓存会产生的三条完整模板，不放开任意子集。
+    for omitted in ((), (2880,), (2880, 5511)):
+        ids = tuple(mid for mid in (2313, 3740, *main_ids[1:7], 2230, *main_ids[7:]) if mid not in omitted)
+        request = b"".join(encode_pb_field(1, 2, encode_pb_field(1, 0, mid)) for mid in ids)
+        groups = []
+        for group in guild_groups:
+            responses = []
+            for response in group:
+                if response["opcode"] == 999900:
+                    out = bytearray()
+                    for n, w, value in iter_pb_fields(bytes.fromhex(response["hex"])):
+                        if (n, w) == (1, 2) and pb_get_varint(value, 1) in omitted:
+                            continue
+                        out.extend(encode_pb_field(n, w, value))
+                        if (n, w) == (1, 2) and pb_get_varint(value, 1) == 2313:
+                            # 已实现的3740由player生成当前账号状态，不使用录制的翅膀数据。
+                            out.extend(encode_pb_field(1, 2, encode_pb_field(1, 0, 3740)))
+                    response = dict(response, hex=out.hex())
+                responses.append(response)
+            groups.append(responses)
+        if groups:
+            comb_routes.setdefault((get_comb_ids(request), request), groups)
+
     print_flush(f"[*] 带请求校验的录制路由就绪: {sum(len(groups) for groups in verified.values())} 个请求")
     print_flush(f"[*] 路由表就绪: {len(opcode_routes)} 个普通请求参数组合, {len(comb_routes)} 个 Comb 请求参数组合, {len(master_comb_packets)} 个主城初始化子帧")
     return opcode_routes, comb_routes, master_comb_packets, verified

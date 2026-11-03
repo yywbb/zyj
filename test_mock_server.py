@@ -1044,6 +1044,47 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertIsNone(replay.Replay(tables).match(999900, 24000, body))
         self.assertEqual(frames, original)
 
+    def test_main_page_wing_preloads_return_live_state_with_and_without_timebag(self):
+        self.seed_shop_account()
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"].update(level=35, nextexp=self.role_config["role_exp"]["35"]["nextexp"])
+        saved["wing_state"] = dict(stage=1, stars=0, exp=0, color=0, failures=0, colors=[], checked_at=self.now)
+        self.save_path.write_text(json.dumps(saved))
+        wing = bytes.fromhex(self.replay([self.activity_request(3740)])[0]["hex"])
+        previous = self.replay([self.by_seq[27]])[0]
+        expected = protocol.get_comb_messages(bytes.fromhex(previous["hex"]))
+        baseline = next(dict(protocol.get_comb_messages(bytes.fromhex(f["hex"])))[2230]
+                        for f in self.tables[2] if f["opcode"] == 999900)
+        expected.insert(7, (2230, baseline))
+        expected.insert(1, (3740, wing))
+        before = self.save_path.read_bytes()
+        for omit in ((), (2880,), (2880, 5511)):
+            messages = [(mid, data) for mid, data in expected if mid not in omit]
+            body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid)) for mid, _ in messages)
+            for seq in (18, 24001):
+                with self.subTest(omit=omit, seq=seq):
+                    result = self.replay([{"opcode": 999900, "seq": seq, "hex": body.hex()}], chunk_size=7)
+                    self.assertEqual([(f["opcode"], f["seq"]) for f in result], [(999900, seq)])
+                    self.assertEqual(protocol.get_comb_messages(bytes.fromhex(result[0]["hex"])), messages)
+                    self.assertEqual(self.save_path.read_bytes(), before)
+
+    def test_main_page_wing_preloads_require_complete_sources(self):
+        initial = [self.by_seq[12], self.recorded[(12, 999900)]]
+        source = self.recorded[(27, 999900)]
+        unknown = protocol.encode_pb_field(9, 2, b"keep")
+        response = dict(source, hex=source["hex"] + unknown.hex())
+        for omit in ((), (2880,)):
+            ids = (2313, 3740, 4800, 2880, 5511, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810)
+            body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid)) for mid in ids if mid not in omit)
+            with redirect_stdout(io.StringIO()):
+                tables = replay.build_routing_tables([*initial, self.by_seq[27], response])
+                result = replay.Replay(tables).match(999900, 18, body)
+                self.assertIsNotNone(result)
+                self.assertTrue(bytes.fromhex(result[0]["hex"]).endswith(unknown))
+                for replies in ([], [dict(response, seq=0)], [dict(response, hex="")]):
+                    tables = replay.build_routing_tables([*initial, self.by_seq[27], *replies])
+                    self.assertIsNone(replay.Replay(tables).match(999900, 18, body))
+
     def test_main_page_comb_compatibility_keeps_full_parameter_validation(self):
         self.seed_shop_account()
         before = self.save_path.read_bytes()
@@ -1051,7 +1092,9 @@ class ReplayRoutingTests(unittest.TestCase):
         refresh = bytes.fromhex("0a030889120a0308c0250a0308ff350a03088a190a0308da360a0308f50f0a0308f70f0a0308e5320a03089a35")
         guild = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid))
                          for mid in (2313, 4800, 2880, 5511, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810))
-        for raw in (bytes.fromhex(self.by_seq[27]["hex"]), bytes.fromhex(self.by_seq[122]["hex"]), refresh, guild):
+        wing = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid))
+                         for mid in (2313, 3740, 4800, 2880, 5511, 6911, 3210, 7002, 2230, 2037, 2039, 6501, 6810))
+        for raw in (bytes.fromhex(self.by_seq[27]["hex"]), bytes.fromhex(self.by_seq[122]["hex"]), refresh, guild, wing):
             fields = list(protocol.iter_pb_fields(raw))
             bodies = [raw + b"\x10\x01", raw + protocol.encode_pb_field(*fields[0]),
                       b"".join(protocol.encode_pb_field(*f) for f in reversed(fields))]
