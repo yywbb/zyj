@@ -704,6 +704,36 @@ class AccountMaintenanceTests(AdminFixture):
         self.assertIsNotNone(self.maintain("backup", 2)["backup_id"])
         self.assertEqual(self.store.path(1).read_bytes(), before)
 
+    def test_kick_force_disconnects_online_account_and_records_operation(self):
+        before = self.save()
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        self.store.open_session(1, PASSWORD, ("phone", 1234))
+        self.store.attach_connection(1, lambda: self.store.close_session(1))
+        json.dumps(views.summary(self.store.snapshot(1), COUNTS, CONFIG))
+        workbench = gm.Workbench(self.store)
+        result = workbench.kick(1, "调试需要")
+        self.assertEqual(result["account"], 1)
+        self.assertFalse(self.store.snapshot(1)["online"])
+        self.assertEqual(self.store.path(1).read_bytes(), before)
+        history = workbench.history(1, "kick", 0, 0, 0)
+        self.assertEqual(history["total"], 1)
+        self.assertEqual(history["rows"][0]["status"], "success")
+        with self.assertRaisesRegex(ValueError, "不在线"):
+            workbench.kick(1, "重复下线")
+
+    def test_kick_requires_reason_and_live_connection(self):
+        self.save()
+        workbench = gm.Workbench(self.store)
+        with self.assertRaisesRegex(ValueError, "不在线"):
+            workbench.kick(1, "尚未上线")
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        self.store.open_session(1, PASSWORD, ("phone", 1234))
+        self.addCleanup(self.store.close_session, 1)
+        with self.assertRaisesRegex(ValueError, "请填写"):
+            workbench.kick(1, "  ")
+        with self.assertRaisesRegex(ValueError, "不支持强制下线"):
+            workbench.kick(1, "缺少连接回调")
+
     def test_login_waits_until_reset_and_its_backup_are_complete(self):
         self.save()
         self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
@@ -981,6 +1011,19 @@ class GmTests(AdminFixture):
         restored = self.store.path(1).read_bytes()
         self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
         self.assertEqual(self.store.path(1).read_bytes(), restored)
+
+    def test_coin_adjustments_allow_int64_while_other_resources_stay_int32(self):
+        data = Session(TABLES, self.store.path(1), COUNTS, CONFIG).save
+        data["role_state"]["coin"] = (1 << 31) - 1
+        data["role_state"]["gold"] = (1 << 31) - 1
+        player.save_role(data, self.store.path(1), COUNTS)
+        self.gm.apply(1, self.request({"coin": 100000000}))
+        after = Session(TABLES, self.store.path(1), COUNTS, CONFIG).save
+        self.assertEqual(after["role_state"]["coin"], (1 << 31) - 1 + 100000000)
+        before = self.store.path(1).read_bytes()
+        with self.assertRaisesRegex(ValueError, "不足或超出范围"):
+            self.gm.apply(1, self.request({"gold": 1}))
+        self.assertEqual(self.store.path(1).read_bytes(), before)
 
     def test_invalid_requests_and_overflows_never_change_save(self):
         before = self.store.path(1).read_bytes()

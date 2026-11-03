@@ -77,6 +77,7 @@ def handle_client(conn, addr, account_store, diagnostic=None):
                             session = account_store.open_session(requested_account, password, addr)
                             account = requested_account
                             conn.settimeout(None)
+                            account_store.attach_connection(account, lambda: conn.shutdown(socket.SHUT_RDWR))
                             print_flush(f"[★] 连接已验证账号 {account}")
                         else:
                             account_store.authenticate(account, password)
