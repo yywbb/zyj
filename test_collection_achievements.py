@@ -141,7 +141,7 @@ class CollectionAchievementTests(unittest.TestCase):
 
     def test_every_supported_config_condition_checks_its_threshold_in_both_directions(self):
         supported = [row for row in self.config["task"].values() if row["type"] in achievements.SUPPORTED_TYPES]
-        self.assertEqual(len(supported), 731)
+        self.assertEqual(len(supported), 748)
         for row in supported:
             with self.subTest(cid=row["id"], kind=row["type"]):
                 kind = row["type"]

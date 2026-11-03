@@ -4,7 +4,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import battle, cheer, equip_baptize, godstone, magic, pets, sigil, treasure_refine
+from . import battle, cheer, equip_baptize, godstone, magic, pets, sigil, soul, treasure_refine
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -218,7 +218,7 @@ def strengthen_stones(save, body, config):
     return apply_slots(save, slots, config), [(20223, cost)]
 
 
-def apply_slots(save, slots, config, *, cheers=None):
+def apply_slots(save, slots, config, *, cheers=None, souls=None):
     world = bytes.fromhex(save["world_state"]["1002"])
     generals, old, equips = records(world, 1, 2), records(world, 4, 1), records(world, 2, 1)
     before = {pb_get_varint(v, 2): v for v in old.values() if pb_get_varint(v, 2)}
@@ -244,10 +244,17 @@ def apply_slots(save, slots, config, *, cheers=None):
     sigil_bonus, sigil_flat = sigil.bonuses(save, config)
     skill_bonus, skill_flat = guild_skill.bonuses(save, config)
     magic_bonus, magic_flat = magic.bonuses(save, config)
+    old_souls, _ = soul.read_world(save, config)
+    souls = old_souls if souls is None else souls
     for iid in sorted(before.keys() | after.keys()):
         raw = generals[iid]
         previous, _ = bonuses(raw, before.get(iid, b""), old_members, equips, config, cheer_tiers=old_tiers)
         current, relations = bonuses(raw, after.get(iid, b""), new_members, equips, config, cheer_tiers=new_tiers)
+        previous_soul, old_flat, _ = soul.bonuses(before.get(iid, b""), old_souls, config)
+        current_soul, new_flat, _ = soul.bonuses(after.get(iid, b""), souls, config)
+        for field in previous_soul:
+            previous[field] += int(previous_soul[field])
+            current[field] += int(current_soul[field])
         for field, value in pet_bonus.items():
             previous[field] += int(value) if iid in before else 0
             current[field] += int(value) if iid in after else 0
@@ -275,6 +282,7 @@ def apply_slots(save, slots, config, *, cheers=None):
         power_delta += sum(sigil_flat) * (int(iid in after) - int(iid in before))
         power_delta += skill_flat * (int(iid in after) - int(iid in before))
         power_delta += sum(magic_flat) * (int(iid in after) - int(iid in before))
+        power_delta += sum(new_flat) - sum(old_flat)
         power = (pb_get_varint(raw, 20) or 0) + power_delta
         if not 0 <= power < (1 << 31):
             raise ValueError("换阵后的武将战力超出范围")

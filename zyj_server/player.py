@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, collection, cup
+from . import achievements, collection, cup, soul
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -55,7 +55,7 @@ def load_role_config(config_path):
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
                              "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "build",
-                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul",
+                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
                              "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake",
@@ -372,6 +372,11 @@ def settle_self_stats(save, role_config):
 
 
 def change_item_count(save, cid, delta, role_config, now=None):
+    if cid == 70000:
+        state = dict(soul.get_state(save))
+        state["tokens"] = soul.integer(state["tokens"] + delta)
+        save["soul_state"] = state
+        return
     if cid == 1025:
         state = get_role_state(save, role_config)
         if not 0 <= state["g_gold"] + delta < (1 << 31):
@@ -653,6 +658,21 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
     elif opcode in world_boss.QUERIES:
         body = world_boss.query(opcode, save, request_body, role_config)
+    elif opcode in soul.OPCODES or opcode == 1007 and len(parse_ids_pb(request_body)) >= 2 and parse_ids_pb(request_body)[1] == 2:
+        body, costs, reward, update = soul.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
+        if update:
+            record_slot_update(save, update)
+            for n, w, raw in iter_pb_fields(update):
+                if (n, w) == (1, 2):
+                    record_protagonist_general(save, raw)
+            protagonist = encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"]))
+            record_slot_update(save, protagonist)
+            if opcode in (1006, 1007, 2504, 2507):
+                body += protagonist
     elif opcode in favorite.OPCODES:
         body, costs, update = favorite.prepare(opcode, save, request_body, role_config, random.getrandbits(64))
         for cid, count in costs:
@@ -1108,17 +1128,20 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         for mid in WORLD_QUERY_IDS:
             if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
-    if responses and responses[0]["opcode"] in (*penglai.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
+    soul_change = responses and (responses[0]["opcode"] in soul.OPCODES or responses[0]["opcode"] == 1007 and parse_ids_pb(request_body)[1:2] == [2])
+    if soul_change and save["world_state"]["1002"] != before["world_state"]["1002"]:
+        packets.append(pack_frame(1002, 0, bytes.fromhex(save["world_state"]["1002"])))
+    if responses and responses[0]["opcode"] in (*penglai.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
         packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
     if responses and responses[0]["opcode"] in (1120, 1365) and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     baptize_cost = responses and responses[0]["opcode"] in equip_baptize.OPCODES and save["world_state"]["1002"] != before["world_state"]["1002"]
-    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS):
+    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
-    local_update = (responses and responses[0]["opcode"] in (1003, 1004, 1005, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, 1077,
+    local_update = (responses and responses[0]["opcode"] in (1003, 1004, 1005, 1006, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, *soul.MUTATIONS, 1077,
                                                          *development.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, 1140, 1141) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb or pet_update or self_update or sigil_update or cheer_update:

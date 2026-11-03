@@ -6,7 +6,7 @@ for _, entry in ipairs({
 }) do
     local request, response, opcode = _G[entry[1]], _G[entry[2]], entry[3]
     _G[entry[1]] = function(req)
-        if gamedata.ext.localFormationBusy then
+        if gamedata.ext.localFormationBusy or gamedata.ext.localSoulBusy then
             return 0, 503, {type=503, msg="阵容正在结算，请等待回复；超时请重进游戏"}
         end
         local kind, mid, body = request(req)

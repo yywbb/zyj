@@ -114,7 +114,6 @@ def build_reward(save, specification, config, quantity=1):
     coin, gold, stamina, energy, props, equipment = 0, 0, 0, 0, [], []
     souls, gems = [], []
     roster = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))
-    soul_iid = max([3000000, *(pb_get_varint(v, 1) for n, w, v in roster if n == 3 and w == 2)])
     gem_iid = max([4000000, *(pb_get_varint(v, 1) for n, w, v in roster if n == 7 and w == 2)])
     # 本地装备使用独立 iid 区间，避免与尚未回放的录制掉落撞号。
     iid = max([1000000, *_equipment(save)])
@@ -133,7 +132,7 @@ def build_reward(save, specification, config, quantity=1):
             stamina += count
         elif cid == 1003:
             energy += count
-        elif (cid in (1004, 1005, 1008, 1019, 1025) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
+        elif (cid in (1004, 1005, 1008, 1019, 1025, 70000) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
               or str(cid) in config["treasure2_fragment"] or str(cid) in config["equip_fragment"]
                or str(cid) in config["pet3_fragment"] or str(cid) in config["redl_awake_item"] or str(cid) in config["fashioncoat"]
                or str(cid) in config["trump_gem"] or str(cid) in config["token"] or str(cid) in config["token_fragment"]):
@@ -146,10 +145,9 @@ def build_reward(save, specification, config, quantity=1):
                     raise ValueError("本地装备 iid 已耗尽")
                 equipment.append(encode_pb_field(6, 2, _ids([iid, cid, 1] + [0] * 10)))
         elif str(cid) in config["soul"]:
+            from .soul import allocate
             for _ in range(count):
-                soul_iid += 1
-                if soul_iid >= (1 << 31):
-                    raise ValueError("本地武魂 iid 已耗尽")
+                soul_iid = allocate(save)
                 souls.append(encode_pb_field(1, 2, b"".join(encode_pb_field(n, 0, v)
                              for n, v in ((1, soul_iid), (2, cid), (3, 1)))))
         elif str(cid) in config["sigil"]:

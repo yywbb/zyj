@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import equip_baptize, godstone, magic, pets, sigil
+from . import equip_baptize, godstone, magic, pets, sigil, soul
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -86,6 +86,7 @@ def rosters(save, point, config):
     sigil_bonus, sigil_flat = sigil.bonuses(save, config)
     _, skill_flat = guild_skill.bonuses(save, config)
     magic_bonus, magic_flat = magic.bonuses(save, config)
+    souls, _ = soul.read_world(save, config)
     for n, w, slot in fields:
         if n != 4 or w != 2 or not pb_get_varint(slot, 2):
             continue
@@ -112,6 +113,10 @@ def rosters(save, point, config):
         unit["flat_in"] += sigil_flat[1]
         unit["flat_out"] += magic_flat[0]
         unit["flat_in"] += magic_flat[1]
+        soul_stats, soul_flat, soul_effects = soul.bonuses(slot, souls, config)
+        unit["flat_out"] += soul_flat[0]
+        unit["flat_in"] += soul_flat[1]
+        unit["soul_effects"] = soul_effects
         stone = godstone.attributes(slot, config)
         unit["pet_rates"] = {name: pet_bonus.get(field, 0) - int(pet_bonus.get(field, 0)) + stone[field] - int(stone[field])
                              for name, field in godstone.ATTR_FIELDS.items() if field in godstone.RATE_FIELDS}
@@ -119,6 +124,9 @@ def rosters(save, point, config):
         for name, field in magic.FIELDS.items():
             if field >= 10:
                 unit["pet_rates"][name] = unit["pet_rates"].get(name, 0) + magic_bonus[field] - int(magic_bonus[field])
+        for name, field in soul.FIELDS.items():
+            if field >= 10:
+                unit["pet_rates"][name] = unit["pet_rates"].get(name, 0) + soul_stats[field] - int(soul_stats[field])
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")
@@ -157,7 +165,7 @@ def rosters(save, point, config):
 
 
 def damage(attacker, defender, config, skill_id=None, critical=False, *, multiplier=Fraction(1),
-           flat=0, critical_multiplier=Fraction(3, 2), combo=False):
+           flat=0, critical_multiplier=Fraction(3, 2), combo=False, final_multiplier=Fraction(1)):
     """倍率在分段取整前应用，固定加减伤在求和后应用，最后死亡截断。"""
     coefficient, hits = Fraction(1), 1
     if skill_id is not None:
@@ -172,7 +180,7 @@ def damage(attacker, defender, config, skill_id=None, critical=False, *, multipl
     base = max(Fraction(attacker["atk"], 20), attacker["atk"] - defender["def"] * defense_factor)
     # 憾地 count=19：逐段向下取整再合计，不能把总伤害取整一次。
     total = int(base * coefficient * (critical_multiplier if critical else 1) * multiplier / hits) * hits
-    return min(defender["hp"], max(0, total + flat))
+    return min(defender["hp"], max(0, int((total + flat) * final_multiplier)))
 
 
 def _gain_experience(level, experience, gained, table, field, maximum=None):
@@ -450,6 +458,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             raise ValueError("战斗事件超出上限，未结算")
 
     def change_hp(unit, amount, status="N", hits=0, *, shield=True):
+        if amount < 0:
+            amount = -int(-amount * (1 + unit.get("soul_effects", {}).get("heal", 0)))
         if amount > 0 and unit["states"].get("invincible", 0) > round_number:
             amount, status = 0, "proof"
         absorbed = min(unit["cover_d"], int(max(0, amount) * Fraction(unit.get("cover_p", 0), 100))) if shield else 0
@@ -552,12 +562,13 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         target["guard"] -= 1
         return 1 - effect(target, 9000024)
 
-    def extra_hit(actor, target, coefficient, fixed=0):
+    def extra_hit(actor, target, coefficient, fixed=0, *, explosion=False):
         multiplier = modifiers(actor, target) * guard(target)
         flat = actor["flat_out"] - target["flat_in"]
+        final = max(0, 1 - target.get("soul_effects", {}).get("antiblew", 0)) if explosion else 1
         amount = damage({**actor, "atk": stat(actor, "atk")},
                         {**target, "def": stat(target, "def"), "hp": target["hp"] + target["cover_d"]}, config,
-                        multiplier=coefficient * multiplier, flat=flat) if coefficient else max(0, int(fixed * multiplier) + flat)
+                        multiplier=coefficient * multiplier, flat=flat, final_multiplier=final) if coefficient else int(max(0, int(fixed * multiplier) + flat) * final)
         return change_hp(target, amount)
 
     def deaths():
@@ -574,7 +585,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 selected = targets(unit, teams[not unit["direct"]], None, rng)
                 if selected:
                     target = selected[0]
-                    event([extra_hit(unit, target, effect(unit, 9000040))])
+                    event([extra_hit(unit, target, effect(unit, 9000040), explosion=True)])
 
     def living(team):
         return [u for _, u in sorted(team.items()) if u["hp"] > 0]

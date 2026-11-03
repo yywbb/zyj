@@ -1698,6 +1698,162 @@ def patch_cheer_scripts(patched):
     put("window_generalInfo_role", code)
 
 
+def patch_soul_scripts(patched):
+    def load(name, section="scripts"):
+        path = f"assets/{section}/{name}.so"
+        if path not in patched:
+            return read_script(name, section).decode("utf-8").replace("\r\n", "\n")
+        raw = xxtea_decrypt(patched[path], XXTEA_KEY)
+        return raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+
+    def put(name, code, section="scripts"):
+        patched[f"assets/{section}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    def replace(code, old, new, count=1):
+        assert code.count(old) == count, old
+        return code.replace(old, new)
+
+    def generation(code, prefix, methods):
+        for method in methods:
+            marker = f"function {prefix}.{method}(self"
+            start = code.index(marker)
+            end = code.index("\n", start)
+            code = code[:end+1] + "    self.localSoulGeneration = (self.localSoulGeneration or 0) + 1\n" + code[end+1:]
+        return code
+
+    code = load("gamedata")
+    start = code.index("function gamedata.SoulHunt(self,data,param)\n")
+    end = code.index("function gamedata.findcombskilllevel(", start)
+    code = code[:start] + '''function gamedata.SoulHunt(self,data,param)
+    local tokens = math.max(0,data.soul-(self.cache.soulhunt.soul or 0))
+    self:SoulHuntQuery(data)
+    return self:Souls(data.souls),tokens
+end
+
+''' + code[end:]
+    put("gamedata", code)
+    code = load("GameSlots")
+    start = code.index("function NetSlotsAllInfoCallBack(fd)\n")
+    end = code.index("\nfunction ", start+1)
+    block = replace(code[start:end], "    gamedata:SlotInfoProcess(info)\n", "    gamedata.cache.souls = {}\n    gamedata:SlotInfoProcess(info)\n")
+    code = code[:start] + block + code[end:]
+    put("GameSlots", code)
+
+    for name, filename in (("GameSoul", "soul_network.lua"), ("UISouls", "soul_ui.lua")):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, load(name) + "\n" + stream.read())
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    if gamedata and gamedata.ext and gamedata.ext.localFormationBusy"
+    start = code.index(marker)
+    code = code[:start] + '''    if gamedata and gamedata.ext then
+        if gamedata.ext.localSoulBusy == error.ids[1] then gamedata.ext.localSoulBusy = nil end
+        local queue = (gamedata.ext.localSoulPending or {})[error.ids[1]] or {}
+        table.remove(queue,1)
+    end
+''' + code[start:]
+    put("GameErrorMessage", code, "common_lua")
+    code = load("UISlots")
+    for first, last in (("UISlotChangeSoul", "UIQuickEquip"), ("UIQuickEquip", "UIUpgradeSkill")):
+        start, end = code.index(f"function {first}(t)"), code.index(f"function {last}(t)")
+        block = replace(code[start:end], "    UIRequest({type = 10322})", "    if t.method == 1 then UIRequest({type = 10322}) end" if first == "UIQuickEquip" else "    -- 服务端已返回真实命格/阵容，无需旧服战力重算接口。")
+        code = code[:start] + block + code[end:]
+    put("UISlots", code)
+    code = load("UIProps")
+    for order, name in ((25061, "soulInfo"), (33007, "soul"), (32021, "buyItem")):
+        marker = f"    elseif t.order == {order} then\n"
+        code = replace(code, marker, marker + f'        if not LocalSoulMatch(t.soulView,"{name}") then return end\n')
+    put("UIProps", code)
+
+    code = generation(load("Layer_soul"), "soul", ("init", "clear"))
+    code = replace(code, "if data.level < integrateconfig.cond then", "if data.level ~= integrateconfig.cond then")
+    code = replace(code, "elseif not (data.generalcid and data.generalcid > 0) then", "elseif data.generalcid and data.generalcid > 0 then")
+    code = replace(code, 'runGamePrompt({msg=gameConfig.strings:string_common("soul",15)})', 'runGamePrompt({msg="合成需要两个闲置且恰好10级的命格，请先卸下"})')
+    code = replace(code, 'runGamePrompt({msg=gameConfig.strings:need_soul_lv(integrateconfig.cond)})', 'runGamePrompt({msg="合成材料必须恰好10级，更高等级不能消耗"})')
+    code = replace(code, 'self.rootItems.newtext:setString("灵石猎命每次奖励一个元命");', 'self.rootItems.newtext:setString("每次1灵石及2万银币，另获1元命");')
+    for method in ("makeHuntAnimation", "relaodHunt"):
+        start = code.index(f"function soul.{method}(")
+        end = code.index("\nfunction ", start+1)
+        block = code[start:end]
+        line = block.index("\n")
+        binding = "    self.localSoulAnimation = (self.localSoulAnimation or 0) + 1\n" if method == "relaodHunt" else ""
+        block = block[:line+1] + binding + "    local generation,animation = self.localSoulGeneration,self.localSoulAnimation\n" + block[line+1:]
+        for marker in ("setAnimationCompletedCallback(function()\n", "CCCallFunc:create(function()\n"):
+            block = block.replace(marker, marker + "            if not self.rootNode or self.localSoulGeneration ~= generation or self.localSoulAnimation ~= animation then return end\n")
+        code = code[:start] + block + code[end:]
+    put("Layer_soul", code)
+
+    code = generation(load("Layer_soulResolveList"), "soullist", ("init", "clear"))
+    start = code.index("            UIRequest({type = 2506, ids = ids})")
+    code = code[:start] + replace(code[start:], '            UIRequest({type = 2506, ids = ids})\n            gamedata.music:PlayOptSound("fj")', '            LocalSoulResolve(ids,"soulResolveList")')
+    put("Layer_soulResolveList", code)
+
+    code = generation(load("window_soulInfo"), "soulInfo", ("reload", "close"))
+    start, end = code.index("    self.infoItems.resolveButton:addHandleOfControlEvent"), code.index("    self.infoItems.resolveButton:setSwallowsTouch")
+    code = code[:start] + '''    local generation,iid = self.localSoulGeneration,self.data.iid
+    self.infoItems.resolveButton:addHandleOfControlEvent(function()
+        if not self.root or self.localSoulGeneration ~= generation or self.data.iid ~= iid then return end
+        if self.data.fromtype == "slot" then
+            UIRequest({type=1006,slot=self.data.sid,soulpos=self.data.soulpos,soulid=0})
+            self.callback=nil
+            gameWindows:closeWindowDirect("soulInfo")
+        else LocalSoulResolve({iid},"soulInfo") end
+    end, CCControlEventTouchUpInside)
+''' + code[end:]
+    code = replace(code, '''        self.infoItems.resolveNode:setVisible(false)
+        self.infoItems.resolveButton:setEnabled(false)''', '''        self.infoItems.resolveNode:setVisible(true)
+        self.infoItems.resolveButton:setEnabled(true)
+        ui.setLabelString(self.infoItems.resolveLab,"卸 下",19)''')
+    start = code.index("    self.infoItems.changeButton:addHandleOfControlEvent")
+    end = code.index("    self.infoItems.changeButton:setSwallowsTouch", start)
+    code = code[:start] + '''    self.infoItems.changeButton:addHandleOfControlEvent(function()
+        local sid,pos = self.data.sid,self.data.soulpos
+        gameWindows:closeWindowDirect("soulInfo")
+        local closedGeneration = self.localSoulGeneration
+        local callback = function(selectedData)
+            if self.root or self.localSoulGeneration ~= closedGeneration then return end
+            for _,item in pairs(selectedData) do UIRequest({type=1006,slot=sid,soulpos=pos,soulid=item.iid});break end
+        end
+        gameWindows:openWindow("selectlist",{type="changesoul",param={sid=sid,soulpos=pos,iid=iid}},callback)
+    end, CCControlEventTouchUpInside)
+''' + code[end:]
+    marker = "function soulInfo.setPage_up(self)\n"
+    code = replace(code, marker, marker + "    local generation,iid = self.localSoulGeneration,self.data.iid\n")
+    marker = "    self.upItems.doButton:addHandleOfControlEvent(function()\n"
+    code = replace(code, marker, marker + "        if not self.root or self.localSoulGeneration ~= generation or self.data.iid ~= iid then return end\n")
+    put("window_soulInfo", code)
+
+    code = generation(load("Layer_slotsInfo"), "slotsInfo", ("init", "clear"))
+    marker = '            elseif self.status == "soul" then\n'
+    code = replace(code, marker, marker + "                local generation,sid = self.localSoulGeneration,self.sid\n")
+    marker = '                            UIRequest({type=1006,slot = slotdata.sid, soulpos =slotdata["s"..i].soulpos, soulid = v.iid})'
+    code = replace(code, marker, '                            if not self.rootNode or self.localSoulGeneration ~= generation or self.sid ~= sid or self.status ~= "soul" then return end\n' + marker)
+    put("Layer_slotsInfo", code)
+
+    code = generation(load("window_soulintegrate"), "soulintegrate", ("reload", "close"))
+    code = replace(code, "if v.generalcid and (v.generalcid == self.data.generalcid) then", "if not v.generalcid or v.generalcid == 0 then")
+    code = replace(code, "v.level >= integrateconfig.cond", "v.level == integrateconfig.cond", 2)
+    code = replace(code, "    local cid1,cid2 = 0,0", "    local generation = self.localSoulGeneration\n    local cid1,cid2 = 0,0")
+    marker = "                UIRequest({type = 2507, iid1 = iid1, iid2 = iid2})"
+    code = replace(code, marker, "                if not self.rootNode or self.localSoulGeneration ~= generation then return end\n" + marker)
+    marker = "function soulintegrate.compound(self)\n"
+    code = replace(code, marker, marker + "    local generation = self.localSoulGeneration\n")
+    marker = "        self.animationManager:setAnimationCompletedCallback(function()\n"
+    code = replace(code, marker, marker + "            if not self.rootNode or self.localSoulGeneration ~= generation then return end\n")
+    put("window_soulintegrate", code)
+
+    code = load("window_soul_fast")
+    for count in (10, 100, 1000):
+        code = replace(code, f"data.xnum and data.xnum*{count} or 0", '"按次计费"')
+    marker = "    --\n    if data and data.hunt and data.hunt == 6 then"
+    code = replace(code, marker, '    ui.setLabelString(self.rootItems.selectDesc,data.hunt == 6 and "每次1灵石及2万银币，另获1元命" or "银币按阶段逐次计费；不足整批回滚",1)\n' + marker)
+    put("window_soul_fast", code)
+    code = generation(load("window_buyItem"), "buy", ("reload", "close"))
+    # 绝对Role随5345回复推送，避免旧角色回调重新打开/覆盖购买窗口。
+    start, end = code.index("    setroleupdatacallback(function()"), code.index("\nend\n", code.index("function buy.buySuccess"))
+    code = code[:start] + code[end:]
+    put("window_buyItem", code)
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -2846,6 +3002,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
 
     patch_guild_gameplay_scripts(patched)
     patch_cheer_scripts(patched)
+    patch_soul_scripts(patched)
     return patched
 
 

@@ -8,9 +8,9 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 QUERIES = (2400,)
 MUTATIONS = (2401,)
 OPCODES = QUERIES + MUTATIONS
-COUNTERS = ("equipbaptize", "robcount", "penglairewardcount", "petbreakcount", "gang_fishpond", "gang_incense", "worldbosscount")
+COUNTERS = ("equipbaptize", "robcount", "penglairewardcount", "petbreakcount", "gang_fishpond", "gang_incense", "worldbosscount", "soulhuntcount")
 SUPPORTED_TYPES = {
-    "level", "athletics", "cuprank", "blood", "copy", "equip_strengthen", "general", "gang_level", "gang_contribution",
+    "level", "athletics", "cuprank", "blood", "copy", "equip_strengthen", "general", "gang_level", "gang_contribution", "soul",
     "copystar", "generalbreak", "treasurerefine", "treasurestrengthen", "magicstonelevellimit", "petnum", "vip",
     "stone_copy", "blackmarketgoldbuycount", "artifact", "personalboss1", "personalboss2", "battle_power", "fashioncoat",
     *COUNTERS, *(f"sigil{i}" for i in (1, 3, 5, 10, 15, 20, 25, 30, 35, 40)),
@@ -72,6 +72,7 @@ def snapshot(save, config):
                                for point in formation.records(raw, 7, 1).values()),
                   magicstonelevellimit=min((min(godstone.levels(slots.get(sid, b""), config)) for sid in range(1, number + 1)), default=0),
                   petnum=len(save.get("pet_state", {}).get("pets", [])),
+                  soul=sum((pb_get_varint(raw, 3) or 0) >= 10 and pb_get_varint(raw, 2) != 70000 for raw in formation.records(world, 3, 1).values()),
                   artifact=len(save.get("magic_state", {}).get("items", {})),
                   personalboss1=save.get("single_boss_state", {}).get("cleared", {}).get("1", 0),
                   personalboss2=save.get("single_boss_state", {}).get("cleared", {}).get("2", 0),
