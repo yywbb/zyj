@@ -1,5 +1,9 @@
 # Project instructions
 
+## Delivery preference (user instruction, 2026-11-03)
+
+- Continue development directly on `master`. After each coherent batch passes its relevant tests and required checks, commit only that task's changes and push to `origin/master` without asking again. If verification fails, the remote has diverged, or pushing fails, stop and report the blocker; never force-push or bypass hooks. This authorizes Git pushes only, not deployment, APK installation, or real-account changes. Preserve unrelated user work.
+
 ## Workspace quirks
 
 - `._*` files are macOS AppleDouble metadata, not source; exclude them from searches and staging. Existing sidecars under `.git/refs` and `.git/objects/pack` make `git fsck` report invalid refs/packs; do not treat `._*` entries as real Git refs or objects.
