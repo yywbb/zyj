@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from . import formation, godstone, recruit
+from . import cup, formation, godstone, recruit
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 QUERIES = (2400,)
@@ -10,7 +10,7 @@ MUTATIONS = (2401,)
 OPCODES = QUERIES + MUTATIONS
 COUNTERS = ("equipbaptize", "robcount", "penglairewardcount", "petbreakcount", "gang_fishpond", "gang_incense")
 SUPPORTED_TYPES = {
-    "level", "athletics", "blood", "copy", "equip_strengthen", "general", "gang_level", "gang_contribution",
+    "level", "athletics", "cuprank", "blood", "copy", "equip_strengthen", "general", "gang_level", "gang_contribution",
     "copystar", "generalbreak", "treasurerefine", "treasurestrengthen", "magicstonelevellimit", "petnum", "vip",
     "stone_copy", "blackmarketgoldbuycount", "artifact", "personalboss1", "personalboss2", "battle_power", "fashioncoat",
     *COUNTERS, *(f"sigil{i}" for i in (1, 3, 5, 10, 15, 20, 25, 30, 35, 40)),
@@ -64,6 +64,7 @@ def snapshot(save, config):
     scalar.update(state["counts"])
     scalar.update(save.get("magic_state", {}).get("counts", {}))
     scalar.update(athletics=save.get("arena_state", {}).get("rank", max(map(int, config["athletics_copy2"])) + 1),
+                  cuprank=cup.get_state(save)["best"],
                   blood=save.get("mieshendian_state", {}).get("maxfloor", 0),
                   gang_level=state["guild_level"],
                   gang_contribution=save.get("guild_daily_state", {}).get("total_contribution", save.get("guild_daily_state", {}).get("contribution", 0)),
@@ -99,7 +100,7 @@ def progress(row, view):
         current = levels[number - 1] if len(levels) >= number else 0
     else:
         current = view["scalars"].get(kind, 0)
-    return current, current <= required if kind == "athletics" else current >= required
+    return current, 0 < current <= required if kind in ("athletics", "cuprank") else current >= required
 
 
 def observe(save, config, before=None):

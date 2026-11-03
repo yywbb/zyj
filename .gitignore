@@ -15,6 +15,7 @@ config_overrides.json
 /rankings.json
 /guilds.json
 /friends.json
+/cups.json
 /mails.json
 *.db
 *.db-shm

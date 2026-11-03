@@ -6,7 +6,7 @@ import struct
 import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import cheer, friends, guild_chat
+from . import cheer, cup, friends, guild_chat
 from . import achievements, collection
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
@@ -22,7 +22,7 @@ def unavailable_response(opcode, seq, body, message):
 
 
 class Session:
-    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None, guild_request=None, friend_request=None):
+    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None, guild_request=None, friend_request=None, cup_request=None):
         self.replay = Replay(tables)
         self.save_path = save_path
         self.step_counts = step_counts
@@ -32,8 +32,10 @@ class Session:
         self.rank_observer = rank_observer
         self.guild_request = guild_request
         self.friend_request = friend_request
+        self.cup_request = cup_request
         self.guild_profit = None
         self.guild_level = None
+        self.cup_rank = None
         self.random_replies = {}
         self.connected_at = int(time.time())
         self.refresh_day = (self.connected_at + 28800) // 86400
@@ -60,6 +62,7 @@ class Session:
         secret_shop.get_state(self.save, role_config)
         guild.daily_state(self.save)
         friends.daily(self.save)
+        cup.get_state(self.save)
         collection.get_state(self.save, role_config)
         achievements.get_state(self.save, role_config)
         pets.get_state(self.save, role_config)
@@ -179,6 +182,17 @@ class Session:
 
         if opcode in (3401, 3411):
             return unavailable_response(opcode, seq, body, "本地屠龙暂只开放介绍页，世界Boss挑战与结算尚未实现，未扣除元宝。")
+
+        if opcode == 2105:
+            return unavailable_response(opcode, seq, body, "本地杯赛竞猜尚未开放，未扣除银币、元宝或道具。")
+
+        if opcode in cup.OPCODES:
+            try:
+                if self.cup_request is None:
+                    raise ValueError("杯赛需要绑定本地账号库")
+                return self.cup_request(self, opcode, seq, body)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
 
         if opcode in (1346, 1348):
             return unavailable_response(opcode, seq, body, "活动副本扫荡暂未接入，请选择实际挑战，未消耗次数或资源。")
@@ -362,7 +376,7 @@ class Session:
                                  + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
                     packets = player.prepare_recorded_responses(
                         seq, [{"opcode": opcode, "seq": seq, "hex": reply.hex()}], working, body,
-                        self.save_path, self.step_counts, self.role_config, self.connected_at, guild_profit=self.guild_profit, guild_level=self.guild_level)
+                        self.save_path, self.step_counts, self.role_config, self.connected_at, guild_profit=self.guild_profit, guild_level=self.guild_level, cup_rank=self.cup_rank)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working
@@ -382,7 +396,7 @@ class Session:
                 packets = player.prepare_recorded_responses(
                     seq, [{"opcode": opcode, "seq": seq, "hex": baseline.hex()}], working, body,
                     self.save_path, self.step_counts, self.role_config, self.connected_at,
-                    auto_sigils=self.sigil_auto_pending if opcode == 1002 else None, guild_profit=self.guild_profit, guild_level=self.guild_level)
+                    auto_sigils=self.sigil_auto_pending if opcode == 1002 else None, guild_profit=self.guild_profit, guild_level=self.guild_level, cup_rank=self.cup_rank)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working

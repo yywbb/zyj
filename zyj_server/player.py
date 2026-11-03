@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, collection
+from . import achievements, collection, cup
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -76,7 +76,7 @@ def load_role_config(config_path):
                              "godstone", "godstonestrengthening", "daily_function", "huodong_monster",
                              "favorable", "favorable_level", "favorable_task", "shake_param",
                              "penglai3_map", "penglai3_type", "penglai3_dice", "penglai3_card", "penglai3_monster",
-                             "personalboss_att", "personalboss_date", "equip_baptize", "artifact", "artifact_baptize", "artifact_baptize_xian", "artifact_xian_config", "task", "team_recommend",
+                             "personalboss_att", "personalboss_date", "equip_baptize", "artifact", "artifact_baptize", "artifact_baptize_xian", "artifact_xian_config", "task", "team_recommend", "cup_reward",
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
@@ -1045,12 +1045,16 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     return body
 
 
-def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None, guild_level=None):
+def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None, guild_level=None, cup_rank=None):
     before = copy.deepcopy(save)
     now = int(time.time())
     if guild_level and responses and responses[0]["opcode"] in achievements.OPCODES:
         state = achievements.get_state(save, role_config)
         state["guild_level"] = guild_level()
+    if cup_rank and responses and responses[0]["opcode"] in achievements.OPCODES:
+        rank = cup_rank()
+        if rank or "cup_state" in save:
+            save["cup_state"] = dict(cup.get_state(save), best=rank)
         save["achievement_state"] = state
     if guild_profit and responses and responses[0]["opcode"] in (1101, 1109, 999900):
         save["guild_profit"] = guild_profit(now)

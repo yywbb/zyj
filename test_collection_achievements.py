@@ -141,7 +141,7 @@ class CollectionAchievementTests(unittest.TestCase):
 
     def test_every_supported_config_condition_checks_its_threshold_in_both_directions(self):
         supported = [row for row in self.config["task"].values() if row["type"] in achievements.SUPPORTED_TYPES]
-        self.assertEqual(len(supported), 716)
+        self.assertEqual(len(supported), 723)
         for row in supported:
             with self.subTest(cid=row["id"], kind=row["type"]):
                 kind = row["type"]
@@ -172,7 +172,7 @@ class CollectionAchievementTests(unittest.TestCase):
                 elif kind.startswith("sigil"):
                     view["sigils"][0] -= 1
                 else:
-                    view["scalars"][kind] += 1 if kind == "athletics" else -1
+                    view["scalars"][kind] += 1 if kind in ("athletics", "cuprank") else -1
                 self.assertFalse(achievements.progress(row, view)[1])
 
     def test_paid_wash_counts_actual_rolls_not_stones_preview_restores_or_confirmations(self):

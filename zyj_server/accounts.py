@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, friends, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, cup, friends, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -134,11 +134,13 @@ class AccountStore:
                            lambda body, opcode=3500, save=None: self.rank_query(account, body, opcode, save),
                            lambda previous=None: self.observe_rankings({account: previous} if previous else None),
                            lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body),
-                           lambda session, opcode, seq, body: self.friend_request(account, session, opcode, seq, body))
+                           lambda session, opcode, seq, body: self.friend_request(account, session, opcode, seq, body),
+                           lambda session, opcode, seq, body: self.cup_request(account, session, opcode, seq, body))
             with self.lock:
                 self.active[account]["identity"] = session.save["created_at"]
             session.guild_profit = lambda now: self.guild_profit(account, now)
             session.guild_level = lambda: self.achievement_guild_level(account)
+            session.cup_rank = lambda: self.achievement_cup_rank(account)
             return session
         except Exception as error:
             self.close_session(account)
@@ -249,6 +251,63 @@ class AccountStore:
                 if not hasattr(session, "friend_chat_cursors"):
                     session.friend_chat_cursors = {}
                 session.friend_chat_cursors[peer] = (identity, index)
+            if mutation:
+                session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state),
+                    (now + 28800) // 86400)
+            return packets
+
+    def cup_request(self, account, session, opcode, seq, body):
+        with self.lock:
+            saves = {}
+            for member in self.account_ids():
+                snapshot = self.snapshot(member)
+                data = snapshot["save"]
+                if snapshot["error"] or snapshot["has_save"] and type(data.get("has_role")) is not bool:
+                    raise ValueError("账号存档损坏，无法读取杯赛")
+                if data.get("has_role"):
+                    guild.validate_role(data)
+                    cup.get_state(data)
+                    if data.get("role_snapshot"):
+                        saves[member] = data
+                    elif data.get("cup_state"):
+                        raise ValueError("杯赛角色快照丢失，请恢复存档")
+            if account not in saves or saves[account]["created_at"] != session.save["created_at"]:
+                raise ValueError("杯赛需要已初始化的本地角色，请重新登录")
+            path = self.save_path.with_name("cups.json")
+            moment = int(time.time())
+            state = cup.load(path, saves, moment)
+            original = copy.deepcopy(state)
+            cup.recover(state, saves)
+            mutation = opcode in cup.MUTATIONS
+            if mutation and moment < state["checked_at"]:
+                raise ValueError("杯赛时间发生回拨，请校准时间后重试")
+            now = max(moment, state["checked_at"])
+            cached = session.random_replies.get(opcode) if mutation else None
+            if cached and cached[0] == (seq, body):
+                if session.save == cached[2] and state == cached[3] and (now + 28800) // 86400 == cached[4]:
+                    return list(cached[1])
+                raise ValueError("该杯赛操作已结算，状态已变化，请刷新后重新操作")
+            before = copy.deepcopy(state)
+            working = copy.deepcopy(session.save)
+            saves[account] = working
+            reply, reward = cup.prepare(opcode, body, state, saves, account, self.role_config, now)
+            packets = [protocol.pack_frame(opcode, seq, reply)]
+            if reward:
+                online_rewards.settle(working, self.role_config, session.connected_at, now)
+                welfare.settle(working, now)
+                player.settle_stamina(working, self.role_config, now)
+                player.apply_reward(working, reward, self.role_config, now)
+                packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
+            state["checked_at"] = now
+            if state != before:
+                cup.stage(state, before, account, working)
+                cup.write(path, state)
+            packets = player.save_response_group(packets, working, session.save, session.save_path,
+                self.step_counts, self.role_config, now)
+            session.save = working
+            cup.recover(state, saves)
+            if state != original:
+                cup.write(path, state)
             if mutation:
                 session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state),
                     (now + 28800) // 86400)
@@ -380,6 +439,16 @@ class AccountStore:
                 state["checked_at"] = now
                 guild.write(path, state)
             return packets
+
+    def achievement_cup_rank(self, account):
+        with self.lock:
+            saves = self.rank_saves()
+            if account not in saves:
+                raise ValueError("杯赛角色快照缺失，请先初始化角色或恢复存档")
+            state = cup.load(self.save_path.with_name("cups.json"), saves, int(time.time()))
+            cup.recover(state, saves)
+            own = state["players"].get(str(account), {})
+            return own.get("best", 0) if own.get("identity") == saves.get(account, {}).get("created_at") else 0
 
     def achievement_guild_level(self, account):
         with self.lock:

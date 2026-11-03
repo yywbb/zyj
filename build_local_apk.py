@@ -1229,6 +1229,131 @@ end
     return patched
 
 
+def patch_cup_scripts():
+    patched = {}
+    for name, filename in (("GameCup", "cup_network.lua"), ("UICup", "cup_ui.lua")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        assert "function UICup" in code
+        if name == "GameCup":
+            marker = "    for k,v in pairs(status.battles) do"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    for k,v in pairs(status.battles or {}) do")
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            patched[name] = code + "\n" + stream.read()
+    code = read_script("Layer_cup").decode("utf-8").replace("\r\n", "\n")
+    for marker in ("function cup.init(self,parent,toppos,params)\n", "function cup.clear(self)\n"):
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    self.localCupView=(self.localCupView or 0)+1\n    self.localCupNextRefresh=nil\n")
+    for old, new in (("""        if not next(self.statusdata) then
+            UIRequest({type = 2100})
+        else
+            self:reloadStatus()
+        end""", "        UIRequest({type = 2100})"), ("""        if not next(self.topsdata) then
+            if not next(self.statusdata) then
+                UIRequest({type = 2100})
+            end
+            UIRequest({type = 2102})
+        else
+            self:reloadTops()
+        end""", "        UIRequest({type = 2100})\n        UIRequest({type = 2102})"), ("""        if not next(self.rankdata) then
+            UIRequest({type = 2107})
+        else
+            self:reloadRank()
+        end""", "        UIRequest({type = 2107})")):
+        assert code.count(old) == 1
+        code = code.replace(old, new)
+    start = code.index('    gameTimer:rigistTime("cuptimer",99)')
+    end = code.index("\n-----", start)
+    code = code[:start] + '''    gameTimer:rigistTime("cuptimer",99)
+    gameTimer:rigistTimeFunc("cuptimer",function()
+        if not GameScene.layers.cup.show then return end
+        local now=gamedata:time()
+        local hour=os.date("*t",now).hour
+        self.canJoinCupTime=(hour>=9 and hour<23) and 1 or 0
+        self:changeButton()
+        if not self.localCupNextRefresh or now>=self.localCupNextRefresh then
+            self.localCupNextRefresh=now+15
+            UIRequest({type=2100})
+            if self.selectpage=="tops" then UIRequest({type=2102,view=self.localCupView}) end
+            if self.selectpage=="rank" then UIRequest({type=2107,view=self.localCupView}) end
+        end
+        if gameTimer.times.cuptimer<=0 then gameTimer:rigistTime("cuptimer",99) end
+    end)
+''' + code[end:]
+    start = code.index("    if gameConfig:checkBuildOpen(154) then", code.index("function cup.reloadStatus("))
+    end = code.index("\n    if table.getTableLength", start)
+    code = code[:start] + '''    self.rootItems.des11:setString("本地玩家杯赛，报名冻结阵容")
+    self.rootItems.des12:setString("")
+    self.rootItems.des13:setString("不足2人不开赛，需手动报名")
+''' + code[end:]
+    marker = '            gameWindows:openWindow("cup",{type = "bet", data = data},nil)'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''            if data.status<0 then runGamePrompt({msg="比赛尚未结束；本地竞猜未开放"})
+            else gameWindows:openWindow("cup",{type="bet",data=data,view=self.localCupView},nil) end''')
+    marker = "function cup.setTopsPage(self,page)\n"
+    assert code.count(marker) == 1
+    # Native countdown is for betting; keep the bracket navigation, not fake betting availability.
+    start = code.index("    --bettime", code.index(marker))
+    end = code.index("\nend", start)
+    code = code[:start] + '''    self.rootItems.bettime:setVisible(false)
+    self.rootItems.bettime_desc:setVisible(false)
+''' + code[end:]
+    marker = "    self.rootItems.restbet:setString(self.betnum)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '    self.rootItems.restbet:setString("未开放")')
+    marker = '            gameWindows:openWindow("servicewarrule",{opt = 2})'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '            runGamePrompt({msg="本地累计胜场积分，每场真实胜利获得10分"})')
+    marker = "    self:setWarTime()"
+    assert code.count(marker) == 2
+    code = code.replace(marker, '    self.rootItems.war_time:setString("本地累计胜场积分")', 1)
+    marker = "function cup.initFixedString(self)\n"
+    start = code.index("    if self.rootItems.cupRankInfo then", code.index(marker))
+    end = code.index("\nend", start)
+    code = code[:start] + '    self.rootItems.cupRankInfo:setVisible(false)\n' + code[end:]
+    code, count = re.subn(r"(?m)^(\s*)UIRequest\(\{type\s*=\s*(210[0123467])\b", r"\1UIRequest({type=\2, view=self.localCupView", code)
+    assert count == 12
+    patched["Layer_cup"] = code
+    code = read_script("window_cup").decode("utf-8").replace("\r\n", "\n")
+    for marker in ("function cup.open(self,touchPriority,data,callback)\n", "function cup.close(self)\n"):
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    self.localCupGeneration=(self.localCupGeneration or 0)+1\n")
+    marker = "    self.touchPriority = touchPriority\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localCupView=data.view\n")
+    marker = '    self.rootItems.rewardTxt:setString("开服"..curTime.."天后奖励提升");'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '    self.rootItems.rewardTxt:setString("仅真实胜场发奖，轮空不计")')
+    start = code.index("    local curNum = tostring(self:getIndexByLevel())")
+    end = code.index('    ui.setLabelString(self.rootItems.name_a', start)
+    code = code[:start] + code[end:]
+    start = code.index("    -- ui.setLabelString(self.rootItems.bet_a_buttontext")
+    end = code.index("    for i=1,7 do", start)
+    code = code[:start] + '''    self.rootItems.hasbetNode:setVisible(false)
+    self.rootItems.betNode:setVisible(false)
+    self.rootItems.palyNode:setVisible(data.status>=0)
+    ui.setLabelString(self.rootItems.playlab,"重 播",18)
+    self.rootItems.playbutton:addHandleOfControlEvent(function()
+        if self.data.status>=0 then
+            UIRequest({type=2103,round=self.data.round,id=self.data.id,view=self.localCupView,generation=self.localCupGeneration})
+        end
+    end,CCControlEventTouchUpInside)
+    self.rootItems.playbutton:setSwallowsTouch(true)
+    self.rootItems.playbutton:setTouchPriority(self.touchPriority)
+
+''' + code[end:]
+    marker = '    UIRequest({type = 12001, cids = {self.xcid}, order=21001})'
+    assert code.count(marker) == 1
+    patched["window_cup"] = code.replace(marker, "")
+    code = read_script("language_CN").decode("utf-8").replace("\r\n", "\n")
+    for old, new in (("玩家可以在每天9点到24点报名参加次日的杯赛", "每天9至23点报名次日杯赛，不足2人不开赛"),
+                     ("竞猜阶段：", "淘汰阶段（本地不开放竞猜）：")):
+        assert code.count(old) == 1
+        code = code.replace(old, new)
+    patched["language_CN"] = code
+    return patched
+
+
 def patch_collection_scripts():
     patched = {}
     code = read_script("GameCollect").decode("utf-8").replace("\r\n", "\n")
@@ -1588,6 +1713,13 @@ end"""
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and gamedata.ext.localGuildBusy == error.ids[1] then gamedata.ext.localGuildBusy = nil end
+    if gamedata and gamedata.ext then
+        if gamedata.ext.localCupBusy==error.ids[1] then gamedata.ext.localCupBusy=nil end
+        local pending=gamedata.ext.localCupPending or {}
+        local queue=pending[error.ids[1]] or {}
+        table.remove(queue,1)
+        if #queue==0 then pending[error.ids[1]]=nil end
+    end
     if gamedata and gamedata.ext then
         if gamedata.ext.localProgressBusy==error.ids[1] then gamedata.ext.localProgressBusy=nil end
         local pending=gamedata.ext.localProgressPending or {}
@@ -2603,6 +2735,8 @@ end"""
     for name, code in patch_friends_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     for name, code in patch_collection_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    for name, code in patch_cup_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("friends_pb", "pb").decode("utf-8").replace("\r\n", "\n")
     marker = "FRIENDS.fields = {FRIENDS_FRIENDS_FIELD, FRIENDS_MAX_FIELD}"
