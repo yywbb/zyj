@@ -9806,7 +9806,9 @@ class LanAccountTests(unittest.TestCase):
         self.addCleanup(self.diagnostic.close)
         for context in (patch.object(accounts, "PASSWORD_ITERATIONS", 1),
                         patch.object(server, "SAVE_PATH", str(self.save_path)),
+                        patch.object(server, "BASE_DIR", temp.name),
                         patch.object(server, "start_admin"),
+                        patch.object(server, "start_reports"),
                         patch.object(player.time, "time", return_value=1800000000),
                         redirect_stdout(io.StringIO())):
             context.__enter__()
@@ -10186,6 +10188,29 @@ class LanAccountTests(unittest.TestCase):
 
 
 class EntryPointTests(unittest.TestCase):
+    def test_invalid_client_log_port_does_not_initialize_or_open_listener(self):
+        with patch.object(server.configuration, "ConfigStore") as configs, \
+                patch.object(server.socket, "socket") as listener, redirect_stderr(io.StringIO()):
+            for port in ("-1", "65536", "invalid"):
+                with self.subTest(port=port), self.assertRaises(SystemExit):
+                    server.main(["--client-log-port", port])
+            configs.assert_not_called()
+            listener.assert_not_called()
+
+    def test_failed_report_listener_closes_existing_server_and_admin(self):
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()), \
+                patch.object(server, "BASE_DIR", directory), \
+                patch.object(server, "SAVE_PATH", str(Path(directory) / "role_save.json")), \
+                patch.object(server.socket, "socket") as listener, \
+                patch.object(server, "start_admin") as admin, \
+                patch.object(server, "start_reports", side_effect=OSError("diagnostic port occupied")):
+            with self.assertRaisesRegex(OSError, "diagnostic port occupied"):
+                server.main(["--client-log-port", "0"])
+            listener.return_value.close.assert_called_once_with()
+            admin.return_value.shutdown.assert_called_once_with()
+            admin.return_value.server_close.assert_called_once_with()
+            self.assertFalse((Path(directory) / "role_save.json").exists())
+
     def test_import_from_other_directory_does_not_load_assets_or_start_io(self):
         root = Path(server.__file__).parent
         code = (
@@ -10213,7 +10238,9 @@ class EntryPointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             save_path = Path(directory) / "role_save.json"
             with redirect_stdout(io.StringIO()), patch.object(server, "SAVE_PATH", str(save_path)), \
+                    patch.object(server, "BASE_DIR", directory), \
                     patch.object(server, "start_admin") as admin_factory, \
+                    patch.object(server, "start_reports") as report_factory, \
                     patch.object(sys, "argv", ["mock_server.py"]), \
                     patch("subprocess.check_output", side_effect=AssertionError("must not run adb")), \
                     patch.object(server.socket, "socket") as socket_factory, \
@@ -10230,6 +10257,9 @@ class EntryPointTests(unittest.TestCase):
                 store.register(1, LOGIN_PASSWORD, store.snapshot(1)["revision"])
                 admin_factory.return_value.shutdown.assert_called_once_with()
                 admin_factory.return_value.server_close.assert_called_once_with()
+                report_factory.assert_called_once_with(14602, directory)
+                report_factory.return_value.shutdown.assert_called_once_with()
+                report_factory.return_value.server_close.assert_called_once_with()
                 options["target"](*options["args"])
                 self.assertIsNone(options["args"][3].stream)
             self.assertFalse(save_path.exists())
@@ -10247,7 +10277,9 @@ class EntryPointTests(unittest.TestCase):
                 with self.subTest(flags=flags):
                     save_path.write_text(original)
                     with redirect_stdout(io.StringIO()), patch.object(server, "SAVE_PATH", str(save_path)), \
+                            patch.object(server, "BASE_DIR", directory), \
                             patch.object(server, "start_admin"), \
+                            patch.object(server, "start_reports"), \
                             patch.object(sys, "argv", ["mock_server.py", *flags]), \
                             patch("subprocess.check_output", side_effect=AssertionError("must not run adb")), \
                             patch.object(server.socket, "socket") as socket_factory:

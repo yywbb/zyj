@@ -97,7 +97,8 @@ def patch_manifest(raw_bytes):
             assert len(s) == len(new_s)
             data[pos + 2 : pos + 2 + length*2] = new_s.encode("utf-16le")
 
-    return bytes(data)
+    from build_client_reports import inject_provider
+    return inject_provider(bytes(data))
 
 def patch_arsc(raw_bytes):
     old_b = "com.ldfs.zyjyg.muyou".encode("utf-16le")
@@ -3232,6 +3233,16 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     self:setNode(false,"minigamenode")
 end''' + code[end:]
     patched["assets/scripts/Layer_main.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    report_path = os.path.join(os.path.dirname(__file__), "client_patches", "client_reports.lua")
+    with open(report_path, encoding="utf-8") as stream:
+        report_code = stream.read()
+    for name in ("Login", "main", "accbyhttp/main_ui", "accbyhttp/main_net", "adpat_code/start_ui", "adpat_code/start_net"):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        marker = "function __G_TRACKBACK__(msg)\n"
+        assert code.count(marker) == 1
+        source = "net" if name in ("main", "accbyhttp/main_net", "adpat_code/start_net") else "ui"
+        code = report_code + "\n" + code.replace(marker, marker + '    pcall(localReportLua, msg, "' + source + '")\n')
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     return patched
 
 
@@ -3371,6 +3382,8 @@ def main(argv=None):
 
     print("[1/4] Preparing patched Lua scripts...")
     patched_lua = get_patched_lua_scripts()
+    from build_client_reports import build_assets
+    report_assets = build_assets(base, args.server_ip, patched_lua, find_tool, run_tool)
     config_data = dict(iter_config_bytes(os.path.join(base, "configs_sec5.zip")))
     config_entries = {f"assets/config/{section}/{name}" for section in (1, 5) for name in config_data}
 
@@ -3379,6 +3392,7 @@ def main(argv=None):
         os.remove(unaligned_apk)
 
     with zipfile.ZipFile(src_apk, "r") as zin, zipfile.ZipFile(unaligned_apk, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        assert not set(report_assets).intersection(zin.namelist()), "原APK已有诊断资源/多DEX，需重新检查注入位置"
         for item in zin.infolist():
             # Exclude old signature files
             if item.filename.startswith("META-INF/") and (item.filename.endswith(".SF") or item.filename.endswith(".RSA") or item.filename.endswith(".MF")):
@@ -3411,6 +3425,8 @@ def main(argv=None):
         for filename, data in patched_lua.items():
             if filename not in zin.namelist():
                 zout.writestr(filename, data)
+        for filename, data in report_assets.items():
+            zout.writestr(filename, data)
 
         print("  [Config] Injecting offline JSON configs into APK assets...")
         count = 0

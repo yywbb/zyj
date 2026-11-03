@@ -12,6 +12,7 @@ import zipfile
 
 import build_local_apk as builder
 import build_download_tool as download_builder
+import build_client_reports as report_builder
 from zyj_server import configuration, player, ranking
 
 
@@ -130,6 +131,67 @@ class LanBuildTests(unittest.TestCase):
                 assert(not visible and node=="minigamenode"); hidden=true
             end})
             assert(hidden)''')
+
+    def test_lua_reports_capture_all_real_handlers_without_credentials_or_ui_dependencies(self):
+        from lupa.lua51 import LuaRuntime
+        scripts = self.client_scripts()
+        for name in ("Login", "main", "accbyhttp/main_ui", "accbyhttp/main_net", "adpat_code/start_ui", "adpat_code/start_net"):
+            with self.subTest(name=name):
+                code = scripts["assets/scripts/" + name + ".so"]
+                # 执行实际注入前缀及原生错误入口，断网时旧UIRequest失败也不能丢采集。
+                prefix = (Path(__file__).parent / "client_patches/client_reports.lua").read_text()
+                self.assertTrue(code.startswith(prefix))
+                start = code.index("function __G_TRACKBACK__(msg)")
+                end = code.index("\nend", start) + len("\nend")
+                lua = LuaRuntime()
+                lua.execute('''calls={}; print=function() end
+                    LuaJavaBridge={callStaticMethod=function(class,method,args,sig)
+                        calls[#calls+1]={class=class,method=method,args=args,sig=sig}
+                        return true
+                    end}
+                    UIRequest=function() error("offline") end''')
+                lua.execute(prefix + "\n" + code[start:end])
+                lua.execute('''local ok=pcall(__G_TRACKBACK__, '[string "Layer_main"]:42: attempt to index field local_password (a nil value) password=DoNotUpload')
+                    assert(not ok)
+                    assert(#calls==2 and calls[1].method=="installThread")
+                    assert(calls[2].class=="com/zyj/local/ClientReports" and calls[2].method=="reportLua")
+                    assert(calls[2].sig=="(Ljava/lang/String;Ljava/lang/String;)V")
+                    assert(calls[2].args[2]:find("lua_error=nil_value",1,true))
+                    assert(calls[2].args[2]:find("at Layer_main:42",1,true))
+                    assert(not calls[2].args[2]:find("DoNotUpload",1,true))
+                    assert(not calls[2].args[2]:find("local_password",1,true))''')
+                expected = "net" if name in ("main", "accbyhttp/main_net", "adpat_code/start_net") else "ui"
+                self.assertEqual(lua.globals().calls[2].args[1], expected)
+
+    def test_private_report_provider_is_appended_without_changing_other_binary_manifest_nodes(self):
+        with zipfile.ZipFile(builder.SRC_APK) as archive:
+            original = archive.read("AndroidManifest.xml")
+        with contextlib.redirect_stdout(io.StringIO()):
+            modified = builder.patch_manifest(original)
+        def chunks(data):
+            position, result = 8, []
+            while position < len(data):
+                kind, header, size = struct.unpack_from("<HHI", data, position)
+                self.assertGreaterEqual(size, header)
+                result.append((kind, data[position:position + size]))
+                position += size
+            self.assertEqual(position, len(data))
+            self.assertEqual(struct.unpack_from("<I", data, 4)[0], len(data))
+            return result
+        previous, current = chunks(original), chunks(modified)
+        self.assertEqual(len(current), len(previous) + 2)
+        # 原节点的字符串索引和二进制属性不动；只替换等长包名、扩展池并追加Provider。
+        nodes = list(current[1:])
+        for node in previous[1:]:
+            self.assertIn(node, nodes)
+            nodes.remove(node)
+        self.assertEqual([kind for kind, _ in nodes], [0x102, 0x103])
+        start = nodes[0][1]
+        self.assertEqual(struct.unpack_from("<H", start, 28)[0], 3)
+        self.assertEqual(struct.unpack_from("<I", start, 36 + 20 + 16)[0], 0)
+        self.assertIn("com.zyj.local.ReportProvider".encode("utf-16le"), modified)
+        with self.assertRaises(AssertionError):
+            report_builder.inject_provider(modified)
 
     def test_guild_incense_queries_live_and_midnight_restores_buttons(self):
         try:
@@ -1788,6 +1850,9 @@ class LanBuildTests(unittest.TestCase):
 
             with patch.object(builder, "__file__", str(root / "build_local_apk.py")), \
                     patch.object(builder, "get_patched_lua_scripts", return_value={}), \
+                    patch.object(report_builder, "build_assets", return_value={"classes2.dex": b"diagnostic dex",
+                                 "lib/arm64-v8a/liblocalreports.so": b"arm64 diagnostic",
+                                 "lib/armeabi-v7a/liblocalreports.so": b"armv7 diagnostic"}), \
                     patch.object(builder, "find_tool", side_effect=lambda name: name), \
                     patch.object(builder, "run_tool", side_effect=tool), \
                     patch.object(builder.subprocess, "run"), contextlib.redirect_stdout(io.StringIO()):
@@ -1810,6 +1875,11 @@ class LanBuildTests(unittest.TestCase):
                 self.assertEqual(list(json.loads(archive.read("assets/GameServer.json"))), ["1", "2"])
                 self.assertEqual(archive.read("assets/LocalGameServer.json"), archive.read("assets/GameServer.json"))
                 self.assertEqual(archive.namelist().count("assets/LocalGameServer.json"), 1)
+                for name, data in (("classes2.dex", b"diagnostic dex"),
+                                   ("lib/arm64-v8a/liblocalreports.so", b"arm64 diagnostic"),
+                                   ("lib/armeabi-v7a/liblocalreports.so", b"armv7 diagnostic")):
+                    self.assertEqual(archive.namelist().count(name), 1)
+                    self.assertEqual(archive.read(name), data)
 
 
 if __name__ == "__main__":

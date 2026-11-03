@@ -456,6 +456,7 @@ class FriendCopyTests(unittest.TestCase):
                     shutil.copyfile(args[-2], args[-1])
             with patch.object(builder, "__file__", str(root / "build_local_apk.py")), \
                     patch.object(builder, "get_patched_lua_scripts", return_value={name: b"new local module"}), \
+                    patch("build_client_reports.build_assets", return_value={}), \
                     patch.object(builder, "find_tool", side_effect=lambda name: name), \
                     patch.object(builder, "run_tool", side_effect=tool), patch.object(builder.subprocess, "run"):
                 builder.main(["--server-ip", "10.66.0.12"])

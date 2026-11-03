@@ -141,14 +141,14 @@ sequenceDiagram
 - 操作系统: Linux / macOS / Windows (WSL)
 - Python 3.8+
 - 安卓手机或安卓模拟器，能访问服务端电脑所在的可信局域网或虚拟组网；无需开启 USB 调试
-- 仅重打包时需要：原版 `z7_7_4.apk`、Java Runtime 和 Android SDK build-tools (`zipalign`、`apksigner`)
-- 建议在路由器为服务端电脑保留固定 IP；电脑防火墙只对可信局域网放行 TCP `14600`，不要设置公网端口转发
+- 仅重打包时需要：原版 `z7_7_4.apk`、JDK 17、Android SDK platform 34/build-tools (`javac`、`d8`、`zipalign`、`apksigner`) 及 NDK r27c（默认27.2.12479018，或用`ANDROID_NDK_HOME`指定），用于编译独立崩溃采集器。
+- 建议在路由器为服务端电脑保留固定 IP；电脑防火墙只对可信局域网放行游戏 TCP `14600` 和诊断上传 `14602`，不要设置公网端口转发
 
 ### 2. 构建一次局域网客户端
 
 默认使用 `10.66.0.x` 虚拟组网，电脑和手机均需保持组网连接：
 
-- 游戏服务端：电脑 **`10.66.0.12:14600`**。
+- 游戏服务端：电脑 **`10.66.0.11:14600`**（2026-11-03用户确认，替代旧`.12`；并非`10.0.66.11`）。
 - 无线调试：手机 **`10.66.0.50:5555`**（`NOH-AN00`）。
 
 2026-10-29 已从手机连续三次直连该游戏端口并收到预期协议回包（61–87 ms），同时验证无线 ADB 可执行命令；期间一次组网短暂掉线，恢复后复测通过。地址重新分配后需重新确认。
@@ -156,7 +156,7 @@ sequenceDiagram
 把原版 `z7_7_4.apk` 放在脚本旁，指定**服务端电脑**的 IP：
 
 ```bash
-python3 build_local_apk.py --server-ip 10.66.0.12 --accounts 3
+python3 build_local_apk.py --server-ip 10.66.0.11 --accounts 3
 ```
 
 `--server-ip` 必填，只接受局域网 IPv4，拒绝回环地址和公网地址；`--accounts` 默认为 2，范围 1~1000，只控制登录页的预设账号列表。登录表单可输入任意 1~1000 的已启用账号，后台新增账号无需重打包。所有账号共用同一个 IP 和端口；电脑 IP 改变后需要重新打包、更新客户端。
@@ -168,7 +168,13 @@ python3 mock_server.py
 ```
 保持服务端运行，再进入游戏。能播放本地开场剧情并不表示已连上游戏服务；服务未启动时，随机取名和建号请求无法正常完成。
 
-在运行服务端的电脑上打开 **http://127.0.0.1:14601** 进入管理后台。后台与游戏共用一个进程和账号占用表，随服务端退出而关闭。端口冲突时可用 `--admin-port 14602`；指定 `0` 会自动分配端口，以启动日志中的地址为准。
+在运行服务端的电脑上打开 **http://127.0.0.1:14601** 进入管理后台。后台与游戏共用一个进程和账号占用表，随服务端退出而关闭。端口冲突时可用 `--admin-port 14603`（14602现为独立诊断端口）；指定 `0` 会自动分配端口，以启动日志中的地址为准。
+
+#### App Lua／原生崩溃自动上传
+
+新版APK内置独立采集器：Lua异常立即落盘、后台上传；原生致命信号先保存轻量现场，下次启动补传。无需ADB，接收路径为 **`logs/client_reports/<报告ID>.json`**，不经过游戏账号或管理后台。
+
+**首次启用须将打包机生成的、Git忽略的`client_reports.key`安全复制到服务端项目根目录，保持同一份，再更新服务端并重启。** APK上传到同一游戏IP的`14602/v1/reports`；这个密钥仅允许上传，不是后台令牌。采集内容、队列上限、端口和验证方法见 [客户端诊断说明](client_reports.md)。本批没有自动部署或安装，不能将自动回归当作真机验收。
 
 #### 空回复与错误诊断
 
@@ -265,10 +271,10 @@ python3 mock_server.py --account 2 --reset-guide
 
 ## 🔨 重新构建本地化客户端 (`build_local_apk.py`)
 
-将原版 APK 放到脚本旁并命名为 `z7_7_4.apk`，安装 Android SDK build-tools 并设置 `ANDROID_HOME`（或把 `zipalign`、`apksigner` 加入 PATH），即可构建 `zyj_local.apk`：
+将原版 APK 放到脚本旁并命名为 `z7_7_4.apk`，准备上文列出的JDK17、SDK34/build-tools及NDKr27c，设置`ANDROID_HOME`（NDK非默认位置时设置`ANDROID_NDK_HOME`），即可构建 `zyj_local.apk`：
 
 ```bash
-python3 build_local_apk.py --server-ip 10.66.0.12 --accounts 3
+python3 build_local_apk.py --server-ip 10.66.0.11 --accounts 3
 ```
 
 构建器从原 APK 解密脚本，在 `get_patched_lua_scripts()` 中执行带版本断言的替换；`scripts_clean/` 仅供分析，直接修改它不会打入 APK。工具查找兼容 Windows 的 `.exe/.bat` 和 macOS/Linux 的无后缀工具名。
@@ -277,7 +283,8 @@ python3 build_local_apk.py --server-ip 10.66.0.12 --accounts 3
 1. **注入离线全量 JSON 配置**: 读取 `configs_sec5.zip` 与 `config_overrides.json`（若存在），注入 APK 的 `assets/config/1/` 和 `assets/config/5/`，保留引导热区补丁；
 2. **统一局域网入口**: 生成预设账号列表，全部连接指定电脑 IP 的 `14600` 端口；复用原生账号密码表单，登录消息携带账号标识和密码，账号编号不改变离线配置的 section；
 3. **解除日志打印抑制**: 启用底层 `log.so` 日志透传，允许 Lua 输出和报错直达 `adb logcat`；
-4. **V1 + V2 签名生成**: 使用 `debug.keystore` 自动签名，生成即装即用的 `zyj_local.apk`。
+4. **独立诊断采集**: 注入私有启动Provider、诊断DEX及ARM64/ARMv7信号采集库；六个Lua错误入口只传分类/调用位置，失败日志保留补传。上传密钥须与服务端同步。
+5. **V1 + V2 签名生成**: 使用 `debug.keystore` 自动签名，生成 `zyj_local.apk`。
 
 充值页补丁由 `patch_recharge_script()` 生成，使用普通 `CCScrollView` 承载八个档位，避开崩溃栈中的 `LuaEventHandler::tableCellAtIndex` 路径。`UIRecharge` 收到 `115` 订单后直接发送 `116` 确认，不调用支付SDK；无需支付凭证 `20000`。`window_recruit` 恢复封神令不足时的元宝显示及支付分支，连续单抽会刷新下次支付类型。这轮功能需要重新构建并安装 APK。
 

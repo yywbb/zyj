@@ -17,6 +17,7 @@ import threading
 from zyj_server import accounts, configuration, guide, player, protocol, replay
 from zyj_server.admin.http import start_admin
 from zyj_server.diagnostics import DiagnosticLog
+from zyj_server.client_reports import start_reports
 
 print_flush = functools.partial(print, flush=True)
 
@@ -118,12 +119,15 @@ def main(argv=None):
     parser.add_argument("--account", type=accounts.parse_account_id, default=1, help="重置目标账号（默认 1），不限制其他账号登录")
     parser.add_argument("--admin-host", default=os.environ.get("ZYJ_ADMIN_HOST", "0.0.0.0"), help="网页管理后台监听地址（默认 0.0.0.0）")
     parser.add_argument("--admin-port", type=int, default=14601, help="网页管理后台端口（默认 14601，0 为自动分配）")
+    parser.add_argument("--client-log-port", type=int, default=14602, help="独立客户端诊断上传端口（默认14602，0为自动分配）")
     reset = parser.add_mutually_exclusive_group()
     reset.add_argument("--reset", action="store_true", help="清空目标账号存档后启动")
     reset.add_argument("--reset-guide", action="store_true", help="仅清空目标账号引导后启动")
     args = parser.parse_args(argv)
     if not 0 <= args.admin_port <= 65535:
         parser.error("--admin-port 必须为 0~65535")
+    if not 0 <= args.client_log_port <= 65535:
+        parser.error("--client-log-port 必须为 0~65535")
 
     configs = configuration.ConfigStore(CONFIG_ZIP)
     step_counts = guide.load_guide_step_counts(CONFIG_ZIP)
@@ -142,6 +146,7 @@ def main(argv=None):
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     admin = None
+    reports = None
     diagnostic = None
     try:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -158,11 +163,13 @@ def main(argv=None):
             result = account_store.maintain(args.account, action, account_store.snapshot(args.account)["revision"])
             print_flush(f"[✓] 账号 {args.account} 已执行 {action}，原存档备份: {result['backup_id']}")
         admin = start_admin(args.admin_port, account_store, configs, host=args.admin_host)
+        reports = start_reports(args.client_log_port, os.path.dirname(SAVE_PATH))
 
         print_flush(f"\n=======================================================")
         print_flush(f"  《作妖记》局域网多账号模拟服已启动（无需 ADB）")
         print_flush(f"  监听地址: 0.0.0.0:{PORT}")
         print_flush(f"  管理后台: http://{args.admin_host}:{admin.server_port}")
+        print_flush(f"  客户端诊断: 0.0.0.0:{reports.server_port}（仅上传，logs/client_reports/）")
         if diagnostic is not None:
             print_flush(f"  空回复/错误诊断: {diagnostic.baseFilename}")
         print_flush(f"  手机/模拟器直连电脑的局域网 IP:{PORT}；账号 1 沿用 {SAVE_PATH}")
@@ -182,6 +189,9 @@ def main(argv=None):
         if admin is not None:
             admin.shutdown()
             admin.server_close()
+        if reports is not None:
+            reports.shutdown()
+            reports.server_close()
         if diagnostic is not None:
             diagnostic.close()
 
