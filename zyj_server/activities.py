@@ -122,7 +122,7 @@ def build_reward(save, specification, config, quantity=1):
             continue
         cid, count = map(int, entry.split(","))
         count *= quantity
-        if not 0 < count < (1 << 31):
+        if not 0 < count < (1 << (63 if cid == 1000 else 31)):
             raise ValueError("活动奖励数量无效")
         if cid == 1000:
             coin += count

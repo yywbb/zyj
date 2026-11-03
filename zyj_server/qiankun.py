@@ -261,8 +261,7 @@ def prepare(opcode, save, body, config):
             state["receipts"].pop(f'{"general" if n == 1 else "equip"}:{iid}', None)
             if n == 1:
                 general_foster.remove(save, iid)
-    # shortcut: 银币余额仍受int32限制，扩展Role余额协议后再放开大额整笔退款。
-    if gets[1000] + save["role_state"]["coin"] >= (1 << 31):
+    if gets[1000] + save["role_state"]["coin"] >= (1 << 63):
         raise ValueError("实际退款银币超出当前余额容量；未扣款、未重生，请保留装备和收据")
     reward = activities.build_reward(save, ";".join(f"{cid},{num}" for cid, num in gets.items() if num), config) + updates
     return reward, [(cid, num) for cid, num in costs if num], reward

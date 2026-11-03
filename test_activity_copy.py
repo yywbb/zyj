@@ -221,7 +221,7 @@ class ActivityCopyTests(unittest.TestCase):
                 self.call(opcode, values)
             self.assertEqual((self.session.save, self.path.read_bytes()), (memory, disk))
             self.assertEqual(self.session.random_replies, {})
-        self.session.save["role_state"]["coin"] = (1 << 31) - 1
+        self.session.save["role_state"]["coin"] = (1 << 63) - 1
         self.assert_rejected(1341, recharge.ids([1]))
         self.session.role_config = copy.deepcopy(self.config)
         for changes in ({"drop1prob1": -1}, {"drop1section2": 0}, {"drop1": 999999}, {"drop1": True}):

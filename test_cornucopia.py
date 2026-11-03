@@ -163,7 +163,7 @@ class CornucopiaTests(unittest.TestCase):
         self.session.save["role_state"]["gold"] = 0
         self.assert_rejected(2032, recharge.ids([1, 0]))
         self.session.save["role_state"]["gold"] = 10000
-        self.session.save["role_state"]["coin"] = (1 << 31) - 1
+        self.session.save["role_state"]["coin"] = (1 << 63) - 1
         self.assert_rejected(2032, recharge.ids([1, 0]))
         self.session = self.reconnect()
         with patch.dict(self.config["buycount_price"]["2"], {"shake_cost": -1}):

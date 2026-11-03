@@ -460,7 +460,7 @@ class ReplayRoutingTests(unittest.TestCase):
                 saved = copy.deepcopy(baseline)
                 saved["online_reward_state"]["seconds"] = 60
                 if overflow:
-                    saved["role_state"]["coin"] = (1 << 31) - 1
+                    saved["role_state"]["coin"] = (1 << 63) - 1
                 self.save_path.write_text(json.dumps(saved))
                 session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
                 memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
@@ -1080,7 +1080,7 @@ class ReplayRoutingTests(unittest.TestCase):
         for values, request in (({"gold": 0}, self.shop_request(3201, 21)),
                                 ({"vip": 0}, self.shop_request(3211, 20101)),
                                 ({"vip": 0}, self.activity_request(4891, [1])),
-                                ({"coin": (1 << 31) - 1}, self.activity_request(1201, [20088, 1]))):
+                                ({"coin": (1 << 63) - 1}, self.activity_request(1201, [20088, 1]))):
             saved = copy.deepcopy(baseline)
             saved["role_state"].update(values)
             self.save_path.write_text(json.dumps(saved))
@@ -1423,6 +1423,35 @@ class ReplayRoutingTests(unittest.TestCase):
         props = next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(reply["hex"])) if n == 5)
         self.assertEqual({cid: protocol.pb_get_varint(raw, 2) for cid, raw in self.entity_records(props, 1, 1).items()}, {20274: 50})
 
+    def test_boxes_allow_full_stack_counts_and_coin_rewards_keep_int64_range(self):
+        self.seed_shop_account()
+        self.give_props({20350: 501})
+        reply = self.replay([self.activity_request(1201, [20350, 501])])[0]
+        self.assertEqual(reply["opcode"], 1201)
+        self.assertNotIn(20350, self.entity_records(self.query_world(1200), 1, 1))
+
+    def test_coin_balances_allow_int64_while_gold_stays_int32(self):
+        saved = self.seed_shop_account()
+        saved["role_state"]["coin"] = (1 << 31) - 1
+        player.apply_reward(saved, protocol.encode_pb_field(1, 0, 100000000), self.role_config)
+        self.assertEqual(saved["role_state"]["coin"], (1 << 31) - 1 + 100000000)
+        saved["role_state"]["gold"] = (1 << 31) - 1
+        with self.assertRaisesRegex(ValueError, "gold 超出范围"):
+            player.apply_reward(saved, protocol.encode_pb_field(2, 0, 1), self.role_config)
+
+    def test_coin_reward_builders_keep_int64_without_widening_other_rewards(self):
+        saved = self.seed_shop_account()
+        for count in ((1 << 31) + 1, (1 << 63) - 1):
+            self.assertEqual(protocol.pb_get_varint(activities.build_reward(saved, f"1000,{count}", self.role_config), 1), count)
+            self.assertEqual(protocol.pb_get_varint(recruit.build_reward(saved, [(1000, count)], self.role_config), 1), count)
+        for cid, count in ((1000, 0), (1000, -1), (1000, 1 << 63), (1001, 1 << 31),
+                           (1002, 1 << 31), (1003, 1 << 31), (20019, 1 << 31)):
+            with self.subTest(cid=cid, count=count):
+                with self.assertRaises(ValueError):
+                    activities.build_reward(saved, f"{cid},{count}", self.role_config)
+                with self.assertRaises(ValueError):
+                    recruit.build_reward(saved, [(cid, count)], self.role_config)
+
     def test_random_and_choice_box_save_failures_and_overflow_do_not_publish_partial_rewards(self):
         self.seed_shop_account()
         self.give_props({20350: 1, 20623: 1, 20666: 1})
@@ -1437,7 +1466,7 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(session.random_replies, {})
             self.assertEqual(self.save_path.read_bytes(), original)
         saved = json.loads(original)
-        saved["role_state"]["coin"] = (1 << 31) - 1
+        saved["role_state"]["coin"] = (1 << 63) - 1
         self.save_path.write_text(json.dumps(saved))
         original = self.save_path.read_bytes()
         for cid, specification, values in ((20350, "1000,1,1", [20350, 1]), (20666, "1000,1", [20666, 1, 1000]),
@@ -5254,7 +5283,7 @@ class ReplayRoutingTests(unittest.TestCase):
         baseline = self.prepare_liveness()
         for task in (1, 3, 8, 9):
             activities.record_liveness(baseline, task, self.role_config["liveness"][str(task)]["num"], self.role_config, self.now)
-        baseline["role_state"]["coin"] = (1 << 31) - 1
+        baseline["role_state"]["coin"] = (1 << 63) - 1
         for body in (b"", recharge.ids([101]), recharge.ids([1])):
             with self.subTest(body=body), redirect_stdout(io.StringIO()):
                 saved = copy.deepcopy(baseline)
@@ -5363,7 +5392,7 @@ class ReplayRoutingTests(unittest.TestCase):
             with self.subTest(overflow=overflow), redirect_stdout(io.StringIO()):
                 saved = copy.deepcopy(baseline)
                 if overflow:
-                    saved["role_state"]["coin"] = (1 << 31) - 1
+                    saved["role_state"]["coin"] = (1 << 63) - 1
                 self.save_path.write_text(json.dumps(saved))
                 session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
                 memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
@@ -8243,7 +8272,7 @@ class ReplayRoutingTests(unittest.TestCase):
         for kind in ("coin", "star", "points"):
             saved = copy.deepcopy(baseline)
             if kind == "coin":
-                saved["role_state"]["coin"] = (1 << 31) - 100
+                saved["role_state"]["coin"] = (1 << 63) - 100
             elif kind == "star":
                 saved["mieshendian_state"].update(star=(1 << 31) - 1, earned=(1 << 31) - 1, maxstar=(1 << 31) - 1)
             else:
@@ -8969,7 +8998,7 @@ class ReplayRoutingTests(unittest.TestCase):
             elif kind == "vip":
                 saved["role_state"]["vip"] = 0
             elif kind == "overflow":
-                saved["role_state"]["coin"] = (1 << 31) - self.role_config["copy"]["42102"]["1"]["coin"] - 1
+                saved["role_state"]["coin"] = (1 << 63) - self.role_config["copy"]["42102"]["1"]["coin"] - 1
             self.save_path.write_text(json.dumps(saved))
             original = self.save_path.read_bytes()
             with self.subTest(kind=kind), redirect_stdout(io.StringIO()):
@@ -9270,7 +9299,7 @@ class ReplayRoutingTests(unittest.TestCase):
                 raw = self.entity_records(bytes.fromhex(modified["world_state"]["1002"]), 1, 2)[7060]
                 player.record_slot_update(modified, protocol.encode_pb_field(1, 2, protocol.pb_set_varint(raw, 21, 1)))
             else:
-                modified["role_state"]["coin"] = (1 << 31) - 1
+                modified["role_state"]["coin"] = (1 << 63) - 1
             self.save_path.write_text(json.dumps(modified))
             original = self.save_path.read_bytes()
             with self.subTest(kind=kind), redirect_stdout(io.StringIO()), patch.object(player.random, "getrandbits", return_value=42):

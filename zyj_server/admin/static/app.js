@@ -286,7 +286,8 @@ function renderMaintenance(detail, row) {
   }
   detail.append(credentials);
   const maintenance = node("section", undefined, "maintenance"), actions = node("div", undefined, "actions");
-  maintenance.append(node("h3", "离线维护"), node("p", row.online ? `当前连接 ${row.connection.address}，请先退出游戏后再维护。` : "重置或恢复前自动备份。重置引导保留角色、背包和奖励领取记录。"));
+  maintenance.append(node("h3", "账号维护"), node("p", row.online ? `当前连接 ${row.connection.address}，可强制下线后再维护。` : "重置或恢复前自动备份。重置引导保留角色、背包和奖励领取记录。"));
+  if (row.online) actions.append(button("强制下线", () => kickAccount(row), "danger"));
   for (const [label, action, css] of [["创建备份", "backup", ""], ["重置引导", "reset-guide", ""], ["重置账号", "reset", "danger"]]) {
     const control = button(label, () => maintain(row, action), css); control.disabled = row.online || !row.has_save; actions.append(control);
   }
@@ -299,6 +300,12 @@ function renderMaintenance(detail, row) {
   select.disabled = row.online || !row.backups.length;
   const control = button("恢复备份", () => maintain(row, "restore", select.value)); control.disabled = select.disabled;
   inline.append(select, control); restore.append(label, inline); maintenance.append(restore); detail.append(maintenance);
+}
+async function kickAccount(row) {
+  if (!confirm(`强制断开账号 ${row.id}「${row.name}」的当前连接？\n玩家需要重新登录才能继续游戏。`)) return;
+  const controls = [...$("account-detail").querySelectorAll("button")]; controls.forEach((b) => { b.disabled = true; });
+  try { const result = await api(`/api/accounts/${row.id}/kick`, { reason: "GM 强制下线" }); message(result.audit_warning || `账号 ${row.id} 已强制下线。`); }
+  finally { await loadAccounts(); if (state.account === row.id && state.page === "accounts") await loadAccount(row.id, "maintenance"); }
 }
 async function maintain(row, action, backupId) {
   const label = info.actions[action];

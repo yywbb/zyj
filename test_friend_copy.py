@@ -221,7 +221,7 @@ class FriendCopyTests(unittest.TestCase):
             with self.subTest(opcode=opcode), patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
                 self.call(opcode, values)
             self.assertEqual((self.session.save, self.path.read_bytes()), (memory, disk))
-        self.session.save["role_state"]["coin"] = (1 << 31) - 1
+        self.session.save["role_state"]["coin"] = (1 << 63) - 1
         self.assert_rejected(1324, recharge.ids([43001, 990000001]))
 
     def test_corrupt_saved_counters_fail_closed_even_after_midnight(self):

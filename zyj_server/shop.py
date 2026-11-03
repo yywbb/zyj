@@ -55,7 +55,7 @@ def openable_box(row):
 def open_box(save, values, config, seed):
     if not save.get("has_role"):
         raise ValueError("角色尚未创建")
-    if len(values) not in (2, 3) or not 1 <= values[1] <= 100:
+    if len(values) not in (2, 3) or not 1 <= values[1] < (1 << 31):
         raise ValueError("礼包使用数量无效")
     cid, count = values[:2]
     row = config["props"][str(cid)]

@@ -55,6 +55,7 @@ class AccountStore:
         self.step_counts = step_counts
         self.role_config = role_config
         self.active = {}
+        self.closers = {}
         self.guild_disconnects = {}
         self.lock = threading.RLock()
         # shortcut: 限流仅在本进程内保留；支持多进程部署时再共享计数。
@@ -150,6 +151,7 @@ class AccountStore:
     def close_session(self, account):
         with self.lock:
             connection = self.active.pop(account, None)
+            self.closers.pop(account, None)
             if connection and "identity" in connection:
                 self.guild_disconnects[account] = (connection["identity"], int(time.time()))
             path = self.save_path.with_name("guilds.json")
@@ -169,6 +171,31 @@ class AccountStore:
             except (OSError, ValueError) as error:
                 # 断线必须释放登录占用；损坏公会库仍由后续请求拒绝，不能空库覆盖。
                 print(f"[!] 公会离线时间未保存: {error}", flush=True)
+
+    def attach_connection(self, account, closer):
+        """登记强制断开回调；与 active 分开存放，避免管理后台序列化连接信息时泄露回调。"""
+        with self.lock:
+            if account in self.active:
+                self.closers[account] = closer
+
+    def kick(self, account):
+        with self.lock:
+            if account not in self.active:
+                raise ValueError("账号当前不在线，无需强制下线")
+            closer = self.closers.get(account)
+        if closer is None:
+            raise ValueError("当前连接不支持强制下线，请让玩家手动退出游戏")
+        try:
+            closer()
+        except OSError:
+            pass
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with self.lock:
+                if account not in self.active:
+                    return {"account": account, "kicked": True}
+            time.sleep(0.05)
+        raise ValueError("连接已断开，但登录占用尚未释放，请刷新后重试")
 
     def friend_request(self, account, session, opcode, seq, body):
         with self.lock:

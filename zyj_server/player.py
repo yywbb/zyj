@@ -512,7 +512,8 @@ def apply_reward(save, body, role_config, now=None):
             balance = state[name] + delta
             if balance < 0:
                 raise ValueError(f"{name} 不足，拒绝录制操作")
-            if balance >= (1 << 31):
+            # Role.coin 是 int64，其余资源是 int32；按协议位宽校验，别让银币奖励被 int32 截断。
+            if balance >= (1 << 63 if name == "coin" else 1 << 31):
                 raise ValueError(f"{name} 超出范围")
             state[name] = balance
             if name == "gold" and delta < 0:

@@ -143,6 +143,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                     result = views.detail(accounts.snapshot(account), accounts.step_counts, accounts.role_config)
                     result["backups"] = accounts.backups(account)
                     return self._send(200, result)
+                if writing and parts[3:] == ["kick"]:
+                    if set(data) != {"reason"}:
+                        raise ValueError("强制下线需要且只需要操作原因")
+                    return self._send(200, self.server.gm.kick(account, data["reason"]))
                 if writing and parts[3:] == ["credentials"]:
                     if set(data) != {"password", "revision"}:
                         raise ValueError("创建账号需要密码和存档版本")

@@ -340,10 +340,23 @@ class EquipEvolveTests(unittest.TestCase):
         self.assertEqual(self.equip(iid)[11],35)
         self.assert_rejected(1123,values=[iid])
         replacement=self.add_equip(21501);self.wear(replacement)
+        refund=dict(receipt["costs"])[1000]
+        fee=equip_evolve.rebirth_fee(self.equip(iid),self.config)
+        self.save["role_state"]["coin"]=(1<<63)-refund
         with self.assertRaisesRegex(ValueError,"容量"):
             qiankun.prepare(1117,copy.deepcopy(self.save),guild.ids([iid]),self.config)
         self.assert_rejected(1117,values=[iid])
         self.assertEqual(self.equip(iid)[11],35)
+        self.save["role_state"]["coin"]-=1
+        gold=self.save["role_state"]["gold"]
+        reply=self.pay(1117,iid)
+        self.assertEqual(protocol.pb_get_varint(reply,1),refund)
+        self.assertEqual(self.save["role_state"]["coin"],(1<<63)-1)
+        self.assertEqual(self.save["role_state"]["gold"],gold-fee)
+        self.assertEqual(self.equip(iid),[iid,21505,1]+[0]*10)
+        self.assertNotIn(f"equip:{iid}",qiankun.get_state(self.save)["receipts"])
+        self.reconnect();self.refresh()
+        self.assertEqual(self.save["role_state"]["coin"],(1<<63)-1)
 
     def test_progress_and_star_gifts_use_real_guides_simulated_payment_and_once_only_rewards(self):
         for gid,section,steps in ((130021,75,2),(130009,93,1)):

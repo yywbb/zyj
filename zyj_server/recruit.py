@@ -109,7 +109,7 @@ def build_reward(save, gets, config):
     fragments = {v["general"]: v for v in config["general_fragment"].values()}
     generals, props = [], {}
     for cid, count in gets:
-        if type(count) is not int or not 0 < count < (1 << 31):
+        if type(count) is not int or not 0 < count < (1 << (63 if cid == 1000 else 31)):
             raise ValueError("奖励数量无效")
         if str(cid) in config["general"]:
             for _ in range(count):

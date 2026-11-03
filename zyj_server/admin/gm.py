@@ -15,7 +15,7 @@ RESOURCES = {"gold": "元宝", "coin": "银币", "stamina": "体力", "energy": 
 ACTIONS = {"grant": "GM 调整与发放", "register": "创建登录账号", "backup": "创建备份",
            "restore": "恢复备份", "reset": "重置账号", "reset-guide": "重置引导", "config": "修改配置",
            "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将",
-           "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件"}
+           "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件", "kick": "强制下线"}
 PLAYER_ACTIONS = {"grant": {"resources", "items"}, "inventory": {"cid", "count"},
                   "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
 COMMON_ITEMS = (20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
@@ -264,8 +264,9 @@ class Workbench:
                 state = player.get_role_state(save, store.role_config)
                 for key, delta in data.get("resources", {}).items():
                     value = state[key] + delta
-                    if not 0 <= value < (1 << 31):
-                        raise ValueError(f"{RESOURCES[key]}不足或超出 int32 范围")
+                    # 银币在协议里是 int64，其余资源是 int32。
+                    if not 0 <= value < (1 << 63 if key == "coin" else 1 << 31):
+                        raise ValueError(f"{RESOURCES[key]}不足或超出范围")
                     # GM 修正不属于游戏消费，不增加消费活动进度。
                     state[key] = value
                 if action == "grant":
@@ -322,6 +323,13 @@ class Workbench:
             except OSError:
                 result = {**result, "audit_warning": "操作已完成，但流水未完成落盘，请核对当前状态。"}
             return result
+
+    def kick(self, account, reason="GM 强制下线"):
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 200:
+            raise ValueError("请填写 1–200 字的操作原因")
+        self.accounts.path(account)
+        return self.logged("kick", account, {"reason": reason},
+                           lambda: self.accounts.kick(account))
 
     def list_mails(self, account=None, offset=0, limit=50):
         from .. import mail

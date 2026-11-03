@@ -313,7 +313,7 @@ class ArenaTests(unittest.TestCase):
         self.assert_rejected(1611, recharge.ids([5363]))
         self.query()
         self.session.save["arena_state"]["rank"] = 4000
-        self.session.save["role_state"]["coin"] = (1 << 31) - 1
+        self.session.save["role_state"]["coin"] = (1 << 63) - 1
         self.clock.return_value = NOW + 86400
         self.assert_rejected(1610, b"")
 
