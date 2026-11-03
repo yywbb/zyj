@@ -64,7 +64,7 @@ def load_role_config(config_path):
                              "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
                              "trump", "trump_gem", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
-                             "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "pet3_illustrated", "trigger_gift2", "boss2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
+                             "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "pet3_illustrated", "trigger_gift2", "boss2", "boss2_rewards1", "boss2_rewards2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",

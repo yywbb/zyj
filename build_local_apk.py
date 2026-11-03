@@ -1229,6 +1229,72 @@ end
     return patched
 
 
+def patch_world_boss_scripts():
+    patched = {}
+    for name, filename in (("GameWorldBoss", "world_boss_network.lua"), ("UIWorldBoss", "world_boss_ui.lua"), ("Layer_worldboss2", "world_boss_layer.lua")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        assert "worldboss" in code.lower()
+        if name == "GameWorldBoss":
+            assert code.count('os.date("*t", gamedata:time())') == 8
+            code = code.replace('os.date("*t", gamedata:time())', 'os.date("!*t", gamedata:time()+28800)')
+        if name == "Layer_worldboss2":
+            marker = "    local scale = 2.5"
+            assert code.count(marker) == 1
+            code = code.replace(marker, '''    self.localWorldBossView=(self.localWorldBossView or 0)+1
+    self.localWorldBossReady=0
+    self.localWorldBossPlaying=false
+    self.localWorldBossPoll=nil
+    self.localWorldBossTick=nil
+    self.isauto=false
+    self.lastid=0
+''' + marker)
+            marker = "function worldboss.init(self,parent,toppos,param)\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + "    self.localWorldBossBusy=nil\n    self.hasjoin=false\n")
+            marker = "function worldboss.clear(self)\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + "    self.localWorldBossView=(self.localWorldBossView or 0)+1\n    self:stoptnotify()\n    self.isauto=false\n")
+            code, count = re.subn(r"(?m)^(\s*)UIRequest\(\{type\s*=\s*self.data\[self.selectpage\]", r"\1self:localWorldBossRequest({type=self.data[self.selectpage]", code)
+            assert count == 15, count
+            marker = "    self.data[self.selectpage].notifys[index] = nil"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    table.remove(self.data[self.selectpage].notifys,index)")
+            marker = "for k,v in pairs(self.data[self.selectpage].notifys) do"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "for k,v in ipairs(self.data[self.selectpage].notifys) do")
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            extra = stream.read()
+        if name == "Layer_worldboss2":
+            assert code.count("return worldboss") == 1
+            code = code.replace("return worldboss", extra + "\nreturn worldboss")
+        else:
+            code += "\n" + extra
+        patched[name] = code
+    code = read_script("window_confirm").decode("utf-8").replace("\r\n", "\n")
+    for marker, extra in (
+        ('    self.rootItems.concel:addHandleOfControlEvent(function()\n', '''        if data.localWorldBossPick then
+            self.callback=function() callback(2) end
+            gameWindows:closeWindowDirect("confirm")
+            return
+        end
+'''),
+        ('    self.rootItems.confirm:addHandleOfControlEvent(function()\n', '''        if data.localWorldBossPick then
+            self.callback=function() callback(10) end
+            gameWindows:closeWindowDirect("confirm")
+            return
+        end
+'''),
+        ('    self.rootItems.confirm:setSwallowsTouch(true)\n', '''    if data.localWorldBossPick then
+        ui.setLabelString(self.rootItems.conceltext,"5元宝复活",18)
+        ui.setLabelString(self.rootItems.confirmtext,tostring(data.localWorldBossPrice).."元宝翻倍",18)
+    end
+''')):
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + extra)
+    patched["window_confirm"] = code
+    return patched
+
+
 def patch_cup_scripts():
     patched = {}
     for name, filename in (("GameCup", "cup_network.lua"), ("UICup", "cup_ui.lua")):
@@ -1714,6 +1780,13 @@ end"""
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and gamedata.ext.localGuildBusy == error.ids[1] then gamedata.ext.localGuildBusy = nil end
     if gamedata and gamedata.ext then
+        if gamedata.ext.localWorldBossBusy==error.ids[1] then gamedata.ext.localWorldBossBusy=nil end
+        local pending=gamedata.ext.localWorldBossPending or {}
+        local queue=pending[error.ids[1]] or {}
+        table.remove(queue,1)
+        if #queue==0 then pending[error.ids[1]]=nil end
+    end
+    if gamedata and gamedata.ext then
         if gamedata.ext.localCupBusy==error.ids[1] then gamedata.ext.localCupBusy=nil end
         local pending=gamedata.ext.localCupPending or {}
         local queue=pending[error.ids[1]] or {}
@@ -1766,7 +1839,7 @@ end"""
     code = read_script("UIErrorMessage").decode("utf-8").replace("\r\n", "\n")
     marker = "function UIErrorMessage(t)\n"
     assert code.count(marker) == 1
-    code = code.replace(marker, marker + "    if AutoCopyServerError then AutoCopyServerError(t) end\n")
+    code = code.replace(marker, marker + "    if AutoCopyServerError then AutoCopyServerError(t) end\n    if LocalWorldBossError then LocalWorldBossError(t) end\n")
     marker = "function UIErrorMessage7(t)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if t.local_login_failed then
@@ -1778,7 +1851,7 @@ end"""
     code = read_script("UIPrompt").decode("utf-8").replace("\r\n", "\n")
     marker = "function UIPrompt(t)\n"
     assert code.count(marker) == 1
-    code = code.replace(marker, marker + "    if AutoCopyLocalReject and AutoCopyLocalReject(t) then return end\n")
+    code = code.replace(marker, marker + "    if AutoCopyLocalReject and AutoCopyLocalReject(t) then return end\n    if LocalWorldBossError then LocalWorldBossError(t) end\n")
     for name in ("UIPromptTimeOut", "UIPromptNoSignal"):
         marker = "function " + name + "()\n"
         assert code.count(marker) == 1
@@ -2737,6 +2810,8 @@ end"""
     for name, code in patch_collection_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     for name, code in patch_cup_scripts().items():
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    for name, code in patch_world_boss_scripts().items():
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     code = read_script("friends_pb", "pb").decode("utf-8").replace("\r\n", "\n")
     marker = "FRIENDS.fields = {FRIENDS_FRIENDS_FIELD, FRIENDS_MAX_FIELD}"

@@ -22,7 +22,7 @@ def unavailable_response(opcode, seq, body, message):
 
 
 class Session:
-    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None, guild_request=None, friend_request=None, cup_request=None):
+    def __init__(self, tables, save_path, step_counts, role_config, growth_buyers=None, rank_query=None, rank_observer=None, guild_request=None, friend_request=None, cup_request=None, world_boss_request=None):
         self.replay = Replay(tables)
         self.save_path = save_path
         self.step_counts = step_counts
@@ -33,6 +33,7 @@ class Session:
         self.guild_request = guild_request
         self.friend_request = friend_request
         self.cup_request = cup_request
+        self.world_boss_request = world_boss_request
         self.guild_profit = None
         self.guild_level = None
         self.cup_rank = None
@@ -63,6 +64,7 @@ class Session:
         guild.daily_state(self.save)
         friends.daily(self.save)
         cup.get_state(self.save)
+        world_boss.get_state(self.save)
         collection.get_state(self.save, role_config)
         achievements.get_state(self.save, role_config)
         pets.get_state(self.save, role_config)
@@ -180,8 +182,13 @@ class Session:
         if opcode in pets.UNSUPPORTED:
             return unavailable_response(opcode, seq, body, "此接口属于旧版魔宠，当前版本请使用进阶、图鉴和技能页面，未扣除资源。")
 
-        if opcode in (3401, 3411):
-            return unavailable_response(opcode, seq, body, "本地屠龙暂只开放介绍页，世界Boss挑战与结算尚未实现，未扣除元宝。")
+        if opcode in world_boss.OPCODES and (self.world_boss_request or opcode in world_boss.MUTATIONS):
+            try:
+                if self.world_boss_request is None:
+                    raise ValueError("屠龙挑战需要绑定本地账号库，未扣除元宝")
+                return self.world_boss_request(self, opcode, seq, body)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
 
         if opcode == 2105:
             return unavailable_response(opcode, seq, body, "本地杯赛竞猜尚未开放，未扣除银币、元宝或道具。")

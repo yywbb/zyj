@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, cup, friends, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare
+from . import activities, cup, friends, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare, world_boss
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -135,7 +135,8 @@ class AccountStore:
                            lambda previous=None: self.observe_rankings({account: previous} if previous else None),
                            lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body),
                            lambda session, opcode, seq, body: self.friend_request(account, session, opcode, seq, body),
-                           lambda session, opcode, seq, body: self.cup_request(account, session, opcode, seq, body))
+                           lambda session, opcode, seq, body: self.cup_request(account, session, opcode, seq, body),
+                           lambda session, opcode, seq, body: self.world_boss_request(account, session, opcode, seq, body))
             with self.lock:
                 self.active[account]["identity"] = session.save["created_at"]
             session.guild_profit = lambda now: self.guild_profit(account, now)
@@ -312,6 +313,88 @@ class AccountStore:
                 session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state),
                     (now + 28800) // 86400)
             return packets
+
+    def world_boss_saves(self):
+        saves = {}
+        for account in self.account_ids():
+            snapshot = self.snapshot(account)
+            data = snapshot["save"]
+            if snapshot["error"] or snapshot["has_save"] and type(data.get("has_role")) is not bool:
+                raise ValueError("账号存档损坏，无法读取屠龙")
+            if data.get("has_role"):
+                guild.validate_role(data)
+                world_boss.get_state(data)
+                if data.get("role_snapshot"):
+                    saves[account] = data
+                elif data.get("world_boss_state"):
+                    raise ValueError("屠龙角色快照丢失，请恢复存档")
+        return saves
+
+    def world_boss_request(self, account, session, opcode, seq, body):
+        with self.lock:
+            world_boss.request(opcode, session.save, body, self.role_config)
+            saves = self.world_boss_saves()
+            if account not in saves or saves[account]["created_at"] != session.save["created_at"]:
+                raise ValueError("屠龙需要已初始化的本地角色，请重新登录")
+            path = self.save_path.with_name("world_boss.json")
+            moment = int(time.time())
+            state = world_boss.load(path, saves, moment)
+            original = copy.deepcopy(state)
+            world_boss.recover(state, saves)
+            mutation = opcode in world_boss.MUTATIONS
+            if mutation and moment < state["checked_at"]:
+                raise ValueError("屠龙时间发生回拨，请校准时间后重试")
+            now = max(moment, state["checked_at"])
+            cached = session.random_replies.get(opcode) if mutation else None
+            if cached and cached[0] == (seq, body):
+                if session.save == cached[2] and state == cached[3] and (now + 28800) // 86400 == cached[4]:
+                    return list(cached[1])
+                raise ValueError("该次屠龙已结算，状态已变化，请刷新后重新操作")
+            before = copy.deepcopy(state)
+            working = copy.deepcopy(session.save)
+            saves[account] = working
+            if mutation:
+                working["guild_profit"] = self.guild_profit(account, now)
+            reply, reward, cost = world_boss.prepare(opcode, body, state, saves, account, self.role_config, now)
+            packets = [protocol.pack_frame(opcode, seq, reply)]
+            if mutation:
+                online_rewards.settle(working, self.role_config, session.connected_at, now)
+                welfare.settle(working, now)
+                player.settle_stamina(working, self.role_config, now)
+                if cost:
+                    player.change_item_count(working, 1001, -cost, self.role_config, now)
+                if reward:
+                    player.apply_reward(working, reward, self.role_config, now)
+                packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
+            state["checked_at"] = now
+            if state != before:
+                world_boss.stage(state, before, account, working)
+                world_boss.write(path, state)
+            packets = player.save_response_group(packets, working, session.save, session.save_path,
+                self.step_counts, self.role_config, now)
+            session.save = working
+            world_boss.recover(state, saves)
+            if state != original:
+                world_boss.write(path, state)
+            if mutation:
+                session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state),
+                    (now + 28800) // 86400)
+            return packets
+
+    def world_boss_mails(self, viewer, identity):
+        with self.lock:
+            saves = self.world_boss_saves()
+            path = self.save_path.with_name("world_boss.json")
+            state = world_boss.load(path, saves, int(time.time()))
+            before = copy.deepcopy(state)
+            world_boss.recover(state, saves)
+            now = max(int(time.time()), state["checked_at"])
+            if path.exists():
+                world_boss.settle(state, saves, self.role_config, now)
+                state["checked_at"] = now
+                if state != before:
+                    world_boss.write(path, state)
+            return world_boss.reward_mails(state, viewer, identity)
 
     def guild_request(self, account, session, opcode, seq, body):
         with self.lock:
@@ -498,7 +581,8 @@ class AccountStore:
             return ranking.temple_query(body, saves, viewer, self.role_config)
         if opcode in (3100, 3101, 3102):
             return mail.prepare(opcode, save, body, self.save_path.with_name("mails.json"),
-                                self.observe_rankings(), viewer, self.role_config, int(time.time()))
+                                self.observe_rankings(), viewer, self.role_config, int(time.time()),
+                                world_mails=self.world_boss_mails(viewer, save["created_at"]))
         if opcode in (5602, 5603):
             if body:
                 raise ValueError("成长基线查询不接受参数")

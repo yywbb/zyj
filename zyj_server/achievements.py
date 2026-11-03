@@ -8,7 +8,7 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 QUERIES = (2400,)
 MUTATIONS = (2401,)
 OPCODES = QUERIES + MUTATIONS
-COUNTERS = ("equipbaptize", "robcount", "penglairewardcount", "petbreakcount", "gang_fishpond", "gang_incense")
+COUNTERS = ("equipbaptize", "robcount", "penglairewardcount", "petbreakcount", "gang_fishpond", "gang_incense", "worldbosscount")
 SUPPORTED_TYPES = {
     "level", "athletics", "cuprank", "blood", "copy", "equip_strengthen", "general", "gang_level", "gang_contribution",
     "copystar", "generalbreak", "treasurerefine", "treasurestrengthen", "magicstonelevellimit", "petnum", "vip",
