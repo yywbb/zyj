@@ -1,5 +1,6 @@
 """盛宴/篝火真实本地房间；按服务端秒数与在场心跳分段结算。"""
 
+import copy
 from fractions import Fraction
 
 from .protocol import encode_pb_field, pb_get_varint
@@ -90,6 +91,26 @@ def settle(room, config, now, saves, online):
                 key = str(cid)
                 member["pending"][key] = member["pending"].get(key, 0) + int(rate * gain * 1000)
     room["checked"] = end
+
+
+def status(row, save, viewer, saves, config, now):
+    local = {"guild_room_state": copy.deepcopy(save["guild_room_state"])} if "guild_room_state" in save else {}
+    own = personal(local, now)
+    result = []
+    for kind in ("feast", "bath"):
+        room = row.get("rooms", {}).get(str(own[kind]["room"]))
+        if (not room or room["kind"] != kind
+                or room["members"].get(str(viewer), {}).get("identity") != save["created_at"]):
+            result.extend((0, 0, 0))
+            continue
+        projected = copy.deepcopy(room)
+        checked = max(now, room["checked"])
+        settle(projected, config, checked, saves, ())
+        finished = checked >= room["end"]
+        pending = projected["members"][str(viewer)]["pending"]
+        # 原生doing使用档次，不是共享房间ID；未使用的旧座位字段保留0。
+        result.extend((int(finished and any(v >= 1000 for v in pending.values())), 0 if finished else room["tier"], 0))
+    return result
 
 
 def gain_exp(save, role_exp, general_exp, config):

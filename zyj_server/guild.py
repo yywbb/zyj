@@ -510,7 +510,7 @@ def status(state, viewer, saves, config, now):
     return (message(1, params([int(gid), row["name"], level, exp, row["content"], 0, 0, 0,
                                 row["declaration"], len(row["members"]), power(row, saves)]))
             + message(2, ids([daily["contribution"], daily["total_contribution"], row["members"][str(viewer)]["joined_at"],
-                              int(daily["claimed"]), 0, 0, 0, 0, 0, 0])))
+                              int(daily["claimed"]), *guild_games.guild_rooms.status(row, saves[viewer], viewer, saves, config, now)])))
 
 
 def members(row, viewer, saves, online, now, config):

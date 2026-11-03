@@ -593,6 +593,108 @@ class GuildFeatureTests(unittest.TestCase):
         self.reconnect()
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 5150))[1], score)
 
+    def test_room_status_projects_only_own_active_tiers_without_writing_or_granting(self):
+        self.aged()
+        self.give(20073, 20)
+        for opcode in (2272, 2282):
+            self.success(1, opcode, values=[1, 2, 0])
+        before = copy.deepcopy(self.sessions[1].save)
+        shared = (self.root / "guilds.json").read_bytes()
+        disk = self.store.path(1).read_bytes()
+        status = protocol.parse_ids_pb(dict(protocol.get_comb_messages(self.success(1, 2230)))[2])
+        self.assertEqual(status[4:], [0, 1, 0, 0, 1, 0])
+        self.assertEqual(self.sessions[1].save, before)
+        self.assertEqual(self.store.path(1).read_bytes(), disk)
+        self.assertEqual((self.root / "guilds.json").read_bytes(), shared)
+        other = protocol.parse_ids_pb(dict(protocol.get_comb_messages(self.success(2, 2230)))[2])
+        self.assertEqual(other[4:], [0] * 6)
+        self.reconnect()
+        status = protocol.parse_ids_pb(dict(protocol.get_comb_messages(self.success(1, 2230)))[2])
+        self.assertEqual(status[4:], [0, 1, 0, 0, 1, 0])
+
+    def test_room_status_projects_unsettled_finished_rewards_then_clears_after_claim(self):
+        self.aged()
+        for base, count in ((2270, 10), (2280, 5)):
+            self.give(20073, count)
+            self.success(1, base + 2, values=[1, 2, 0])
+            self.clock.return_value += 60
+            self.success(1, base + 5)
+            self.clock.return_value += 31
+            self.reconnect()
+            before = copy.deepcopy(self.sessions[1].save)
+            shared = (self.root / "guilds.json").read_bytes()
+            disk = self.store.path(1).read_bytes()
+            status = protocol.parse_ids_pb(dict(protocol.get_comb_messages(self.success(1, 2230)))[2])
+            offset = 4 if base == 2270 else 7
+            self.assertEqual(status[offset:offset + 3], [1, 0, 0])
+            self.assertEqual(self.sessions[1].save, before)
+            self.assertEqual(self.store.path(1).read_bytes(), disk)
+            self.assertEqual((self.root / "guilds.json").read_bytes(), shared)
+            self.success(1, base + 3)
+            status = protocol.parse_ids_pb(dict(protocol.get_comb_messages(self.success(1, 2230)))[2])
+            self.assertEqual(status[offset:offset + 3], [0, 0, 0])
+
+    def test_room_status_never_exposes_another_identity_or_stale_room(self):
+        self.aged()
+        self.give(20073, 10)
+        self.success(1, 2272, values=[1, 2, 0])
+        from zyj_server import guild_rooms
+        row = self.shared()["guilds"]["1"]
+        save = copy.deepcopy(self.sessions[1].save)
+        saves = {a: s.save for a, s in self.sessions.items()}
+        original = copy.deepcopy((row, save))
+        self.assertEqual(guild_rooms.status(row, save, 1, saves, CONFIG, self.now), [0, 1, 0, 0, 0, 0])
+        self.assertEqual((row, save), original)
+        row["rooms"]["1"]["members"]["1"]["identity"] += 1
+        self.assertEqual(guild_rooms.status(row, save, 1, saves, CONFIG, self.now), [0] * 6)
+        row = original[0]
+        save["guild_room_state"]["feast"]["room"] = 999
+        self.assertEqual(guild_rooms.status(row, save, 1, saves, CONFIG, self.now), [0] * 6)
+
+    def test_actual_activity_page_restores_rooms_and_requests_finished_rewards(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("原生公会活动界面验证需 lupa.lua51")
+        from build_local_apk import read_script
+        self.aged()
+        self.give(20073, 20)
+        for opcode in (2272, 2282):
+            self.success(1, opcode, values=[1, 2, 0])
+        lua = LuaRuntime()
+        lua.execute('''
+            print=function() end
+            requests={}
+            UIRequest=function(t) requests[#requests+1]=t end
+            gameWindows={openWindow=function() error("active room must be restored") end}
+            local node={setSwallowsTouch=function() end,setTouchPriority=function() end,
+                addHandleOfControlEvent=function() end,setVisible=function() end,setString=function() end}
+            items=setmetatable({},{__index=function() return node end})
+            setSpriteFrameByName=function() end
+            ui={ccbNameEx=function(a,b) return a..b end}
+            gamedata={cache={gang2status={}},config={global_kv={}}}
+        ''')
+        native = read_script("gamedata").decode()
+        lua.execute(native[native.index("function gamedata.Gang2Status2("):native.index("--公会军团动态的数据", native.index("function gamedata.Gang2Status2("))])
+        page = lua.execute(read_script("Layer_guildActivity").decode())
+        page.rootItems = lua.globals()["items"]
+        def load():
+            values = protocol.parse_ids_pb(dict(protocol.get_comb_messages(self.success(1, 2230)))[2])
+            lua.globals().gamedata.Gang2Status2(lua.globals().gamedata, lua.table_from(values))
+            page.gang = lua.globals().gamedata.cache.gang2status
+        load()
+        page.skip(page, 1)
+        page.skip(page, 2)
+        requests = lua.globals().requests
+        self.assertEqual([(requests[i].type, requests[i].roomid) for i in (1, 2)], [(2272, 1), (2282, 1)])
+        self.clock.return_value += 60
+        for opcode in (2275, 2285):
+            self.success(1, opcode)
+        self.clock.return_value += 31
+        load()
+        page.reload(page, page.gang)
+        self.assertEqual([requests[i].type for i in (3, 4)], [2273, 2283])
+
     def test_feast_and_bonfire_real_members_elapsed_rewards_and_no_repeat_claim(self):
         self.aged()
         for base, cid, count in ((2270, 20073, 10), (2280, 20073, 5)):
