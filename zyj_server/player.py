@@ -282,6 +282,35 @@ def settle_campaign(save, role_config, now):
     save["campaign_day"] = day
 
 
+def reset_campaign_attempts(save, body, role_config, now):
+    fields = list(iter_pb_fields(body))
+    values = {n: v for n, w, v in fields}
+    if (len(fields) != 2 or set(values) != {1, 2}
+            or any(w != 0 or not 0 < v < (1 << 31) for n, w, v in fields)):
+        raise ValueError("重置次数需要完整的副本及关卡编号")
+    if (not save.get("has_role") or save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2
+            or save["campaign_day"] != (now + 28800) // 86400):
+        raise ValueError("请完成新手引导，或等待服务器日期恢复后重置")
+    mid, pid = values[1], values[2]
+    row = role_config["copy"].get(str(mid), {}).get(str(pid))
+    if not row or str(mid) not in role_config["map"] or type(row["challenge"]) is not int or not 0 < row["challenge"] * 5 < (1 << 31):
+        raise ValueError("普通副本关卡或重置费用配置无效")
+    copies = bytes.fromhex(save["world_state"]["1300"])
+    current = formation.records(copies, 1, 1).get(mid, b"")
+    points = formation.records(current, 7, 1)
+    previous = points.get(pid, b"")
+    if not previous or pid > 1 and not pb_get_varint(points.get(pid - 1, b""), 3):
+        raise ValueError("关卡尚未解锁，不能重置次数")
+    used = pb_get_varint(previous, 4) or 0
+    if not row["challenge"] <= used < (1 << 31):
+        raise ValueError("当前关卡还有挑战次数，请刷新后再操作")
+    # 原包普通副本固定收每日上限×5元宝；精英副本VIP上限不适用于1305。
+    change_item_count(save, 1001, -row["challenge"] * 5, role_config, now)
+    current = merge_pb_records(current, encode_pb_field(7, 2, pb_set_varint(previous, 4, 0)), {7: 1})
+    save["world_state"]["1300"] = merge_pb_records(copies, encode_pb_field(1, 2, current), {1: 1}).hex()
+    return b"\x08\x01"
+
+
 def record_legacy_role_state(save, body, role_config):
     ids = parse_ids_pb(body)
     if len(ids) != 5 or str(ids[0]) not in role_config["role_exp"] or any(not 0 <= value < (1 << 31) for value in ids):
@@ -612,6 +641,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if request_body or not save.get("has_role") or gender not in (0, 1):
             raise ValueError("角色性别查询参数或角色状态无效")
         body = encode_pb_field(1, 0, 1 if gender else 2)
+    elif opcode == 1305:
+        body = reset_campaign_attempts(save, request_body, role_config, now)
     elif opcode == 999905:
         if request_body:
             raise ValueError("时间查询不接受参数")
@@ -1123,6 +1154,8 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         body = prepare_recorded_response(opcode, bytes.fromhex(response["hex"]), save,
                                          request_body if response["seq"] != 0 else b"", step_counts, role_config, now)
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
+    if responses and responses[0]["opcode"] == 1305:
+        packets.append(pack_frame(1300, 0, bytes.fromhex(save["world_state"]["1300"])))
     cheer_update, cheer_power = cheer.growth(save, before, role_config) if not responses or responses[0]["opcode"] != 1004 else (b"", 0)
     if cheer_update:
         apply_sigil_update(save, cheer_update, cheer_power, role_config)
@@ -1148,7 +1181,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     if responses and responses[0]["opcode"] in (1120, 1365, *equip_evolve.OPCODES) and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     baptize_cost = responses and responses[0]["opcode"] in equip_baptize.OPCODES and save["world_state"]["1002"] != before["world_state"]["1002"]
-    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES):
+    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 1305, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:

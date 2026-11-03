@@ -769,6 +769,112 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(protocol.pb_get_varint(updated, 4), 1)
             self.assertEqual(protocol.pb_get_varint(updated, 3), protocol.pb_get_varint(point, 3))
 
+    def seed_exhausted_campaign_point(self):
+        if not self.save_path.exists():
+            self.complete_tutorial()
+        saved = json.loads(self.save_path.read_text())
+        saved["role_state"]["gold"] = 10000
+        saved["campaign_day"] = (self.now + 28800) // 86400
+        copies = bytes.fromhex(saved["world_state"]["1300"])
+        current = self.entity_records(copies, 1, 1)[42101]
+        point = self.entity_records(current, 7, 1)[1]
+        point = protocol.pb_set_varint(point, 4, self.role_config["copy"]["42101"]["1"]["challenge"])
+        point += protocol.encode_pb_field(99, 0, 77)
+        current = player.merge_pb_records(current, protocol.encode_pb_field(7, 2, point), {7: 1})
+        saved["world_state"]["1300"] = player.merge_pb_records(copies, protocol.encode_pb_field(1, 2, current), {1: 1}).hex()
+        self.save_path.write_text(json.dumps(saved))
+        with redirect_stdout(io.StringIO()):
+            return Session(self.tables, self.save_path, self.step_counts, self.role_config)
+
+    def test_campaign_manual_reset_native_scalars_charge_once_and_preserve_progress(self):
+        session = self.seed_exhausted_campaign_point()
+        before = copy.deepcopy(session.save)
+        body = protocol.encode_pb_field(2, 0, 1) + protocol.encode_pb_field(1, 0, 42101)
+        with redirect_stdout(io.StringIO()):
+            packets = session.handle(1305, 901, body)
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets[:3]], [1305, 1300, 1001])
+            self.assertEqual(session.handle(1305, 901, body), packets)
+            current = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+        self.assertEqual(current.save["role_state"]["gold"], before["role_state"]["gold"] - 50)
+        original = bytes.fromhex(before["world_state"]["1300"])
+        row = self.entity_records(original, 1, 1)[42101]
+        point = self.entity_records(row, 7, 1)[1]
+        expected_map = player.merge_pb_records(row, protocol.encode_pb_field(7, 2, protocol.pb_set_varint(point, 4, 0)), {7: 1})
+        expected = player.merge_pb_records(original, protocol.encode_pb_field(1, 2, expected_map), {1: 1})
+        self.assertEqual(bytes.fromhex(current.save["world_state"]["1300"]), expected)
+        for key in ("1002", "1012", "1107", "1200"):
+            self.assertEqual(current.save["world_state"][key], before["world_state"][key])
+        for key in ("level", "exp", "stamina", "energy", "coin"):
+            self.assertEqual(current.save["role_state"][key], before["role_state"][key])
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(struct.unpack(">IIII", current.handle(1305, 902, body)[0][:16])[2], 999999)
+
+    def test_campaign_manual_reset_bad_locked_and_unmatched_comb_requests_are_atomic(self):
+        session = self.seed_exhausted_campaign_point()
+        valid = protocol.encode_pb_field(1, 0, 42101) + protocol.encode_pb_field(2, 0, 1)
+        bodies = (b"", b"\x08", recharge.ids([42101, 1]), valid + b"\x18\x01", valid + b"\x10\x01",
+                  protocol.encode_pb_field(1, 0, 0) + b"\x10\x01",
+                  protocol.encode_pb_field(1, 0, 99999) + b"\x10\x01",
+                  protocol.encode_pb_field(1, 0, 42410) + b"\x10\x01",
+                  protocol.encode_pb_field(1, 0, 42101) + b"\x10\x7f")
+        with redirect_stdout(io.StringIO()):
+            for i, body in enumerate(bodies):
+                before, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                self.assertEqual(struct.unpack(">IIII", session.handle(1305, 910 + i, body)[0][:16])[2], 999999)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (before, disk))
+            comb = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 1305) + protocol.encode_pb_field(2, 2, valid))
+            self.assertEqual(struct.unpack(">IIII", session.handle(999900, 930, comb)[0][:16])[2], 999999)
+
+    def test_campaign_manual_reset_insufficient_gold_and_save_failure_never_charge(self):
+        body = protocol.encode_pb_field(1, 0, 42101) + protocol.encode_pb_field(2, 0, 1)
+        for failure in ("funds", "save", "rollback"):
+            session = self.seed_exhausted_campaign_point()
+            if failure == "funds":
+                session.save["role_state"]["gold"] = 49
+            if failure == "rollback":
+                self.clock.return_value = self.now - 86400
+            before, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with redirect_stdout(io.StringIO()):
+                if failure == "save":
+                    with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                        session.handle(1305, 940, body)
+                else:
+                    self.assertEqual(struct.unpack(">IIII", session.handle(1305, 940, body)[0][:16])[2], 999999)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (before, disk))
+            self.clock.return_value = self.now
+
+    def test_campaign_midnight_recovery_prevents_stale_reset_from_spending_gold(self):
+        session = self.seed_exhausted_campaign_point()
+        self.clock.return_value += 86400
+        body = protocol.encode_pb_field(1, 0, 42101) + protocol.encode_pb_field(2, 0, 1)
+        before, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(struct.unpack(">IIII", session.handle(1305, 950, body)[0][:16])[2], 999999)
+            self.assertEqual((session.save, self.save_path.read_bytes()), (before, disk))
+            session.handle(1300, 951, b"")
+        point = self.entity_records(self.entity_records(bytes.fromhex(session.save["world_state"]["1300"]), 1, 1)[42101], 7, 1)[1]
+        self.assertEqual(protocol.pb_get_varint(point, 4), 0)
+        self.assertEqual(session.save["role_state"]["gold"], before["role_state"]["gold"])
+
+    def test_campaign_manual_reset_covers_all_configured_maps_and_point_limits(self):
+        working = self.seed_exhausted_campaign_point().save
+        count = 0
+        for mid, points in self.role_config["copy"].items():
+            if mid not in self.role_config["map"]:
+                continue
+            for pid, row in points.items():
+                index = int(pid)
+                point = protocol.encode_pb_field(1, 0, index) + protocol.encode_pb_field(3, 0, 3) + protocol.encode_pb_field(4, 0, row["challenge"])
+                previous = protocol.encode_pb_field(7, 2, protocol.encode_pb_field(1, 0, index - 1) + protocol.encode_pb_field(3, 0, 3)) if index > 1 else b""
+                raw = protocol.encode_pb_field(1, 0, int(mid)) + previous + protocol.encode_pb_field(7, 2, point)
+                working["world_state"]["1300"] = protocol.encode_pb_field(1, 2, raw).hex()
+                working["role_state"]["gold"] = 10000
+                body = protocol.encode_pb_field(1, 0, int(mid)) + protocol.encode_pb_field(2, 0, index)
+                self.assertEqual(player.reset_campaign_attempts(working, body, self.role_config, self.now), b"\x08\x01")
+                self.assertEqual(working["role_state"]["gold"], 10000 - 5 * row["challenge"])
+                count += 1
+        self.assertEqual(count, 3061)
+
     def test_welfare_growth_order_is_distinct_from_gold_recharge_and_counts_real_accounts(self):
         self.seed_welfare_account()
         old_order = self.recharge_order(5)

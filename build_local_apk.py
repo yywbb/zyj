@@ -2040,6 +2040,7 @@ end"""
     if error.ids[1] == 1140 or error.ids[1] == 1141 then
         gamedata.ext.localSigilBusy = false
     end
+    if gamedata and gamedata.ext and error.ids[1] == 1305 then gamedata.ext.localCopyResetBusy = nil end
     if error.ids[1] == 1118 or error.ids[1] == 1119 or error.ids[1] == 1210 then
         gamedata.ext.localTreasureBusy = false
     end
@@ -2828,6 +2829,23 @@ end
     t.localAutoStamina = gamedata.cache.role.stamina
 ''')
     code = code[:start] + attack + code[end:]
+    marker = "function UICopyResetKillCallback(uireq)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata.ext.localCopyResetBusy then
+        return 0,503,{type=503,msg="副本次数正在结算，请等待回复；超时请重进游戏"}
+    end
+''')
+    marker = "    return 1, 1305, CopyAttack:SerializeToString()"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    gamedata.ext.localCopyResetBusy = true\n" + marker)
+    marker = "function NetCopyResetKillCallback(fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    gamedata.ext.localCopyResetBusy = nil\n")
+    start = code.index(marker)
+    end = code.index("function UICopyClearTimerCallback(", start)
+    block = code[start:end]
+    assert block.count("result_pb.Result()") == 1
+    code = code[:start] + block.replace("result_pb.Result()", "copyAll3StarAwardResultPb.Result()") + code[end:]
     patched["assets/scripts/GameCopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("UICopy").decode("utf-8").replace("\r\n", "\n")
@@ -2836,6 +2854,11 @@ end
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "auto_copy.lua"), encoding="utf-8") as source:
         auto_copy = source.read()
     code = code.replace(marker, auto_copy + "\n" + marker + "    if AutoCopyHandle(t) then return end\n")
+    start = code.index("function UICopyResetKill(t)\n")
+    end = code.index("\nend", start)
+    marker = "    UIRequest({type = 1001})\n"
+    assert code[start:end].count(marker.rstrip("\n")) == 1
+    code = code[:start] + code[start:end].replace(marker.rstrip("\n"), "") + code[end:]
     patched["assets/scripts/UICopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("Layer_copy_list").decode("utf-8").replace("\r\n", "\n")

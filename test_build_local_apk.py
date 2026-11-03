@@ -447,6 +447,53 @@ class LanBuildTests(unittest.TestCase):
             end
         ''')
 
+    def test_campaign_reset_native_target_cost_and_error_lock_are_not_duplicated(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("副本重置原生回调验证需 lupa.lua51")
+        lua = LuaRuntime()
+        lua.execute('''
+            print,cclog,printT,printf=function() end,function() end,function() end,function() end
+            for _,name in ipairs({'copies_pb','copyall3starreward_pb','ids_pb','somethings_pb','PickBattleResultReport',
+                                  'battleresult_pb','error_pb','params_pb'}) do
+                package.preload[name]=function() return {} end
+            end
+            package.preload.logError=function() return {errorMessage={}} end
+            package.preload.copyattack_pb=function() return {CopyAttack=function() return {
+                SerializeToString=function(self) return self.map..":"..self.point end} end} end
+            package.preload.result_pb=function() return {Result=function() return {ParseFromString=function() end} end} end
+            table.copy=function(t) local r={} for k,v in pairs(t) do r[k]=type(v)=='table' and table.copy(v) or v end return r end
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            gamedata={cache={role={gold=1000},copy={[42101]={id=42101,pa1=3,pa2=3,pa3=3,
+                points={[1]={id=1,star=3,kill=10,move=0},[2]={id=2,star=3,kill=10,move=0}}}}},ext={},
+                config={copy={['42101']={['1']={challenge=10},['2']={challenge=10}}},
+                        map={['42101']={section=40001,star1=3,star2=3,star3=6}},section={['40001']={name='test'}}}}
+            function gamedata:updateRoleGold(delta) self.cache.role.gold=self.cache.role.gold+delta end
+            function initPb(_,fd) return {ids=fd.ids} end
+        ''')
+        scripts = self.client_scripts()
+        lua.execute(scripts["assets/scripts/GameCopy.so"])
+        lua.execute(scripts["assets/common_lua/GameErrorMessage.so"])
+        lua.execute('''
+            local remote,opcode,body=UICopyResetKillCallback({map=42101,point=1})
+            assert(remote==1 and opcode==1305 and body=='42101:1')
+            assert(UICopyResetKillCallback({map=42101,point=2})==0)
+            assert(gamedata.ext.copyattackResetKill.point==1)
+            local result=NetCopyResetKillCallback({rbuf=''})
+            assert(result.type==1305 and gamedata.cache.role.gold==950)
+            assert(gamedata.cache.copy[42101].points[1].kill==0 and gamedata.cache.copy[42101].points[2].kill==10)
+            assert(not gamedata.ext.localCopyResetBusy)
+            assert(UICopyResetKillCallback({map=42101,point=2})==1)
+            NetErrorMessageCallback9({ids={1306,0}})
+            assert(gamedata.ext.localCopyResetBusy)
+            NetErrorMessageCallback9({ids={1305,0}})
+            assert(not gamedata.ext.localCopyResetBusy and gamedata.cache.role.gold==950)
+        ''')
+        start = scripts["assets/scripts/UICopy.so"].index("function UICopyResetKill(t)")
+        block = scripts["assets/scripts/UICopy.so"][start:].split("\nend", 1)[0]
+        self.assertNotIn("UIRequest({type = 1001})", block)
+
     def test_auto_copy_is_opt_in_sequential_and_stops_safely(self):
         try:
             from lupa.lua51 import LuaRuntime
