@@ -7,7 +7,7 @@ import random
 import re
 import secrets
 
-from . import activities, battle, formation, guild, pets, storage
+from . import activities, battle, cheer, formation, guild, pets, storage
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -398,7 +398,8 @@ def prepare(opcode, body, state, saves, account, config, now, cursors, online, g
             attacker, defender = copy.deepcopy(save), copy.deepcopy(saves[peer])
             attack, _ = battle.rosters(attacker, point, config)
             defense, _ = battle.rosters(defender, point, config)
-            report = battle.simulate(attack, defense, config, random.getrandbits(64), attack_pet=pets.combat(attacker, config), defense_pet=pets.combat(defender, config))
+            report = battle.simulate(attack, defense, config, random.getrandbits(64), attack_pet=pets.combat(attacker, config), defense_pet=pets.combat(defender, config),
+                                     attack_cheer=cheer.combat(attacker, config), defense_cheer=cheer.combat(defender, config))
             report["meta"]["attack"]["n"], report["meta"]["defense"]["n"] = save["role_name"], saves[peer]["role_name"]
             reply = battle_result(report)
     elif opcode == 3002:

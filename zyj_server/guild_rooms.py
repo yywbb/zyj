@@ -93,7 +93,7 @@ def settle(room, config, now, saves, online):
 
 
 def gain_exp(save, role_exp, general_exp, config):
-    from . import battle, favorite, formation, player, training
+    from . import battle, cheer, favorite, formation, player, training
 
     state = save["role_state"]
     previous = state["level"]
@@ -108,11 +108,11 @@ def gain_exp(save, role_exp, general_exp, config):
             player.change_item_count(save, cid, config["role_exp"][str(reached)][name], config)
     world = bytes.fromhex(save["world_state"]["1002"])
     generals, slots, equips = formation.records(world, 1, 2), formation.records(world, 4, 2), formation.records(world, 2, 1)
-    members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
+    members = cheer.members(save, config)
     update, delta = b"", 0
     maximum = min(level * int(config["global_kv"]["general_level"]["value"]), max(map(int, config["general_exp"])))
     for iid in sorted(i for i in slots if i):
-        raw, increase, _ = training.grow_general(generals[iid], general_exp, slots[iid], members, equips, config, maximum)
+        raw, increase, _ = training.grow_general(generals[iid], general_exp, slots[iid], members, equips, config, maximum, cheer_tiers=cheer.tiers(save, config))
         update += encode_pb_field(1, 2, raw)
         delta += increase
     player.apply_sigil_update(save, update, delta, config)

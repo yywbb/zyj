@@ -6,7 +6,7 @@ import struct
 import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import friends, guild_chat
+from . import cheer, friends, guild_chat
 from . import achievements, collection
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
@@ -75,6 +75,7 @@ class Session:
             timebag.get_state(self.save, gift_id)
         if self.save.get("has_role"):
             player.get_role_state(self.save, role_config)
+        cheer.assigned(self.save, role_config)
         player.validate_stamina_clock(self.save)
 
         sections = guide.get_guide_sections(self.save, step_counts)
@@ -281,6 +282,8 @@ class Session:
         watch_comb = False
         pet_comb = False
         if opcode == 999900:
+            if 1004 in get_comb_ids(body):
+                return unavailable_response(opcode, seq, body, "助阵操作请单独发起")
             if any(mid in (*friends.MUTATIONS, 1020, 1022, 2305) for mid in get_comb_ids(body)):
                 return unavailable_response(opcode, seq, body, "好友操作请从对应页面单独发起")
             # 仅开放下列原生引导的完整二消息模板；保留顺序及额外字段校验。
@@ -315,7 +318,7 @@ class Session:
 
         local_development = (opcode in development.MUTATIONS and (opcode != 1057
                              or self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2))
-        if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1005, 1007, 1009, 1130, 2038, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1004, 1005, 1007, 1009, 1130, 2038, *welfare.CLAIMS,
                                   *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS, *activity_copy.BATTLES, *arena.MUTATIONS,
                                   *watchstar.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,

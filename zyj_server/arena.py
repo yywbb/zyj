@@ -4,7 +4,7 @@ from fractions import Fraction
 import json
 import random
 
-from . import activities, battle, pets, recharge
+from . import activities, battle, cheer, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -171,7 +171,7 @@ def prepare(opcode, save, body, config, now, seed):
         target = fields[0][2]
         row = config["athletics_copy2"][str(target)]
     attack, defense = rosters(save, row, config)
-    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config))
+    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
     report["meta"]["attack"]["n"] = save["role_name"]
     report["meta"]["defense"]["n"] = row.get("name", "NPC牛魔王")
     state["used"] += 1

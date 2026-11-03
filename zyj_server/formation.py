@@ -4,7 +4,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import battle, equip_baptize, godstone, magic, pets, sigil, treasure_refine
+from . import battle, cheer, equip_baptize, godstone, magic, pets, sigil, treasure_refine
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -12,12 +12,14 @@ def records(body, field, key):
     return {pb_get_varint(v, key): v for n, w, v in iter_pb_fields(body) if n == field and w == 2}
 
 
-def bonuses(raw, slot, members, equips, config):
+def bonuses(raw, slot, members, equips, config, *, cheer_tiers=()):
     row = config["general"][str(pb_get_varint(raw, 1))]
     level = pb_get_varint(raw, 3)
     values = {field: 0 for field in range(6, 17)}
     if slot:
         values.update({field: int(value) for field, value in godstone.attributes(slot, config).items()})
+        for field, value in cheer.attributes(raw, cheer_tiers, config).items():
+            values[field] += value
     equipped, relations = set(), b""
     for field in range(4, 10):
         iid = pb_get_varint(slot, field)
@@ -70,7 +72,41 @@ def change(save, opcode, body, config):
         if not 1 <= index <= min(7, maximum):
             raise ValueError("阵位不存在或尚未解锁")
 
-    if opcode == 1005:
+    if opcode == 1004:
+        cheer.assigned(save, config)
+        cheers = records(world, 5, 1)
+        fields = list(iter_pb_fields(body))
+        values = {n: v for n, w, v in fields}
+        if (len(fields) != 2 or set(values) not in ({1, 2}, {1, 3})
+                or any(w != 0 or not 0 <= v < (1 << 31) for n, w, v in fields)):
+            raise ValueError("助阵需要位置及伙伴编号或另一助阵位置")
+        maximum = config["role_exp"][str(save["role_state"]["level"])]["cheernum"]
+        dest = values[1]
+        if not 1 <= dest <= min(8, maximum) or 2 in values and not 1 <= values[2] <= min(8, maximum):
+            raise ValueError("助阵位置尚未解锁")
+        previous = dict(cheers)
+        if 2 in values:
+            origin = values[2]
+            cheers[dest] = pb_set_varint(previous.get(origin, b""), 1, dest)
+            cheers[origin] = pb_set_varint(previous.get(dest, b""), 1, origin)
+        else:
+            iid = values[3]
+            if iid:
+                if iid not in generals or iid in {pb_get_varint(v, 2) for v in slots.values()}:
+                    raise ValueError("伙伴不存在或正在主阵中，请先下阵")
+                if any(iid in team[:7] for team in save.get("single_boss_state", {}).get("teams", {}).values() if team):
+                    raise ValueError("请先将伙伴从王的男人专用阵容撤下")
+            origin = next((i for i, v in previous.items() if iid and pb_get_varint(v, 2) == iid), None)
+            if origin is not None:
+                cheers[dest] = pb_set_varint(previous[origin], 1, dest)
+                cheers[origin] = pb_set_varint(previous.get(dest, b""), 1, origin)
+            else:
+                cheers[dest] = pb_set_varint(pb_set_varint(previous.get(dest, b""), 1, dest), 2, iid)
+        changed = b"".join(encode_pb_field(5, 2, pb_set_varint(v, 2, pb_get_varint(v, 2) or 0)) for _, v in sorted(cheers.items()))
+        candidate = {**save, "world_state": {**save["world_state"], "1002": (b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world) if n != 5) + changed).hex()}}
+        cheer.assigned(candidate, config)
+        return apply_slots(save, slots, config, cheers=cheers) + changed
+    elif opcode == 1005:
         fields = list(iter_pb_fields(body))
         values = {n: v for n, w, v in fields}
         if (len(fields) != 2 or set(values) != {1, 2}
@@ -182,7 +218,7 @@ def strengthen_stones(save, body, config):
     return apply_slots(save, slots, config), [(20223, cost)]
 
 
-def apply_slots(save, slots, config):
+def apply_slots(save, slots, config, *, cheers=None):
     world = bytes.fromhex(save["world_state"]["1002"])
     generals, old, equips = records(world, 1, 2), records(world, 4, 1), records(world, 2, 1)
     before = {pb_get_varint(v, 2): v for v in old.values() if pb_get_varint(v, 2)}
@@ -192,8 +228,17 @@ def apply_slots(save, slots, config):
         raise ValueError("主角必须留在阵中")
     if len(after) != sum(bool(pb_get_varint(v, 2)) for v in slots.values()):
         raise ValueError("武将不能重复上阵")
-    old_members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in before}
-    new_members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in after}
+    old_cheers = records(world, 5, 1)
+    cheers = old_cheers if cheers is None else cheers
+    old_iids = {pb_get_varint(v, 2) for v in old_cheers.values()} - {None, 0}
+    new_iids = {pb_get_varint(v, 2) for v in cheers.values()} - {None, 0}
+    if ({config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in after}
+            & {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in new_iids}):
+        raise ValueError("同源伙伴不能同时上阵和助阵，请先撤下")
+    old_members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in before.keys() | old_iids}
+    new_members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in after.keys() | new_iids}
+    old_tiers = cheer.tiers(save, config)
+    new_tiers = cheer.tiers(save, config, generals=[generals[i] for i in new_iids])
     update = b""
     pet_bonus = pets.attributes(save, config)
     sigil_bonus, sigil_flat = sigil.bonuses(save, config)
@@ -201,8 +246,8 @@ def apply_slots(save, slots, config):
     magic_bonus, magic_flat = magic.bonuses(save, config)
     for iid in sorted(before.keys() | after.keys()):
         raw = generals[iid]
-        previous, _ = bonuses(raw, before.get(iid, b""), old_members, equips, config)
-        current, relations = bonuses(raw, after.get(iid, b""), new_members, equips, config)
+        previous, _ = bonuses(raw, before.get(iid, b""), old_members, equips, config, cheer_tiers=old_tiers)
+        current, relations = bonuses(raw, after.get(iid, b""), new_members, equips, config, cheer_tiers=new_tiers)
         for field, value in pet_bonus.items():
             previous[field] += int(value) if iid in before else 0
             current[field] += int(value) if iid in after else 0

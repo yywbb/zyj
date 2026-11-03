@@ -66,7 +66,7 @@ def battle_result(report, reward=b""):
 
 
 def prepare(opcode, body, state, gid, save, saves, viewer, config, now):
-    from . import battle, guild, guild_war, pets
+    from . import battle, cheer, guild, guild_war, pets
     from .guild_games import award, pairs, param
 
     guild.request_ids(body, 0)
@@ -126,7 +126,7 @@ def prepare(opcode, body, state, gid, save, saves, viewer, config, now):
                 skill=setting["skillid"], skilllevel=0, initial_ap=4, npc=True, boss=True,
                 adddmgpct=Fraction(str(setting["adddmgpct-correct"])) / 100)
     seed = secrets.randbits(64)
-    report = battle.simulate(attack, {2: unit}, combat, seed, attack_pet=pets.combat(save, config))
+    report = battle.simulate(attack, {2: unit}, combat, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
     report["meta"]["attack"]["n"] = save["role_name"]
     report["meta"]["defense"]["n"] = setting["name"]
     remaining = sum(v["h"] for v in report["endmeta"]["defense"].values())

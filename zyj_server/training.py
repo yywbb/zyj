@@ -3,7 +3,7 @@
 import random
 from fractions import Fraction
 
-from . import battle, equip_baptize, formation, qiankun, treasure_refine
+from . import battle, cheer, equip_baptize, formation, qiankun, treasure_refine
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 
@@ -12,12 +12,12 @@ EXP_PROPS = (20196, 20197, 20198, 20199)
 TREASURE_PROPS = {"horse": (26407, 26408, 26409, 26413), "treasure": (26410, 26411, 26412, 26414)}
 
 
-def grow_general(raw, gained, slot, members, equips, config, maximum=None):
+def grow_general(raw, gained, slot, members, equips, config, maximum=None, *, cheer_tiers=()):
     unit = {name: pb_get_varint(raw, field) or 0 for name, field in battle.GENERAL_FIELDS.items()}
     values, increase, up = battle.grown_general(unit, gained, config, maximum)
     if up:
-        previous, _ = formation.bonuses(raw, slot, members, equips, config)
-        current, _ = formation.bonuses(pb_set_varint(raw, 3, values[3]), slot, members, equips, config)
+        previous, _ = formation.bonuses(raw, slot, members, equips, config, cheer_tiers=cheer_tiers)
+        current, _ = formation.bonuses(pb_set_varint(raw, 3, values[3]), slot, members, equips, config, cheer_tiers=cheer_tiers)
         for field in range(6, 17):
             delta = current[field] - previous[field]
             if not delta:
@@ -52,9 +52,8 @@ def use_exp(save, body, config):
     raw = generals[iid]
     row = config["general"][str(pb_get_varint(raw, 1))]
     if (not row["battle"] or any(pb_get_varint(raw, n) for n in range(21, 41))
-            or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if n == 41 and w == 2)
-            or iid in formation.records(world, 5, 2)):
-        raise ValueError("暂不支持此武将的高级或助阵成长")
+            or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if n == 41 and w == 2)):
+        raise ValueError("暂不支持此武将的高级成长")
     level, experience = pb_get_varint(raw, 3), pb_get_varint(raw, 5) or 0
     maximum = min(save["role_state"]["level"] * int(config["global_kv"]["general_level"]["value"]),
                   max(map(int, config["general_exp"])))
@@ -66,8 +65,8 @@ def use_exp(save, body, config):
     # 客户端允许最后一颗丹溢出经验，禁止满级后继续吞丹。
     if gained - max(amount for amount, count in zip(amounts, counts) if count) >= needed:
         raise ValueError("经验丹数量超过当前等级上限所需")
-    members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
-    raw, increase, _ = grow_general(raw, gained, slots.get(iid, b""), members, equips, config, maximum)
+    members = cheer.members(save, config)
+    raw, increase, _ = grow_general(raw, gained, slots.get(iid, b""), members, equips, config, maximum, cheer_tiers=cheer.tiers(save, config))
     costs = [(cid, count) for cid, count in zip(EXP_PROPS, counts) if count]
     return encode_pb_field(8, 2, raw), costs, increase if iid in slots else 0
 
@@ -160,7 +159,7 @@ def equip_differences(save, equips, changes, config):
     generals, slots = formation.records(world, 1, 2), formation.records(world, 4, 2)
     updated = dict(equips)
     updated.update(changes)
-    members = {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in slots if i}
+    members = cheer.members(save, config)
     reward = b""
     power_delta = 0
     for iid, slot in slots.items():

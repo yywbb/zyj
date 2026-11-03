@@ -5,7 +5,7 @@ from fractions import Fraction
 import json
 import random
 
-from . import battle, pets, recharge, recruit
+from . import battle, cheer, pets, recharge, recruit
 from .protocol import encode_pb_field, iter_pb_fields
 
 QUERIES = (2120, 2124)
@@ -175,7 +175,7 @@ def roll(state, save, config, rng, remote=0):
             raise ValueError("一个骰子不能返回多份遭遇战报")
         kind, seed = ENEMIES[row["type"]], rng.getrandbits(64)
         attack, defense = rosters(save, kind, config)
-        report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config))
+        report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
         report["meta"]["attack"]["n"] = save["role_name"]
         report["meta"]["defense"]["n"] = row["desc"]
         if report["result"]:

@@ -1416,6 +1416,97 @@ end''' + code[end:]
         put(name, code)
 
 
+def patch_cheer_scripts(patched):
+    def load(name):
+        path = "assets/scripts/" + name + ".so"
+        if path not in patched:
+            return read_script(name).decode("utf-8").replace("\r\n", "\n")
+        raw = xxtea_decrypt(patched[path], XXTEA_KEY)
+        return raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+
+    def put(name, code):
+        patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = load("gamedata")
+    marker = "        self.cache.cheers[v.sid] = self:cheerData(v)"
+    assert code.count(marker) == 1
+    put("gamedata", code.replace(marker, "        self.cache.cheers[v.sid] = v.general and v.general > 0 and self:cheerData(v) or nil"))
+
+    code = load("GameSlots")
+    start = code.index("function NetSlotsAllInfoCallBack(fd)\n")
+    end = code.index("\nfunction ", start + 1)
+    block = code[start:end]
+    marker = "    gamedata:SlotInfoProcess(info)\n"
+    assert block.count(marker) == 1
+    code = code[:start] + block.replace(marker, "    gamedata.cache.cheers = {}\n" + marker) + code[end:]
+    start = code.index("function UIChangeCheerCallBack(uireq)\n")
+    end = code.index("\nfunction ", start + 1)
+    block = code[start:end]
+    assert block.count("if uireq.iid then") == 1
+    assert block.count("GeneralChangePos:SerializeToString()") == 1
+    block = block.replace("if uireq.iid then", "if uireq.iid and uireq.iid ~= 0 then")
+    # 撤下显式携带IID=0，不能依赖可选字段的默认值。
+    block = block.replace("GeneralChangePos:SerializeToString()", 'GeneralChangePos:SerializeToString() .. (uireq.iid == 0 and string.char(24,0) or "")')
+    code = code[:start] + block + code[end:]
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "cheer_network.lua"), encoding="utf-8") as stream:
+        put("GameSlots", code + "\n" + stream.read())
+
+    code = load("UISlots")
+    marker = '    UIRequest({type = 10322,param = {"cheer"}})'
+    assert code.count(marker) == 1
+    put("UISlots", code.replace(marker, "    UIRequest({type = 10021})"))
+
+    code = load("window_generalInfo_role")
+    marker = "function generalInfo.reload(self,data,callback)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localCheerGeneration = (self.localCheerGeneration or 0) + 1\n")
+    marker = "function generalInfo.close(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    self.localCheerGeneration = (self.localCheerGeneration or 0) + 1\n")
+    marker = "function generalInfo.setPage_info(self)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    local cheerGeneration = self.localCheerGeneration\n    local cheerIID, cheerSID = self.data.general.iid, self.cheersid\n")
+    marker = "            local cheersid = self.cheersid or 1\n            local callback = function(selectedData)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "                if not self.root or self.localCheerGeneration ~= cheerGeneration or self.data.general.iid ~= cheerIID or self.cheersid ~= cheerSID then return end\n")
+    marker = "    self.infoItems.doButton4:addHandleOfControlEvent(function()\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''        if self.opt == 3 then
+            if not self.root or self.localCheerGeneration ~= cheerGeneration or self.data.general.iid ~= cheerIID or self.cheersid ~= cheerSID or not GameScene:checkopenlevelbyId(135) then return end
+            GameScene:shiftLayer("generalup","up",{cid=self.data.general.cid,page="up",sid=self.sid or 1})
+            return
+        end
+''')
+    marker = "    self.infoItems.doButton7:addHandleOfControlEvent(function()\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''        if self.opt == 3 then
+            if not self.root or self.localCheerGeneration ~= cheerGeneration or self.data.general.iid ~= cheerIID or self.cheersid ~= cheerSID then return end
+            UIRequest({type=1004,pos1=cheerSID,iid=0})
+            self.callback = nil
+            gameWindows:closeWindowDirect("generalInfoRole")
+            return
+        end
+''')
+    marker = "    self:getMessage(generalConfig)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    if self.opt == 3 then
+        ui.setLabelString(self.infoItems.doLab4,"升 级",19)
+        ui.setLabelString(self.infoItems.doLab7,"撤 下",19)
+        for _,i in ipairs({4,7}) do
+            self.infoItems["doButton"..i]:setEnabled(true)
+            ui.removeGray("CCControlButton",self.infoItems["doButton"..i])
+            ui.removeGray("CCLabelTTF",self.infoItems["doLab"..i])
+        end
+        for _,i in ipairs({5,6}) do
+            self.infoItems["doButton"..i]:setEnabled(false)
+            ui.addGray("CCControlButton",self.infoItems["doButton"..i])
+            ui.addGray("CCLabelTTF",self.infoItems["doLab"..i])
+        end
+    end
+''' + marker)
+    put("window_generalInfo_role", code)
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -1527,6 +1618,9 @@ end"""
     end
     if gamedata and gamedata.ext and gamedata.ext.localMagicBusy and gamedata.ext.localMagicBusy.opcode == error.ids[1] then
         gamedata.ext.localMagicBusy = nil
+    end
+    if gamedata and gamedata.ext and gamedata.ext.localFormationBusy and gamedata.ext.localFormationBusy.opcode == error.ids[1] then
+        gamedata.ext.localFormationBusy = nil
     end
 ''')
     patched["assets/common_lua/GameErrorMessage.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
@@ -2542,6 +2636,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patched["assets/pb/fosterconfirm_pb.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     patch_guild_gameplay_scripts(patched)
+    patch_cheer_scripts(patched)
     return patched
 
 
