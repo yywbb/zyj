@@ -943,7 +943,7 @@ def patch_treasure_scripts():
         marker = f"function UI{name}CallBack("
         start = code.index(marker)
         end = code.index("\n", start)
-        code = code[:end + 1] + '''    if gamedata.ext.localTreasureBusy then
+        code = code[:end + 1] + '''    if gamedata.ext.localTreasureBusy or gamedata.ext.localEquipGrowthBusy then
         return 0,503,{type=503,msg="宝物正在结算，请等待回复；超时请重进游戏"}
     end
 ''' + code[end + 1:]
@@ -1910,7 +1910,19 @@ def patch_equip_evolve_scripts(patched):
                 code = code[:start] + block + code[end:]
         put(name, code)
 
+    code = load("Layer_treasureup")
+    for method in ("init", "ReloadData", "shiftPage", "clear"):
+        start = code.index(f"function treasureup.{method}(self")
+        end = code.index("\n", start)
+        code = code[:end+1] + "    self.localEquipGrowthGeneration = (self.localEquipGrowthGeneration or 0) + 1\n" + code[end+1:]
+    put("Layer_treasureup", code)
+
     code = load("UIProps")
+    marker = '''    elseif t.order == 34401 then
+        if GameScene.layers["treasureup"].show then'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    elseif t.order == 34401 then
+        if LocalEquipGrowthPage(t.growthView,"treasureup") then''')
     for order, next_order in ((14002, 14003), (14003, 14004)):
         start = code.index(f"    elseif t.order == {order} then")
         end = code.index(f"    elseif t.order == {next_order} then", start)

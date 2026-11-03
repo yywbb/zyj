@@ -4,12 +4,14 @@ require("GameEquipStrengthen")
 require("GameEquipRefine")
 require("GameSlotChangeEquip")
 require("GameQiankunlu")
+require("GameTreasureUp")
 
 local function price(req,opcode)
     local item = gamedata.cache.equips[tonumber(req.iid)]
     if not item then return end
-    if opcode == 1123 then
-        local row = gamedata.config.equip_star[tostring(item.level3+1)]
+    if opcode == 1123 or opcode == 1127 then
+        local rows = opcode == 1127 and gamedata.config.treasure2_star or gamedata.config.equip_star
+        local row = rows[tostring(item.level3+1)]
         return row and gamedata.getIDandNUMs(row["cost_"..item.quality])
     end
     local cid,level = item.cid,item.level2+1
@@ -26,6 +28,7 @@ end
 for _,entry in ipairs({
     {1122,"UIEquipStageUpCallBack","NetEquipStageUpCallBack"},
     {1123,"UIEquipStarUpCallBack","NetEquipStarUpCallBack"},
+    {1127,"UITreasureStarUpCallBack","NetTreasureStarUpCallBack"},
     {1101,"UIEquipStrengthenCallBack","NetEquipStrengthenCallBack"},
     {1109,"UIQuickEquipStrengthenCallBack","NetQuickEquipStrengthenCallBack"},
     {1120,"UIEquipBaptizePreviewCallBack","NetEquipBaptizePreviewCallBack"},
@@ -38,11 +41,11 @@ for _,entry in ipairs({
 }) do
     local opcode,send,receive = entry[1],_G[entry[2]],_G[entry[3]]
     _G[entry[2]] = function(req)
-        if gamedata.ext.localEquipGrowthBusy or gamedata.ext.localBaptizeBusy or gamedata.ext.localFormationBusy or gamedata.ext.localSoulBusy then
+        if gamedata.ext.localEquipGrowthBusy or gamedata.ext.localTreasureBusy or gamedata.ext.localBaptizeBusy or gamedata.ext.localFormationBusy or gamedata.ext.localSoulBusy then
             return 0,503,{type=503,msg="装备或阵容正在结算，请等待回复；超时请重进游戏"}
         end
         local rows
-        if opcode == 1122 or opcode == 1123 then
+        if opcode == 1122 or opcode == 1123 or opcode == 1127 then
             rows = price(req,opcode)
             if not rows or not next(rows) then return 0,503,{type=503,msg="装备没有可用的下一阶，请重新选择"} end
             req.props = rows
@@ -59,7 +62,7 @@ for _,entry in ipairs({
         if req and req.opcode == opcode then
             if req.rows then
                 for _,row in ipairs(req.rows) do
-                    if row.cid == 1000 or gamedata.config.props[tostring(row.cid)] then
+                    if (opcode ~= 1127 or row.cid == 1000) and (row.cid == 1000 or gamedata.config.props[tostring(row.cid)]) then
                         gamedata:updateStaff({cid=row.cid,num=-row.num})
                     end
                 end

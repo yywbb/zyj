@@ -6,8 +6,8 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul
-from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
+from . import equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine
+from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
@@ -131,6 +131,10 @@ def rosters(save, point, config):
         for name, field in equip_evolve.FIELDS.items():
             if field >= 10:
                 unit["pet_rates"][name] = unit["pet_rates"].get(name, 0) + equipment_stats[field] - int(equipment_stats[field])
+        treasure_passives = [sid for field in (8, 9) if pb_get_varint(slot, field)
+                             for sid in treasure_refine.star_skills(parse_ids_pb(equips[pb_get_varint(slot, field)]), config)]
+        if treasure_passives:
+            unit["treasure_passives"] = treasure_passives
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")
@@ -228,7 +232,7 @@ def general_experience(unit, gained, config, maximum=None):
 def _prepare_teams(teams, config):
     dynamic = {*range(9100001, 9100008), 9000001, 9000008, 9000015, 9000020, 9000023, 9000024, 9000025,
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
-               9000038, 9000039, 9000040, 9000400, 9000412, 9000413, 9000483, 9000489,
+               9000037, 9000038, 9000039, 9000040, 9000400, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
                9000496, 9000501, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803}
     flat_defense = {9000047, 9000049, 9000072, 9000078, 9000082}
     stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
@@ -258,6 +262,12 @@ def _prepare_teams(teams, config):
                           or skill["effect"] not in ("once", "dizzy", "dot", "firing", "suck", "promote", "weaken")):
                 raise ValueError("尚不支持该武将的技能效果")
             ids = {general.get(f"break{i}", 0) for i in range(1, unit["advance"] + 1)} - {0}
+            extra = unit.get("treasure_passives", ())
+            if extra:
+                allowed = {row[kind + "_activated"] for row in config["treasure2_star"].values() for kind in ("horse", "treasure")}
+                if not isinstance(extra, (list, tuple)) or len(extra) > 12 or any(type(pid) is not int or pid not in allowed or pid == 0 for pid in extra):
+                    raise ValueError("宝物升星战斗被动无效")
+                ids.update(extra)
             rows = [config["breakskill"][str(pid)] for pid in sorted(ids)]
             initial_ap = unit.get("initial_ap", 2)
             if type(initial_ap) is not int or not 0 <= initial_ap <= 10:
@@ -544,6 +554,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             multiplier *= 1 + effect(actor, 9000029)
         if target["hp"] < actor["hp"]:
             multiplier *= 1 + effect(actor, 9000032)
+        if target["hp"] > actor["hp"]:
+            multiplier *= 1 + effect(actor, 9000037)
+        multiplier *= 1 + effect(actor, 9000429) * (target["hp"] * 10 // target["maxhp"])
+        multiplier *= 1 + effect(actor, 9000430) * ((target["maxhp"] - target["hp"]) * 10 // target["maxhp"])
         if target["ap"] <= 2:
             multiplier *= 1 + effect(actor, 9000036)
         if target["firing"]:

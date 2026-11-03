@@ -207,6 +207,7 @@ def prepare(opcode, save, body, config):
                     raise ValueError("装备重生基线无效")
                 gets.update(dict(receipt["costs"]))
                 fee = (config["renascence"][str(item[2])]["treasurerecost"] + config["renascence"][str(item[3] if len(item) > 3 else 0)]["treasurerefinecost"]
+                       + config["renascence"][str(item[11] if len(item) > 11 else 0)]["treasurestarcost"]
                        if row["type"] in ("horse", "treasure") else equip_evolve.rebirth_fee(item, config))
                 costs.append((1001, fee))
                 updates += encode_pb_field(6, 2, bytes.fromhex(receipt["before"]))

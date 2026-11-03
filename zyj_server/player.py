@@ -54,7 +54,7 @@ def load_role_config(config_path):
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
-                             "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "build",
+                              "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "treasure2_star", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold",
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
                              "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward",
@@ -1032,9 +1032,9 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
                 raw = next(v for n, w, v in iter_pb_fields(body) if (n, w) == (8, 2))
                 before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
                 qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config, save))
-            elif opcode in (1118, 1119, 1210):
-                if opcode == 1119:
-                    body, costs, power_delta = treasure_refine.prepare(save, request_body, role_config)
+            elif opcode in (1118, 1119, 1127, 1210):
+                if opcode in treasure_refine.OPCODES:
+                    body, costs, power_delta = treasure_refine.prepare(save, request_body, role_config, opcode)
                 else:
                     body, costs, power_delta = training.strengthen_treasure(save, opcode, request_body, role_config)
                 for cid, count in costs:

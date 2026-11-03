@@ -249,7 +249,7 @@ class TreasureRefineTests(unittest.TestCase):
         self.refine(target)
         self.assertIn((50, 2, b"preserve"), list(protocol.iter_pb_fields(self.equips()[target])))
         baseline = copy.deepcopy(self.session.save)
-        for field, value in ((3, 31), (5, 1), (11, 1), (12, 1)):
+        for field, value in ((3, 31), (5, 1), (11, 16), (12, 1)):
             self.session.save = copy.deepcopy(baseline)
             item = self.item(target) + [0]*8
             item[field] = value

@@ -243,8 +243,8 @@ def strengthen_treasure(save, opcode, body, config):
             if iid == target or iid in occupied:
                 raise ValueError("不能吞噬目标自身或已穿戴的宝物")
             food, food_row = item(iid)
-            if food_row["type"] != row["type"] or food[3]:
-                raise ValueError("只能吞噬同类且未精炼的宝物或坐骑")
+            if food_row["type"] != row["type"] or food[3] or any(food[5:]):
+                raise ValueError("只能吞噬同类且未精炼、未升星的宝物或坐骑")
             # 与原生预览一致：基础经验加已完成等级经验，不额外计入材料的剩余经验。
             amounts.append(food_row["exp"] + sum(config["treasure2_strengthen"][str(lv)][f'quality{food_row["quality"]}']
                                                 for lv in range(1, food[2] + 1)))
