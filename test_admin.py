@@ -687,6 +687,86 @@ class GuildTests(AdminFixture):
 
 
 class AccountMaintenanceTests(AdminFixture):
+    def test_manual_login_takes_over_without_old_disconnect_releasing_the_new_owner(self):
+        before = self.save()
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        disconnected = []
+        first = self.store.open_session(1, PASSWORD, ("old-phone", 1), closer=lambda: disconnected.append(True))
+        latest = self.store.open_session(1, PASSWORD, ("new-phone", 2), closer=lambda: None)
+        self.addCleanup(self.store.close_session, 1)
+        self.assertEqual(disconnected, [True])
+        self.store.close_session(1, first)
+        self.assertTrue(self.store.snapshot(1)["online"])
+        self.assertEqual(self.store.snapshot(1)["connection"]["address"], "new-phone")
+        with self.assertRaisesRegex(ValueError, "其他设备"):
+            self.store.handle_session(1, first, 200, 1, b"")
+        with self.assertRaisesRegex(ValueError, "其他设备"):
+            self.store.authenticate(1, PASSWORD, session=first)
+        self.assertTrue(self.store.handle_session(1, latest, 200, 2, b""))
+        self.assertEqual(self.store.path(1).read_bytes(), before)
+
+    def test_failed_takeover_and_automatic_reconnect_never_disconnect_the_current_owner(self):
+        self.save()
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        disconnected = []
+        first = self.store.open_session(1, PASSWORD, ("phone", 1), closer=lambda: disconnected.append(True))
+        self.addCleanup(self.store.close_session, 1)
+        with self.assertRaisesRegex(ValueError, "密码错误"):
+            self.store.open_session(1, "wrong-password", ("other", 2), closer=lambda: None)
+        with patch.object(accounts, "Session", side_effect=ValueError("failed load")), self.assertRaisesRegex(ValueError, "载入"):
+            self.store.open_session(1, PASSWORD, ("other", 2), closer=lambda: None)
+        for flag in (1, 2, 3, 4):
+            with self.assertRaisesRegex(ValueError, "在线"):
+                self.store.open_session(1, PASSWORD, ("old-reconnect", 3), reconnect=flag, closer=lambda: None)
+        self.assertEqual(disconnected, [])
+        self.assertIs(self.store.sessions[1], first)
+
+    def test_takeover_loads_the_last_completed_transaction_before_granting_new_ownership(self):
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        first = self.store.open_session(1, PASSWORD, ("old", 1), closer=lambda: None)
+        self.addCleanup(self.store.close_session, 1)
+        entered, release, connected = threading.Event(), threading.Event(), threading.Event()
+        errors, latest = [], []
+        handle = first.handle
+
+        def blocked_handle(*args):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("transaction not released")
+            return handle(*args)
+
+        def transact():
+            try:
+                self.store.handle_session(1, first, 201, 1, b"\x08\x01\x10\x03")
+            except Exception as error:
+                errors.append(error)
+
+        def takeover():
+            try:
+                latest.append(self.store.open_session(1, PASSWORD, ("new", 2), closer=lambda: None))
+                connected.set()
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(first, "handle", side_effect=blocked_handle):
+            worker, client = threading.Thread(target=transact), threading.Thread(target=takeover)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                client.start()
+                self.assertFalse(connected.wait(.05))
+            finally:
+                release.set()
+                worker.join(5)
+                if client.ident is not None:
+                    client.join(5)
+        self.assertFalse(worker.is_alive() or client.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(connected.is_set())
+        self.assertEqual(latest[0].save["guide"]["sections"]["1"]["step"], 3)
+        self.store.close_session(1, first)
+        self.assertIs(self.store.sessions[1], latest[0])
+
     def test_live_sessions_block_all_maintenance_without_blocking_other_accounts(self):
         before = self.save()
         self.save(2)

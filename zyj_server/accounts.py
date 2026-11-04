@@ -37,13 +37,13 @@ def parse_login_credentials(body):
         params = [list(protocol.iter_pb_fields(raw)) for _, _, raw in fields]
         if any(len(p) != 1 or p[0][:2] != (2, 2) for p in params[:2]):
             raise ValueError
-        if len(params) == 3 and (len(params[2]) != 1 or params[2][0][:2] != (1, 0)):
+        if len(params) == 3 and (len(params[2]) != 1 or params[2][0][:2] != (1, 0) or params[2][0][2] not in range(5)):
             raise ValueError
         identity = params[0][0][2].decode("ascii")
         if not identity.startswith("local_account_"):
             raise ValueError
         account = parse_account_id(identity[len("local_account_"):])
-        return account, validate_password(params[1][0][2].decode("ascii"))
+        return account, validate_password(params[1][0][2].decode("ascii")), params[2][0][2] if len(params) == 3 else 0
     except (ValueError, UnicodeError):
         raise ValueError("登录参数无效，请使用账号密码版客户端") from None
 
@@ -56,6 +56,7 @@ class AccountStore:
         self.role_config = role_config
         self.active = {}
         self.closers = {}
+        self.sessions = {}
         self.guild_disconnects = {}
         self.lock = threading.RLock()
         # shortcut: 限流仅在本进程内保留；支持多进程部署时再共享计数。
@@ -95,9 +96,11 @@ class AccountStore:
                 pass
             return {"account": account, "registered": True}
 
-    def authenticate(self, account, password):
+    def authenticate(self, account, password, *, session=None):
         password = validate_password(password)
         with self.lock:
+            if session is not None and self.sessions.get(account) is not session:
+                raise ValueError("账号已在其他设备登录，请重新手动登录")
             path = self.credential_path(account)
             now = time.monotonic()
             attempts = self.failed_logins.get(account, [])
@@ -123,35 +126,52 @@ class AccountStore:
                 raise ValueError("账号未启用或密码错误")
             self.failed_logins.pop(account, None)
 
-    def open_session(self, account, password, address):
+    def open_session(self, account, password, address, *, closer=None, reconnect=0):
         path = self.path(account)
         with self.lock:
             self.authenticate(account, password)
-            if account in self.active:
-                raise ValueError(f"账号 {account} 已在线，请先退出原设备")
-            self.active[account] = {"address": str(address[0]), "connected_at": time.time()}
-        try:
-            session = Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
-                           lambda body, opcode=3500, save=None: self.rank_query(account, body, opcode, save),
-                           lambda previous=None: self.observe_rankings({account: previous} if previous else None),
-                           lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body),
-                           lambda session, opcode, seq, body: self.friend_request(account, session, opcode, seq, body),
-                           lambda session, opcode, seq, body: self.cup_request(account, session, opcode, seq, body),
-                           lambda session, opcode, seq, body: self.world_boss_request(account, session, opcode, seq, body))
-            with self.lock:
-                self.active[account]["identity"] = session.save["created_at"]
+            previous_closer = self.closers.get(account)
+            if account in self.active and (reconnect or previous_closer is None):
+                raise ValueError("账号已在线，自动重连不能接管其他设备，请重新手动登录")
+            try:
+                session = Session(self.tables, path, self.step_counts, self.role_config, self.growth_buyers,
+                                  lambda body, opcode=3500, save=None: self.rank_query(account, body, opcode, save),
+                                  lambda previous=None: self.observe_rankings({account: previous} if previous else None),
+                                  lambda session, opcode, seq, body: self.guild_request(account, session, opcode, seq, body),
+                                  lambda session, opcode, seq, body: self.friend_request(account, session, opcode, seq, body),
+                                  lambda session, opcode, seq, body: self.cup_request(account, session, opcode, seq, body),
+                                  lambda session, opcode, seq, body: self.world_boss_request(account, session, opcode, seq, body))
+            except Exception as error:
+                raise ValueError(f"载入玩家状态失败: {error}") from error
+            if previous_closer is not None:
+                try:
+                    previous_closer()
+                except OSError:
+                    pass
+            self.active[account] = {"address": str(address[0]), "connected_at": time.time(), "identity": session.save["created_at"]}
+            self.sessions[account] = session
+            self.closers.pop(account, None)
+            if closer is not None:
+                self.closers[account] = closer
             session.guild_profit = lambda now: self.guild_profit(account, now)
             session.guild_level = lambda: self.achievement_guild_level(account)
             session.cup_rank = lambda: self.achievement_cup_rank(account)
             return session
-        except Exception as error:
-            self.close_session(account)
-            raise ValueError(f"载入玩家状态失败: {error}") from error
 
-    def close_session(self, account):
+    def handle_session(self, account, session, opcode, seq, body):
+        # 接管先等旧请求结算完成，再加载存档；旧连接不能在新会话之后写回。
         with self.lock:
+            if self.sessions.get(account) is not session:
+                raise ValueError("账号已在其他设备登录，请重新手动登录")
+            return session.handle(opcode, seq, body)
+
+    def close_session(self, account, session=None):
+        with self.lock:
+            if session is not None and self.sessions.get(account) is not session:
+                return
             connection = self.active.pop(account, None)
             self.closers.pop(account, None)
+            self.sessions.pop(account, None)
             if connection and "identity" in connection:
                 self.guild_disconnects[account] = (connection["identity"], int(time.time()))
             path = self.save_path.with_name("guilds.json")

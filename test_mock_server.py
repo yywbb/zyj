@@ -9859,7 +9859,8 @@ class LanAccountTests(unittest.TestCase):
 
     def test_login_parser_accepts_reconnect_flag_but_rejects_invalid_identity(self):
         body = bytes.fromhex(login_request(2)["hex"]) + protocol.encode_pb_field(1, 2, b"\x08\x03")
-        self.assertEqual(accounts.parse_login_credentials(body), (2, LOGIN_PASSWORD))
+        self.assertEqual(accounts.parse_login_credentials(body), (2, LOGIN_PASSWORD, 3))
+        self.assertEqual(accounts.parse_login_credentials(bytes.fromhex(login_request(2)["hex"])), (2, LOGIN_PASSWORD, 0))
         for account in ("0", "-1", "01", "1001", "../1", "1/../../2", "1\x00"):
             with self.subTest(account=account), self.assertRaises(ValueError):
                 accounts.parse_login_credentials(bytes.fromhex(login_request(account)["hex"]))
@@ -9873,7 +9874,7 @@ class LanAccountTests(unittest.TestCase):
         wrap = lambda raw: protocol.encode_pb_field(1, 2, raw)
         invalid = [wrap(identity), wrap(password) + wrap(identity), valid + wrap(password),
                    wrap(identity + identity) + wrap(password), wrap(identity) + wrap(password + password),
-                   valid + b"\x10\x01", valid + wrap(b"\x08\x01\x08\x02"),
+                   valid + b"\x10\x01", valid + wrap(b"\x08\x01\x08\x02"), valid + wrap(b"\x08\x05"),
                    wrap(identity) + wrap(b"\x12\x01\xff"), b"x" * 1025]
         for body in invalid:
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, "登录参数无效"):
@@ -10055,7 +10056,7 @@ class LanAccountTests(unittest.TestCase):
         self.assertTrue(conn.closed)
         self.assertFalse(self.save_path.exists())
 
-    def test_duplicate_account_rejected_while_other_account_can_play(self):
+    def test_automatic_reconnect_cannot_steal_online_account_while_other_account_can_play(self):
         waiting, release = threading.Event(), threading.Event()
 
         class HoldingConnection(ReplayConnection):
@@ -10073,7 +10074,9 @@ class LanAccountTests(unittest.TestCase):
             worker.start()
             try:
                 self.assertTrue(waiting.wait(5))
-                duplicate = ReplayConnection([login_request(1, 2)], 7, login=False)
+                request = login_request(1, 2)
+                request["hex"] += protocol.encode_pb_field(1, 2, b"\x08\x03").hex()
+                duplicate = ReplayConnection([request], 7, login=False)
                 self.run_client(duplicate, ("same-ip", 2))
                 self.assertEqual([(f["opcode"], f["seq"]) for f in duplicate.responses], [(999999, 2)])
                 self.assertTrue(duplicate.closed)
@@ -10085,6 +10088,59 @@ class LanAccountTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(self.store.active, {})
         self.replay([{"opcode": 201, "seq": 11, "hex": "08011004"}], account=1)
+
+    def test_manual_tcp_login_disconnects_old_owner_and_preserves_the_new_connection(self):
+        connections, workers = [], []
+
+        def connect(sequence, reconnect=0):
+            client, accepted = socket.socketpair()
+            client.settimeout(3)
+            connections.extend((client, accepted))
+            worker = threading.Thread(target=self.run_client, args=(accepted, ("same-ip", sequence)))
+            workers.append(worker)
+            worker.start()
+            body = bytes.fromhex(login_request(1, sequence)["hex"])
+            if reconnect:
+                body += protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, reconnect))
+            client.sendall(protocol.pack_frame(1000, sequence, body))
+            return client
+
+        def reply(client):
+            def read(size):
+                data = b""
+                while len(data) < size:
+                    chunk = client.recv(size - len(data))
+                    if not chunk:
+                        raise EOFError("connection closed before response")
+                    data += chunk
+                return data
+            magic, length, opcode, seq = struct.unpack(">IIII", read(16))
+            self.assertEqual(magic, 0xEE1C)
+            return opcode, seq, read(length)
+
+        try:
+            old = connect(1)
+            self.assertEqual(reply(old)[:2], (1000, 1))
+            latest = connect(2)
+            self.assertEqual(reply(latest)[:2], (1000, 2))
+            self.assertEqual(old.recv(1), b"")
+            workers[0].join(3)
+            self.assertFalse(workers[0].is_alive())
+            self.assertEqual(self.store.active[1]["address"], "same-ip")
+            retry = connect(3, reconnect=3)
+            self.assertEqual(reply(retry)[:2], (999999, 3))
+            self.assertEqual(retry.recv(1), b"")
+            self.replay([{"opcode": 201, "seq": 10, "hex": "08011003"}], account=2)
+            latest.sendall(protocol.pack_frame(201, 4, b"\x08\x01\x10\x04"))
+            self.assertEqual(reply(latest)[:2], (201, 4))
+            self.assertEqual(json.loads(self.save_path.read_text())["guide"]["sections"]["1"]["step"], 4)
+        finally:
+            for connection in connections:
+                connection.close()
+            for worker in workers:
+                worker.join(3)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(self.store.active, {})
 
     def test_failed_login_releases_account_for_retry(self):
         path = self.store.path(2)

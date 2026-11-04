@@ -2139,7 +2139,7 @@ end"""
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if error.ids[1] == 1000 then
-        return {type = 9997, local_login_failed = true, msg = "登录失败：请检查账号密码、后台启用状态及旧设备是否已退出；连续失败请一分钟后重试。"}
+        return {type = 9997, local_login_failed = true, msg = "登录失败：请检查账号密码及后台启用状态；若账号已被其他设备接管，请重新手动登录。连续失败请一分钟后重试。"}
     end
 ''')
     marker = "    return { type = 9999, errornum = error.ids[2], msg = cnMessage }"

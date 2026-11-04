@@ -71,17 +71,17 @@ def handle_client(conn, addr, account_store, diagnostic=None):
                 if opcode == 1000:
                     phase = "login"
                     try:
-                        requested_account, password = accounts.parse_login_credentials(body)
+                        requested_account, password, reconnect = accounts.parse_login_credentials(body)
                         if account is not None and requested_account != account:
                             raise ValueError("连接已绑定账号，切换账号必须重新连接")
                         if account is None:
-                            session = account_store.open_session(requested_account, password, addr)
+                            session = account_store.open_session(requested_account, password, addr,
+                                closer=lambda: conn.shutdown(socket.SHUT_RDWR), reconnect=reconnect)
                             account = requested_account
                             conn.settimeout(None)
-                            account_store.attach_connection(account, lambda: conn.shutdown(socket.SHUT_RDWR))
                             print_flush(f"[★] 连接已验证账号 {account}")
                         else:
-                            account_store.authenticate(account, password)
+                            account_store.authenticate(account, password, session=session)
                     except ValueError:
                         error = protocol.encode_pb_field(1, 0, 1000) + protocol.encode_pb_field(1, 0, 0)
                         packets = [protocol.pack_frame(999999, seq, error)]
@@ -93,7 +93,7 @@ def handle_client(conn, addr, account_store, diagnostic=None):
                 if session is None:
                     raise ValueError("请先发送登录请求，未登录连接不能访问存档")
                 phase = "handle"
-                packets = session.handle(opcode, seq, body)
+                packets = account_store.handle_session(account, session, opcode, seq, body)
                 phase = "send"
                 for packet in packets:
                     conn.sendall(packet)
@@ -111,7 +111,7 @@ def handle_client(conn, addr, account_store, diagnostic=None):
             conn.close()
         finally:
             if account is not None:
-                account_store.close_session(account)
+                account_store.close_session(account, session)
 
 
 def main(argv=None):
@@ -178,7 +178,6 @@ def main(argv=None):
 
         while True:
             conn, addr = server.accept()
-            # shortcut: 断网旧会话等待 TCP 断开释放；即时跨设备接管需另做会话交接。
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             t = threading.Thread(target=handle_client, args=(conn, addr, account_store, diagnostic), daemon=True)
             t.start()
