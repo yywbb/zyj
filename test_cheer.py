@@ -118,21 +118,60 @@ class CheerTests(unittest.TestCase):
             self.assert_rejected(1004, body)
         self.assert_rejected(999900, protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 1004)))
 
-    def test_main_protagonist_dedicated_and_advanced_members_are_protected(self):
+    def test_main_protagonist_and_advanced_members_are_protected(self):
         baseline = copy.deepcopy(self.session.save)
         protagonist = protocol.pb_get_varint(bytes.fromhex(baseline["protagonist_snapshot"]), 1)
         for iid in (protagonist, 123456789):
             self.assert_rejected(1004, protocol.encode_pb_field(1, 0, 1)+protocol.encode_pb_field(3, 0, iid))
-        self.call(3702, [140, 1])
-        team = self.session.save["single_boss_state"]["teams"]["1"]
-        team[6] = self.iids[0]
-        self.assert_rejected(1004, protocol.encode_pb_field(1, 0, 1)+protocol.encode_pb_field(3, 0, self.iids[0]))
         self.session.save = baseline
         raw = self.records(1, 2)[self.iids[0]]
         for changed in (protocol.pb_set_varint(raw, 21, 1), protocol.pb_set_varint(raw, 4, 11),
                         raw+protocol.encode_pb_field(41, 2, recharge.ids([1]))):
             self.put(changed)
             self.assert_rejected(1004, protocol.encode_pb_field(1, 0, 1)+protocol.encode_pb_field(3, 0, self.iids[0]))
+
+    def test_dedicated_members_can_join_replace_and_swap_supports_without_changing_saved_teams(self):
+        self.call(3702, [140, 1])
+        self.call(3702, [140, 2])
+        for kind, iid in (("1", self.iids[0]), ("2", self.iids[1])):
+            self.session.save["single_boss_state"]["teams"][kind][6] = iid
+        teams = copy.deepcopy(self.session.save["single_boss_state"]["teams"])
+        self.assign(1, self.iids[0])
+        self.assign(1, self.iids[1])
+        self.assign(2, self.iids[0])
+        self.assign(1, origin=2)
+        self.session = self.reconnect()
+        self.assertEqual(self.session.save["single_boss_state"]["teams"], teams)
+        self.assertEqual([protocol.pb_get_varint(self.records(5, 1)[p], 2) for p in (1, 2)], self.iids[:2])
+        for kind in (1, 2):
+            self.assertEqual(protocol.parse_ids_pb(self.call(3702, [140, kind])[0][16:])[:8], teams[str(kind)])
+
+    def test_dedicated_projection_excludes_its_active_support_identity_and_full_team_bonus(self):
+        self.fill(50)
+        self.call(3702, [140, 1])
+        self.call(3702, [140, 2])
+        team = self.session.save["single_boss_state"]["teams"]["1"]
+        team[6] = self.iids[0]
+        self.session.save["single_boss_state"]["teams"]["2"] = list(team)
+        before = copy.deepcopy(self.session.save)
+        projected, _ = single_boss.project_team(self.session.save, team, self.config)
+        self.assertEqual(self.session.save, before)
+        self.assertEqual(len(cheer.combat(projected, self.config)), 7)
+        self.assertNotIn(protocol.pb_get_varint(self.records(1, 2)[self.iids[0]], 1), cheer.combat(projected, self.config))
+        self.assertEqual(cheer.tiers(projected, self.config), ())
+        protagonist = protocol.pb_get_varint(bytes.fromhex(before["protagonist_snapshot"]), 1)
+        original = self.records(1, 2)[protagonist]
+        current = formation.records(bytes.fromhex(projected["world_state"]["1002"]), 1, 2)[protagonist]
+        bonus = cheer.attributes(original, cheer.tiers(before, self.config), self.config)
+        for field in (6, 7, 8):
+            self.assertEqual(protocol.pb_get_varint(current, field), protocol.pb_get_varint(original, field) - bonus[field])
+        same, _ = single_boss.project_team(self.session.save, team, self.config)
+        self.assertEqual(projected["world_state"], same["world_state"])
+        kind = single_boss.boss_type(self.session.save["single_boss_state"], self.config)
+        packets = self.call(3701, [single_boss.levels(self.config, kind)[0]["id"]])
+        report = json.loads(next(v for n, w, v in protocol.iter_pb_fields(packets[0][16:]) if n == 5))
+        self.assertEqual(report["meta"]["attack"]["cheer"], cheer.combat(projected, self.config))
+        self.assertEqual(self.session.save["world_state"]["1002"], before["world_state"]["1002"])
 
     def test_native_errors_and_save_failure_do_not_leave_half_an_assignment(self):
         memory, disk = copy.deepcopy(self.session.save), self.path.read_bytes()
@@ -292,6 +331,9 @@ class CheerTests(unittest.TestCase):
             package.loaded.logError={errorMessage={},errorFunc={}};printf=function() end
             initPb=function(mod,fd) local m=mod.Ids();m:ParseFromString(fd.rbuf);return m end''')
         scripts = self.client_scripts()
+        lua.execute(scripts["assets/pb/localcoverupdate_pb.so"])
+        lua.globals().cheer_shop = builder.read_script("GameActivitySafeMaskShop")
+        lua.execute(b'package.preload.GameActivitySafeMaskShop=assert(loadstring(cheer_shop,"GameActivitySafeMaskShop"))')
         code = scripts["assets/scripts/gamedata.so"].decode()
         start = code.index("function gamedata.cheerData(")
         lua.execute(code[start:code.index("function gamedata.slotgemData(", start)].encode())

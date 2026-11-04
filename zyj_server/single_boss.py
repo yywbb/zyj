@@ -23,7 +23,7 @@ def validate_team(save, team, config):
     if not isinstance(team, list) or len(team) != 8 or any(type(i) is not int or not 0 <= i < (1 << 31) for i in team):
         raise ValueError("王的男人布阵记录无效")
     world = bytes.fromhex(save["world_state"]["1002"])
-    generals, cheers = formation.records(world, 1, 2), formation.records(world, 5, 2)
+    generals = formation.records(world, 1, 2)
     protagonist = pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
     maximum = min(7, config["role_exp"][str(save["role_state"]["level"])]["slotnum"])
     members = [i for i in team[:7] if i]
@@ -33,10 +33,10 @@ def validate_team(save, team, config):
         if not iid:
             continue
         raw = generals.get(iid)
-        if (index > maximum or not raw or iid in cheers
+        if (index > maximum or not raw
                 or not config["general"][str(pb_get_varint(raw, 1))]["battle"]
                 or any(pb_get_varint(raw, n) for n in range(21, 41))):
-            raise ValueError("专用阵位未解锁、伙伴不属于本人或高级/助阵属性不支持")
+            raise ValueError("专用阵位未解锁、伙伴不属于本人或含未实现的高级属性")
     if team[7] and team[7] not in {p[0] for p in pets.get_state(save, config)["pets"]}:
         raise ValueError("专用阵容魔宠不属于当前账号")
 
@@ -87,7 +87,13 @@ def project_team(save, team, config):
     world = bytes.fromhex(save["world_state"]["1002"])
     generals, old = formation.records(world, 1, 2), formation.records(world, 4, 2)
     slots = {i: pb_set_varint(pb_set_varint(old.get(iid, b"") if iid else b"", 1, i), 2, iid) for i, iid in enumerate(team[:7], 1)}
-    update = formation.apply_slots(temporary, slots, config)
+    origins = {config["general"][str(pb_get_varint(generals[iid], 1))]["init_cid"] for iid in team[:7] if iid}
+    cheers = formation.records(world, 5, 1)
+    for sid, slot in cheers.items():
+        iid = pb_get_varint(slot, 2)
+        if iid and config["general"][str(pb_get_varint(generals[iid], 1))]["init_cid"] in origins:
+            cheers[sid] = pb_set_varint(slot, 2, 0)
+    update = formation.apply_slots(temporary, slots, config, cheers=cheers)
     generals.update(formation.records(update, 1, 2))
     previous = pets.attributes(temporary, config)
     pets.get_state(temporary, config)["active"] = team[7]
@@ -99,9 +105,10 @@ def project_team(save, team, config):
             power += pb_get_varint(generals[iid], 20) or 0
     if power >= (1 << 31):
         raise ValueError("专用阵容战力超出范围")
-    temporary["world_state"]["1002"] = (b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world) if n not in (1, 4))
+    temporary["world_state"]["1002"] = (b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world) if n not in (1, 4, 5))
         + b"".join(encode_pb_field(1, 2, v) for _, v in sorted(generals.items()))
-        + b"".join(encode_pb_field(4, 2, v) for _, v in sorted(slots.items()))).hex()
+        + b"".join(encode_pb_field(4, 2, v) for _, v in sorted(slots.items()))
+        + b"".join(encode_pb_field(5, 2, v) for _, v in sorted(cheers.items()))).hex()
     return temporary, power
 
 
@@ -220,10 +227,12 @@ def prepare(opcode, save, body, config, now, seed):
     if opcode == 3705 and (row["level"] > cleared or save["role_state"]["level"] < 80 and save["role_state"]["vip"] < 5):
         raise ValueError("一键挑战需要80级或VIP5，且只能挑战已通关难度")
     attack, defense, combat_config, pet, _ = rosters(save, state["teams"][str(kind)], row, config)
+    origins = {config["general"][str(unit["cid"])]["init_cid"] for unit in attack.values()}
+    supports = [cid for cid in cheer.combat(save, config) if config["general"][str(cid)]["init_cid"] not in origins]
     rng, gets, won = random.Random(seed), Counter(), 0
     for attempt in range(1, count + 1):
         battle_seed = rng.getrandbits(64)
-        report = battle.simulate(attack, defense, combat_config, battle_seed, attack_pet=pet, attack_cheer=cheer.combat(save, config))
+        report = battle.simulate(attack, defense, combat_config, battle_seed, attack_pet=pet, attack_cheer=supports)
         report["meta"]["attack"]["n"] = save["role_name"]
         if report["result"]:
             gets.update(prizes(save, row, row["level"] > state["cleared"][str(kind)], config, state["day"], rng))

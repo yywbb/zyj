@@ -101,8 +101,6 @@ def change(save, opcode, body, config):
             if iid:
                 if iid not in generals or iid in {pb_get_varint(v, 2) for v in slots.values()}:
                     raise ValueError("伙伴不存在或正在主阵中，请先下阵")
-                if any(iid in team[:7] for team in save.get("single_boss_state", {}).get("teams", {}).values() if team):
-                    raise ValueError("请先将伙伴从王的男人专用阵容撤下")
             origin = next((i for i, v in previous.items() if iid and pb_get_varint(v, 2) == iid), None)
             if origin is not None:
                 cheers[dest] = pb_set_varint(previous[origin], 1, dest)
