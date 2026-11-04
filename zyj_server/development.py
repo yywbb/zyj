@@ -1,10 +1,10 @@
-"""主角魔晶培养/进阶与普通伙伴突破；在事务副本上准备属性和消耗。"""
+"""主角魔晶培养/进阶/觉醒与普通伙伴突破；在事务副本上准备属性和消耗。"""
 
 from . import battle, cheer, formation, qiankun
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 QUERIES = (1023, 1056)
-MUTATIONS = (1017, 1055, 1057)
+MUTATIONS = (1017, 1055, 1057, 1058)
 
 
 def ids(body):
@@ -161,6 +161,31 @@ def prepare(opcode, save, body, config):
                 slot = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(slots[iid]) if n != 3) + relations
                 update += encode_pb_field(4, 2, slot)
             reply = update
+    elif opcode == 1058:
+        snapshot = bytes.fromhex(save.get("protagonist_snapshot", ""))
+        iid = pb_get_varint(snapshot, 1)
+        raw = generals.get(iid)
+        if not raw or config["general"][str(pb_get_varint(raw, 1))]["actor"] != "lead":
+            raise ValueError("主角觉醒状态缺失")
+        if ((pb_get_varint(raw, 4) or 0) > 23 or any(pb_get_varint(raw, n) for n in range(21, 41))
+                or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
+            raise ValueError("暂不支持此主角的高级觉醒属性")
+        current = pb_get_varint(raw, 18) or 0
+        row = config["protagonist_awaken"].get(str(current + 1))
+        if values != [iid, current] or not row:
+            raise ValueError("主角觉醒目标已变化或已满级，请重新打开页面")
+        if (save["role_state"]["level"] < config["build"]["567"]["level"]
+                or (pb_get_varint(raw, 3) or 0) < row["lv"] or (pb_get_varint(snapshot, 3) or 0) < row["breach"]
+                or save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2):
+            raise ValueError("主角等级、进阶或觉醒解锁条件不足")
+        previous = config["protagonist_awaken"][str(current)]
+        raw, increase = adjust(raw, {field: row[name] - previous[name] for name, field in (("atk", 6), ("def", 7), ("hp", 8))})
+        raw = pb_set_varint(raw, 18, current + 1)
+        snapshot = pb_set_field(snapshot, 10, 2, raw)
+        save["protagonist_snapshot"] = snapshot.hex()
+        costs = [tuple(map(int, entry.split(","))) for entry in row["consume"].split(";") if entry]
+        update = encode_pb_field(1, 2, raw) + encode_pb_field(6, 2, snapshot)
+        reply = update
     else:
         if save["role_state"]["level"] < config["build"]["52"]["level"]:
             raise ValueError("伙伴突破尚未解锁")

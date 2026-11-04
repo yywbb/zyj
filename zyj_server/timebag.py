@@ -8,7 +8,8 @@ GIFTS = {PET_GIFT: ("pet_gift_state", 59), 130013: ("stone_gift_state", 104), 13
          130004: ("sigil_gift_state", 22), 130010: ("sigil_growth_gift_state", None), 130015: ("treasure_gift_state", 23),
          130016: ("magic_gift_state", 65), 130007: ("soul_gift_state", 73), 130021: ("equip_evolve_gift_state", 75),
           130009: ("equip_star_gift_state", 93), 130006: ("wing_gift_state", 86),
-          130005: ("cover_gift_state", 97), 130017: ("cover_advance_gift_state", 78), 130026: ("cover_soaring_gift_state", 102)}
+          130005: ("cover_gift_state", 97), 130017: ("cover_advance_gift_state", 78), 130026: ("cover_soaring_gift_state", 102),
+          130018: ("gamestar_gift_state", None)}
 QUERIES = (2880,)
 MUTATIONS = (2881, 2882)
 OPCODES = QUERIES + MUTATIONS
@@ -70,8 +71,10 @@ def prepare(opcode, save, body, config, now, baseline=b""):
         row = config["trigger_gift2"][str(gift_id)]
         if not save.get("has_role") or save["role_state"]["level"] < row["level"]:
             raise ValueError("限时礼包等级尚未满足")
-        if row["type"] == 1 and save.get("guide", {}).get("sections", {}).get(str(GIFTS[gift_id][1]), {}).get("status") != 2:
+        if row["type"] == 1 and GIFTS[gift_id][1] is not None and save.get("guide", {}).get("sections", {}).get(str(GIFTS[gift_id][1]), {}).get("status") != 2:
             raise ValueError("对应功能引导完成后才能触发礼包")
+        if gift_id == 130018 and ("gamestar_state" not in save or save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2):
+            raise ValueError("请先打开已解锁的游戏厅")
         if row["type"] == 2 and not state["triggered_at"]:
             opened = pb_get_varint(bytes.fromhex(save.get("role_snapshot", "")), 22)
             day = (max(now, state["checked_at"]) + 28800) // 86400 - ((int(save["created_at"]) if opened is None else opened) + 28800) // 86400 + 1

@@ -14,7 +14,7 @@ COUNTERS = ("equipbaptize", "robcount", "penglairewardcount", "petbreakcount", "
 SUPPORTED_TYPES = {
     "level", "athletics", "cuprank", "blood", "copy", "equip_strengthen", "general", "gang_level", "gang_contribution", "soul",
     "copystar", "generalbreak", "treasurerefine", "treasurestrengthen", "magicstonelevellimit", "petnum", "vip", "tiantingyz",
-    "stone_copy", "blackmarketgoldbuycount", "artifact", "personalboss1", "personalboss2", "battle_power", "fashioncoat",
+    "stone_copy", "blackmarketgoldbuycount", "artifact", "personalboss1", "personalboss2", "battle_power", "fashioncoat", "hoshimiya",
     *COUNTERS, *(f"sigil{i}" for i in (1, 3, 5, 10, 15, 20, 25, 30, 35, 40)),
     *(f"equip_evolve{i}" for i in (1, 4, 8, 12, 20, 28)),
 }
@@ -81,6 +81,7 @@ def snapshot(save, config):
                   personalboss2=save.get("single_boss_state", {}).get("cleared", {}).get("2", 0),
                   tiantingyz=len(save.get("nightclub_state", {}).get("cleared", [])),
                   fashioncoat=len(save.get("fashion_state", {}).get("levels", {})),
+                  hoshimiya=save.get("gamestar_state", {}).get("stage", 1) - 1,
                   equip_strengthen=max((item[2] for item in ordinary), default=0))
     return {"scalars": scalar, "partners": partners, "treasures": treasures, "copies": copies,
             "sigils": [parse_ids_pb(raw)[2] for raw in formation.records(world, 7, 1).values()],

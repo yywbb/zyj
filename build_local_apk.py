@@ -2036,6 +2036,107 @@ def patch_wing_scripts(patched):
     put("GameErrorMessage", code, "common_lua")
 
 
+def patch_protagonist_growth_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    def replace(code, old, new):
+        assert code.count(old) == 1, old
+        return code.replace(old, new)
+
+    def generation(code, prefix, methods):
+        for method in methods:
+            start = code.index(f"function {prefix}.{method}(")
+            end = code.index("\n", start) + 1
+            code = code[:end] + "    self.localLeadGrowthGeneration=(self.localLeadGrowthGeneration or 0)+1\n" + code[end:]
+        return code
+
+    for name, filename in (("GameGameStar", "protagonist_growth_network.lua"), ("UIGameStar", "protagonist_growth_ui.lua")):
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, load(name) + "\n" + stream.read())
+
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    code = replace(code, marker, marker + '''    if gamedata and gamedata.ext then
+        local pending=gamedata.ext.localLeadGrowthBusy
+        if pending and pending.opcode==error.ids[1] then gamedata.ext.localLeadGrowthBusy=nil end
+        if error.ids[1]==3720 then table.remove(gamedata.ext.localLeadGrowthQueries or {},1) end
+    end
+''')
+    put("GameErrorMessage", code, "common_lua")
+
+    code = generation(load("Layer_lead3"), "lead", ("init", "clear"))
+    marker = "        self.selectpage = page\n"
+    code = replace(code, marker, "        self.localLeadGrowthGeneration=(self.localLeadGrowthGeneration or 0)+1\n" + marker)
+    code = replace(code, "        gamestar    = false,\n        wing        = true,", "        gamestar    = true,\n        wing        = true,")
+    code = replace(code, "        awaken      = 1,", "        awaken      = 567,")
+    put("Layer_lead3", code)
+
+    code = generation(load("Layer_gamestar"), "gamestar", ("init", "clear", "reloadData"))
+    marker = '''    UIRequest({type = 3720})
+
+    guide.controller:addComplete(203,function()
+        UIRequest({type = 2882,opt=1,sysID=203})
+    end)'''
+    code = replace(code, marker, "")
+    marker = "function gamestar.getSkillColorAndLevel(self,destLevel)\n"
+    code = replace(code, marker, '''function gamestar.refreshFunc(self)
+    self.localLeadGrowthGeneration=(self.localLeadGrowthGeneration or 0)+1
+    local view=LocalLeadGrowthContext("gamestar")
+    UIRequest({type=3720})
+    guide.controller:addComplete(203,function()
+        if not LocalLeadGrowthActive(view) then return end
+        UIRequest({type=2882,opt=1,sysID=203})
+    end)
+end
+
+''' + marker)
+    code = replace(code, '''    if tmpCanReset then
+        self:next()
+    end''', "    self:next()")
+    code = replace(code, "    local tmpCanReset = self:updateNowIndex(data._cellIndex,data._nowsIndex)",
+                   "    self:updateNowIndex(data._cellIndex,data._nowsIndex)")
+    marker = "function gamestar.next(self)\n"
+    code = replace(code, marker, marker + '    local view=LocalLeadGrowthContext("gamestar")\n')
+    marker = "            self.rootItems.m_oGameButon:addHandleOfControlEvent(function()\n"
+    code = replace(code, marker, marker + "                if not LocalLeadGrowthActive(view) then return end\n")
+    code = replace(code, "    self:reloadData({_cellIndex = self.m_iRunCellIndex+1,_nowsIndex = 0,_selfLevel = self.m_iRoleLevel})",
+                   '    if self.rootNode and LocalLeadGrowthVisible("gamestar") then UIRequest({type=3720}) end')
+    start, end = code.index("function gamestar.boom(self)"), code.index("function gamestar.clear(self)")
+    block = code[start:end]
+    block = replace(block, "function gamestar.boom(self)\n", 'function gamestar.boom(self)\n    local view=LocalLeadGrowthContext("gamestar")\n')
+    for marker in ("    self.rootAnimat:setAnimationCompletedCallback(function()\n",
+                   "    self.layer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(4.5), CCCallFunc:create(function()\n"):
+        block = replace(block, marker, marker + "        if not LocalLeadGrowthActive(view) then return end\n")
+    put("Layer_gamestar", code[:start] + block + code[end:])
+
+    code = generation(load("Layer_protagonistAwaken"), "awaken", ("init", "clear", "setPage_awaken"))
+    marker = "function awaken.setAwakenConsume(self,t)\n"
+    code = replace(code, marker, marker + '    local view=LocalLeadGrowthContext("awaken","property")\n')
+    marker = '    local consume = ui.getIDandNUMs(awakenConfig["consume"])'
+    code = replace(code, marker, "    if not awakenConfig then return end\n" + marker)
+    marker = "    self.rootItems.doButton:addHandleOfControlEvent(function()\n"
+    code = replace(code, marker, marker + "        if not LocalLeadGrowthActive(view) then return end\n")
+    marker = "function awaken.awakenCallback(self,data)\n"
+    code = replace(code, marker, marker + '    local view=LocalLeadGrowthContext("awaken")\n')
+    marker = "    local sequence1 = CCSequence:createWithTwoActions(CCDelayTime:create(1), CCCallFunc:create(function()\n"
+    code = replace(code, marker, marker + "        if not LocalLeadGrowthActive(view) then return end\n")
+    put("Layer_protagonistAwaken", code)
+
+    code = load("UIProps")
+    for order in (10771, 33018):
+        marker = f"    elseif t.order == {order} then\n"
+        code = replace(code, marker, marker + "        if not LocalLeadGrowthActive(t.leadGrowthView) then return end\n")
+    put("UIProps", code)
+
+
 def patch_exchange_scripts(patched):
     for name, filename in (("GameActivityMultipleRebate", "exchange_network.lua"), ("UIActivityMultipleRebate", "exchange_ui.lua"),
                            ("GameGeneralCompound", "general_compound_network.lua"), ("UIGenerals", "general_compound_ui.lua")):
@@ -3558,6 +3659,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_soul_scripts(patched)
     patch_equip_evolve_scripts(patched)
     patch_wing_scripts(patched)
+    patch_protagonist_growth_scripts(patched)
     patch_cover_scripts(patched)
     patch_exchange_scripts(patched)
     patch_examination_scripts(patched)

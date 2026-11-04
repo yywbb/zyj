@@ -116,6 +116,13 @@ def rosters(save, point, config):
             unit.update(cover_l=mask["level"], cover_d=mask["value"], cover_p=mask["percent"], skill_resilience=mask["skill_resilience"])
         if iid == protagonist and wings["stage"]:
             unit.update(w_l=wings["stage"], w_c=wings["color"])
+        if iid == protagonist and unit["skilllevel"]:
+            awakening = config["protagonist_awaken"].get(str(unit["skilllevel"]))
+            if awakening is None:
+                raise ValueError("主角觉醒等级配置不存在")
+            # 主角的同名字段是觉醒，不是旧版技能升级等级。
+            unit.update(awakening=unit["skilllevel"], skilllevel=0,
+                        adddmgpct=Fraction(str(awakening["adddmgpct"])), subdmgpct=Fraction(str(awakening["subdmgpct"])))
         unit["flat_out"], unit["flat_in"] = equip_baptize.flat(slot, equips, config)
         unit["flat_out"] += sigil_flat[0]
         unit["flat_out"] += skill_flat
@@ -458,7 +465,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             general = config["general"][str(unit["cid"])]
             initial[str(pos)] = {"i": unit["iid"], "o": unit.get("boss", False)}
             meta[str(unit["iid"])] = {"i": unit["iid"], "c": unit["cid"], "n": unit.get("name", general["name"]),
-                                      "level1": unit["level"], "level2": unit["advance"], "level3": 0,
+                                      "level1": unit["level"], "level2": unit["advance"], "level3": unit.get("awakening", 0),
                                       "h": unit["hp"], "j": unit["maxhp"], "ap": unit["ap"], "d": {"i": unit["skill"]},
                                       **({key: unit[key] for key in ("cover_d", "cover_d2", "cover_p", "cover_l")} if unit["cover_d"] else {})}
             if unit.get("w_l"):
