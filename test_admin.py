@@ -13,7 +13,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from zyj_server import accounts, configuration, formation, guide, player, protocol, recharge, replay, storage
+from zyj_server import accounts, configuration, cup, examination, formation, friends, guide, player, protocol, recharge, replay, storage, world_boss
 from zyj_server.admin import gm, views
 from zyj_server.admin.http import start_admin
 from zyj_server.session import Session
@@ -1240,6 +1240,103 @@ class GmTests(AdminFixture):
         self.assertEqual(sessions[0].save["gm_receipt"], request["operation_id"])
 
 
+class GmTransferTests(AdminFixture):
+    def setUp(self):
+        super().setUp()
+        self.save()
+        self.save(10)
+        self.gm = gm.Workbench(self.store)
+        self.shared = {"friend_state": friends.daily({}), "cup_state": cup.get_state({}),
+                       "world_boss_state": world_boss.get_state({}), "examination_state": examination.get_state({}, CONFIG),
+                       "rank_mail_state": {"period": 1, "claimed": [700000001], "deleted": []},
+                       "mail_state": {"claimed": [800000001], "deleted": []}}
+        for state in self.shared.values():
+            if "receipt" in state:
+                state["receipt"] = "a" * 32
+        source = self.store.snapshot(1)["save"]
+        source.update(copy.deepcopy(self.shared), unknown_progress={"keep": [1, 2, 3]})
+        self.assertTrue(player.save_role(source, self.store.path(1), COUNTS))
+
+    def test_copy_drops_foreign_shared_receipts_and_preserves_source_progress_credentials_and_backups(self):
+        target = self.store.snapshot(10)["save"]
+        target["created_at"] += 1
+        self.assertTrue(player.save_role(target, self.store.path(10), COUNTS))
+        self.store.register(10, PASSWORD, self.store.snapshot(10)["revision"])
+        credentials = self.store.credential_path(10).read_bytes()
+        source_raw, target_raw = (self.store.path(a).read_bytes() for a in (1, 10))
+        result = self.gm.transfer(1)
+        copied = self.store.snapshot(10)["save"]
+        expected = json.loads(source_raw)
+        for name in self.shared:
+            expected.pop(name)
+            self.assertNotIn(name, copied)
+        expected["last_login"] = copied["last_login"]
+        self.assertEqual(copied, expected)
+        self.assertEqual(self.store.path(1).read_bytes(), source_raw)
+        self.assertEqual(self.store.credential_path(10).read_bytes(), credentials)
+        for account, raw, key in ((1, source_raw, "source_backup_id"), (10, target_raw, "target_backup_id")):
+            self.assertEqual((self.root / f"backups/accounts/{account}" / (result[key] + ".json")).read_bytes(), raw)
+        self.assertEqual(self.gm.history(1, "transfer")["rows"][0]["status"], "success")
+
+    def test_repeated_copy_preserves_same_identity_targets_own_shared_claims(self):
+        target = self.store.snapshot(10)["save"]
+        own = copy.deepcopy(self.shared)
+        for state in own.values():
+            if "receipt" in state:
+                state["receipt"] = "b" * 32
+        own["mail_state"]["claimed"].append(800000002)
+        own["world_boss_state"]["claimed"] = [600000001]
+        own["world_boss_state"]["deleted"] = [600000001]
+        target.update(own)
+        self.assertTrue(player.save_role(target, self.store.path(10), COUNTS))
+        self.gm.transfer(1)
+        self.gm.transfer(1)
+        copied = self.store.snapshot(10)["save"]
+        self.assertEqual({name: copied[name] for name in own}, own)
+        self.assertEqual({name: self.store.snapshot(1)["save"][name] for name in own}, self.shared)
+
+    def test_new_target_needs_no_prior_backup_and_inherits_no_shared_state(self):
+        self.store.path(10).unlink()
+        result = self.gm.transfer(1)
+        self.assertIsNone(result["target_backup_id"])
+        self.assertTrue(all(name not in self.store.snapshot(10)["save"] for name in self.shared))
+        self.assertFalse(self.store.credential_path(10).exists())
+
+    def test_online_accounts_and_self_copy_are_rejected_without_writes(self):
+        before = {a: self.store.path(a).read_bytes() for a in (1, 10)}
+        for account in (1, 10):
+            self.store.active[account] = {"address": "phone", "connected_at": 1}
+            with self.assertRaisesRegex(ValueError, "在线"):
+                self.gm.transfer(1)
+            self.store.close_session(account)
+        with self.assertRaises(ValueError):
+            self.gm.transfer(10)
+        self.assertEqual({a: self.store.path(a).read_bytes() for a in before}, before)
+        self.assertFalse((self.root / "backups").exists())
+
+    def test_backup_journal_and_save_failures_never_replace_target_or_report_success(self):
+        before = {a: self.store.path(a).read_bytes() for a in (1, 10)}
+        backup = storage.backup
+        calls = []
+
+        def fail_target_backup(*args):
+            calls.append(True)
+            if len(calls) == 2:
+                raise OSError("target backup full")
+            return backup(*args)
+
+        with patch.object(storage, "backup", side_effect=fail_target_backup), self.assertRaises(OSError):
+            self.gm.transfer(1)
+        self.assertEqual({a: self.store.path(a).read_bytes() for a in before}, before)
+        for owner, name, replacement in ((storage, "backup", {"side_effect": OSError("backup full")}),
+                                         (self.gm, "_write", {"side_effect": OSError("log full")}),
+                                         (player, "save_role", {"return_value": False})):
+            with self.subTest(name=name), patch.object(owner, name, **replacement), self.assertRaises(OSError):
+                self.gm.transfer(1)
+            self.assertEqual({a: self.store.path(a).read_bytes() for a in before}, before)
+        self.assertTrue(all(row["status"] == "failed" for row in self.gm.history()["rows"]))
+
+
 class GmManagementTests(AdminFixture):
     def setUp(self):
         super().setUp()
@@ -1628,6 +1725,19 @@ class AdminHttpTests(AdminFixture):
         changed = next(r for r in records["rows"] if r["action"] == "config")
         self.assertEqual(changed["result"]["changes"], [{"name": "param1", "before": "25", "after": "31"}])
         self.assertEqual(self.request("/api/configs/props?q=20014")[2]["rows"][0]["original"]["param1"], "25")
+
+    def test_transfer_http_uses_offline_checks_and_records_target_backup(self):
+        self.save(10)
+        before = {a: self.store.path(a).read_bytes() for a in (1, 10)}
+        self.store.active[10] = {"address": "phone", "connected_at": 1}
+        self.assertEqual(self.request("/api/accounts/1/transfer", {"reason": "邮件修复回归"})[0], 400)
+        self.assertEqual({a: self.store.path(a).read_bytes() for a in before}, before)
+        self.store.close_session(10)
+        code, _, result = self.request("/api/accounts/1/transfer", {"reason": "邮件修复回归"})
+        self.assertEqual((code, result["target"]), (200, 10))
+        self.assertEqual(self.store.path(1).read_bytes(), before[1])
+        self.assertEqual((self.root / "backups/accounts/10" / (result["target_backup_id"] + ".json")).read_bytes(), before[10])
+        self.assertEqual(self.request("/api/operations?action=transfer")[2]["rows"][0]["status"], "success")
 
     def test_gm_mail_http_endpoints_send_list_and_delete(self):
         # 1. 初始邮件列表为空

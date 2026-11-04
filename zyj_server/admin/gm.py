@@ -394,6 +394,8 @@ class Workbench:
         with store.lock:
             store.path(account)
             store.path(target)
+            if account == target:
+                raise ValueError("不能把测试账号复制到自身")
             source_snapshot = store.snapshot(account)
             target_snapshot = store.snapshot(target)
             if source_snapshot["online"] or target_snapshot["online"]:
@@ -401,17 +403,21 @@ class Workbench:
             if source_snapshot["error"] or not source_snapshot["save"].get("has_role"):
                 raise ValueError(source_snapshot["error"] or "源账号尚未创建角色")
             source_raw = store.path(account).read_bytes()
-            source_backup = storage.backup(store.save_path.parent / "backups" / "accounts" / str(account), source_raw)
-            if store.path(target).exists():
-                target_raw = store.path(target).read_bytes()
-                target_backup = storage.backup(store.save_path.parent / "backups" / "accounts" / str(target), target_raw)
-            else:
-                target_backup = None
-            storage.atomic_write(store.path(target), source_raw)
-            player.save_role(source_snapshot["save"], store.path(target), store.step_counts)
-            return self.logged("transfer", account,
-                               {"target": target, "source_backup_id": source_backup, "target_backup_id": target_backup,
-                                "reason": reason},
-                               lambda: {"account": account, "target": target,
-                                        "source_backup_id": source_backup, "target_backup_id": target_backup,
-                                        "transferred_size": len(source_raw)})
+            copied = copy.deepcopy(source_snapshot["save"])
+            for name in ("friend_state", "cup_state", "world_boss_state", "examination_state", "rank_mail_state", "mail_state"):
+                copied.pop(name, None)
+                # 共享收据不能跨账号；重复复制仍须保留测试号自己的领取记录。
+                if target_snapshot["save"].get("created_at") == copied["created_at"] and name in target_snapshot["save"]:
+                    copied[name] = copy.deepcopy(target_snapshot["save"][name])
+            details = {"target": target, "reason": reason}
+
+            def copy_save():
+                details["source_backup_id"] = storage.backup(store.save_path.parent / "backups" / "accounts" / str(account), source_raw)
+                details["target_backup_id"] = (storage.backup(store.save_path.parent / "backups" / "accounts" / str(target),
+                    store.path(target).read_bytes()) if store.path(target).exists() else None)
+                if not player.save_role(copied, store.path(target), store.step_counts):
+                    raise OSError("保存失败，原测试号存档已保留")
+                return {"account": account, "target": target, "source_backup_id": details["source_backup_id"],
+                        "target_backup_id": details["target_backup_id"], "transferred_size": len(source_raw)}
+
+            return self.logged("transfer", account, details, copy_save)

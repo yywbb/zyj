@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 import build_local_apk as builder
 import test_friends
-from zyj_server import achievements, formation, guild, player, protocol, world_boss
+from zyj_server import achievements, formation, guild, mail, player, protocol, world_boss
+from zyj_server.admin import gm
 
 
 def setUpModule():
@@ -310,6 +311,64 @@ class WorldBossTests(unittest.TestCase):
         self.at(1)
         self.attack()
         self.assertEqual(self.period()["damage"]["1"]["count"], 1)
+
+    def test_test_account_copy_keeps_mail_open_and_never_inherits_or_regrants_world_boss_mail(self):
+        self.query()
+        self.set_hp(1)
+        self.attack()
+        source_mid = next(iter(self.mails()))
+        self.add_account(10)
+        for account in (1, 10):
+            self.store.close_session(account)
+        source, shared = self.store.path(1).read_bytes(), (self.root / "world_boss.json").read_bytes()
+        workbench = gm.Workbench(self.store)
+        workbench.transfer(1)
+        self.assertEqual(self.store.path(1).read_bytes(), source)
+        self.assertEqual((self.root / "world_boss.json").read_bytes(), shared)
+        self.reconnect(1)
+        self.reconnect(10)
+        self.assertEqual(set(self.mails()), {source_mid})
+        self.assertEqual(self.mails(10), {})
+        self.query(10)
+        self.at(1)
+        self.query(10)
+        self.set_hp(1)
+        self.attack(10)
+        target_mid = next(iter(self.mails(10)))
+        self.success(10, 3101, values=[target_mid])
+        gm_mid = mail.send_mail(self.root / "mails.json", 10, "测试号邮件", "不重复领取", {"1001": 3}, now=int(self.clock.return_value))["id"]
+        self.success(10, 3101, values=[gm_mid])
+        for account in (1, 10):
+            self.store.close_session(account)
+        workbench.transfer(1)
+        self.reconnect(1)
+        self.reconnect(10)
+        self.assertEqual(protocol.pb_get_varint(self.mails(10)[target_mid], 4), 2)
+        self.assert_rejected(10, 3101, values=[target_mid])
+        self.assert_rejected(10, 3101, values=[gm_mid])
+        self.assertEqual(protocol.pb_get_varint(self.mails()[source_mid], 4), 0)
+
+    def test_copy_drops_source_friend_cup_and_exam_bindings_without_breaking_real_queries(self):
+        self.success(1, 2302, values=[1000002])
+        self.success(1, 2100)
+        self.success(1, 7003, values=[1])
+        self.query()
+        names = ("friend_state", "cup_state", "examination_state", "world_boss_state")
+        source = self.sessions[1].save
+        self.assertTrue(all(name in source for name in names))
+        self.add_account(10)
+        for account in (1, 10):
+            self.store.close_session(account)
+        gm.Workbench(self.store).transfer(1)
+        self.reconnect(1)
+        self.reconnect(10)
+        self.assertTrue(all(name not in self.sessions[10].save for name in names))
+        for opcode in (2300, 2100, 7002, 3400, 3100):
+            for account in (1, 10):
+                with self.subTest(opcode=opcode, account=account):
+                    self.success(account, opcode)
+        self.assertEqual(self.sessions[1].save["examination_state"]["records"], source["examination_state"]["records"])
+        self.assertNotIn("examination_state", self.sessions[10].save)
 
     def test_mail_claim_save_failure_all_claim_delete_and_peer_isolation(self):
         self.attack(1)
