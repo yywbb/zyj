@@ -1151,6 +1151,21 @@ return magic''')
     marker = "function instrumentForgeAutomatic.open(self,touchPriority,data,callback)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + "    self.localMagicView = data.view\n    self.localMagicWindow = (self.localMagicWindow or 0)+1\n")
+    marker = '''    ui.creatInputEditBoxForNum(self.rootItems.inputNumNode,self.rootItems.donum,self.touchPriority,function (num)
+        self.donum = 0
+        self:numchange(num)
+    end)'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    ui.creatInputEditBoxByNode(self.rootItems.inputNumNode,kEditBoxInputModePhoneNumber,
+        function() self.rootItems.donum:setString("") end,
+        function(text,edit)
+            edit:setText("")
+            local num = tonumber(text)
+            if num then self:numchange(math.max(1,math.floor(num))-self.donum)
+            else runGamePrompt({msg=gameConfig.strings:string_common("ui",73)}) end
+            self.rootItems.donum:setString(self.donum)
+        end,
+        {fontSize=33,fontColor=self.rootItems.donum:getColor(),PlaceHolder="",length=4}):setTouchPriority(self.touchPriority)''')
     marker = "function instrumentForgeAutomatic.close(self)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + "    self.localMagicWindow = (self.localMagicWindow or 0)+1\n")
@@ -1163,6 +1178,14 @@ return magic''')
     marker = "local donum = self.donum + num"
     assert code.count(marker) == 1
     code = code.replace(marker, "local donum = math.floor(self.donum + (tonumber(num) or 0))")
+    marker = '''    local maxnum = 200
+    if gamedata.config.global_kv["artifact_leve_limit"] and tonumber(gamedata.config.global_kv["artifact_leve_limit"].value) <= GameScene.roleinfo.level then
+        if gamedata.config.global_kv["automatic_artifact_number"] and tonumber(gamedata.config.global_kv["automatic_artifact_number"].value) > 0 then
+            maxnum = tonumber(gamedata.config.global_kv["automatic_artifact_number"].value)
+        end
+    end'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, '    local maxnum = tonumber(gamedata.config.global_kv["automatic_artifact_number"].value)')
     patched["window_instrumentForgeAutomatic"] = code
     return patched
 

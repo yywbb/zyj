@@ -240,7 +240,7 @@ def prepare(opcode, save, body, config, seed):
             if count not in ((1, 10, 50) if large else (1, 10)):
                 raise ValueError("法宝锻造次数尚未解锁")
         elif (level < int(config["global_kv"]["automatic_forging"]["value"]) and not config["vip"][str(save["role_state"]["vip"])]["vip_automatic_forging"]
-              or not 1 <= count <= (int(config["global_kv"]["automatic_artifact_number"]["value"]) if large else 200)
+              or not 1 <= count <= int(config["global_kv"]["automatic_artifact_number"]["value"])
               or any(v not in (0, 1) for v in flags) or pending):
             raise ValueError("自动锻造未解锁、次数/筛选无效或仍有待确认预览")
         if data == values(row, "init"):

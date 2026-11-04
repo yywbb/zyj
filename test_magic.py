@@ -169,6 +169,46 @@ class MagicTests(unittest.TestCase):
         self.call(1364, [1, 1, 1000, 0, 0, 0, 0, 0])
         self.assert_rejected(1364, recharge.ids([1, 1, 1001, 0, 0, 0, 0, 0]))
 
+    def test_automatic_thousand_rolls_at_level_or_vip_unlock_charge_and_persist_actual_costs(self):
+        self.unlock()
+        baseline = copy.deepcopy(self.session.save)
+        for level, vip in ((55, 0), (79, 0), (31, 5)):
+            with self.subTest(level=level, vip=vip):
+                self.session.save = copy.deepcopy(baseline)
+                self.session.save["role_state"].update(level=level, vip=vip)
+                self.assert_rejected(1364, recharge.ids([1, 2, 1001, 0, 0, 0, 0, 0]))
+                stones, coin = self.props(20270), self.session.save["role_state"]["coin"]
+                request = [1, 2, 1000, 0, 0, 0, 0, 0]
+                packets = self.call(1364, request)
+                parts = self.groups(packets[0][16:])
+                self.assertEqual(protocol.parse_ids_pb(parts[3]), [1000, *([10]*100)])
+                self.assertEqual(len(protocol.parse_ids_pb(parts[2])), 500)
+                self.assertEqual((stones-self.props(20270), coin-self.session.save["role_state"]["coin"]), (1000, 30000000))
+                self.assertEqual(self.session.save["activity_state"]["liveness_counts"]["25"], self.config["liveness"]["25"]["num"])
+                saved = copy.deepcopy(self.session.save)
+                self.assertEqual(self.session.handle(1364, self.sequence, recharge.ids(request)), packets)
+                self.assertEqual(self.session.save, saved)
+                self.session = self.reconnect()
+                self.assertEqual(self.session.save["magic_state"], saved["magic_state"])
+                self.assertEqual((self.props(20270), self.session.save["role_state"]["coin"]), (stones-1000, coin-30000000))
+
+    def test_automatic_thousand_insufficient_resources_and_save_failure_are_atomic(self):
+        self.unlock()
+        self.session.save["role_state"]["level"] = 55
+        baseline = copy.deepcopy(self.session.save)
+        for key, amount, method in (("coin", 29999999, 2), ("gold", 19999, 3)):
+            self.session.save = copy.deepcopy(baseline)
+            self.session.save["role_state"][key] = amount
+            self.assert_rejected(1364, recharge.ids([1, method, 1000, 0, 0, 0, 0, 0]))
+        self.session.save = copy.deepcopy(baseline)
+        self.give(20270, 1999-self.props(20270))
+        self.assert_rejected(1364, recharge.ids([1, 1, 1000, 0, 0, 0, 0, 0]))
+        self.session.save = baseline
+        memory, disk = copy.deepcopy(self.session.save), self.path.read_bytes()
+        with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.call(1364, [1, 2, 1000, 0, 0, 0, 0, 0])
+        self.assertEqual((self.session.save, self.path.read_bytes()), (memory, disk))
+
     def test_two_magic_previews_have_independent_tokens_and_reconnect_without_cross_confirmation(self):
         self.seed_items(2)
         first = self.preview(cid=1)
@@ -301,12 +341,13 @@ class MagicTests(unittest.TestCase):
                 if flag: self.assertGreaterEqual(b, a)
             if flags[4]: self.assertGreaterEqual(magic.score(after, self.config["artifact"]["1"]), magic.score(before, self.config["artifact"]["1"]))
         self.session.save = copy.deepcopy(baseline)
+        self.session.save["role_state"]["level"] = 55
         caps = magic.values(self.config["artifact"]["1"], "init")
         self.change_magic(1, normal=[v-1 for v in caps])
         table = {**self.config["artifact_baptize"]["1"]["3"], **{name+key+"10": 1 for name in ("atk", "def", "hp", "adddmg") for key in ("down", "up")}}
         stones, gold = self.props(20270), self.session.save["role_state"]["gold"]
         with patch.dict(self.config["artifact_baptize"]["1"], {"3": table}):
-            parts = self.groups(self.call(1364, [1, 3, 23, 0, 0, 0, 0, 0])[0][16:])
+            parts = self.groups(self.call(1364, [1, 3, 1000, 0, 0, 0, 0, 0])[0][16:])
         self.assertEqual(protocol.parse_ids_pb(parts[3]), [1, 1])
         self.assertEqual((stones-self.props(20270), gold-self.session.save["role_state"]["gold"]), (1, 20))
 
@@ -483,6 +524,13 @@ class MagicTests(unittest.TestCase):
                                   {"iid": 1, "method": 1, "xlnum": 23, "view": 4, "window": 8})
         self.assertEqual((result[b"autotimes"], result[b"window"], result[b"status"][b"3"][b"count"]), (23, 8, 3))
         self.assertEqual(lua.globals().gamedata[b"cache"][b"props"][20270][b"num"], self.props(20270))
+        self.session.save["role_state"]["level"] = 55
+        result = self.client_call(lua, "UIInstrumentForgeAutomaticCallback", "NetInstrumentForgeAutomaticCallback",
+                                  {"iid": 1, "method": 2, "xlnum": 1000, "view": 4, "window": 8})
+        self.assertEqual((result[b"autotimes"], result[b"status"][b"100"][b"count"], result[b"status"][b"101"]), (1000, 10, None))
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"props"][20270][b"num"], self.props(20270))
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.session.save["role_state"]["coin"])
+        self.session.save["role_state"]["level"] = 100
         self.change_magic(1, normal=magic.values(self.config["artifact"]["1"], "init"))
         self.give(1025, 1000)
         lua.globals().gamedata[b"cache"][b"role"][b"g_gold"] = self.session.save["role_state"]["g_gold"]
@@ -516,7 +564,7 @@ class MagicTests(unittest.TestCase):
             CCBReaderLoad=function() lastItems=items();return node(),lastItems end
             ui=setmetatable({setLabelString=function(n,v) if v then n:setString(v) end end,
                 Split=function(text,separator) local r={} for s in string.gmatch(text,"[^"..separator.."]+") do r[#r+1]=s end return r end,
-                createLuaTableView=node,getIDandNUMs=gamedata.getIDandNUMs}, {__index=function() return function() end end})
+                createLuaTableView=node,creatInputEditBoxByNode=node,getIDandNUMs=gamedata.getIDandNUMs}, {__index=function() return function() end end})
             gameConfig={originSize={width=1080,height=1920},strings={string_common=function() return "法宝" end,
                 attr_type=setmetatable({}, {__index=function(t,k) return k end})}}
             GameScene={roleinfo={level=31,coin=100000000,gold=100000,g_gold=1000},vip={vip=0},layers={},addUpdate=function() end}
@@ -589,6 +637,37 @@ class MagicTests(unittest.TestCase):
         result["window"] = window.localMagicWindow
         lua.globals().UIInstrumentForgeAutomatic(lua.table_from(result))
         self.assertEqual(window.reloaded, 3)
+
+    def test_actual_auto_window_accepts_thousand_below_eighty_and_rejects_over_limit(self):
+        lua, page = self.ui_lua()
+        lua.execute('''ui.creatInputEditBoxByNode=function(parent,mode,began,ended,args)
+            inputBegan,inputEnded,inputArgs=began,ended,args
+            return node()
+        end''')
+        window = lua.execute(self.client_scripts()["assets/scripts/window_instrumentForgeAutomatic.so"].decode())
+        for level, vip in ((55, 0), (31, 5), (80, 0)):
+            with self.subTest(level=level, vip=vip):
+                lua.globals().GameScene.roleinfo.level = level
+                lua.globals().GameScene.vip.vip = vip
+                window.open(window, -100, lua.table_from({"iid": 1, "method": 2, "tuPoStatus": 0, "view": page.localMagicView}), None)
+                window.hasstonenum = 10000
+                window.numchange(window, 990)
+                self.assertEqual(window.donum, 1000)
+                self.assertEqual((window.rootItems.costnum1.text, window.rootItems.costnum2.text), (30000000, 1000))
+                window.numchange(window, 1)
+                self.assertEqual(window.donum, 1000)
+                self.assertEqual(lua.globals().inputArgs.length, 4)
+                window.initnum(window, 10)
+                lua.globals().inputBegan()
+                lua.globals().inputEnded("1000", lua.globals().node())
+                self.assertEqual((window.donum, window.rootItems.donum.text), (1000, 1000))
+                lua.globals().inputBegan()
+                lua.globals().inputEnded("1001", lua.globals().node())
+                self.assertEqual((window.donum, window.rootItems.donum.text), (1000, 1000))
+                window.rootItems.doButton.callback()
+                request = lua.globals().requests[len(lua.globals().requests)]
+                self.assertEqual((request.type, request.xlnum), (1364, 1000))
+                window.close(window)
 
 
 if __name__ == "__main__":
