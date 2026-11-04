@@ -1,8 +1,8 @@
 require("UIShop")
 
-local names = {"soul","soulResolveList","soulInfo","soulintegrate","buyItem"}
+local names = {"soul","soulResolveList","soulInfo","soulintegrate","buyItem","slotsInfo"}
 local function owner(name)
-    if name == "soul" or name == "soulResolveList" then return GameScene.layers[name] end
+    if name == "soul" or name == "soulResolveList" or name == "slotsInfo" then return GameScene.layers[name] end
     return gameWindows.windows[name]
 end
 function LocalSoulContext()
@@ -16,6 +16,11 @@ function LocalSoulContext()
     local info,buy = owner("soulInfo"),owner("buyItem")
     view.iid = info and info.module and info.module.data and info.module.data.iid
     view.item = buy and buy.module and buy.module.data and buy.module.data.id
+    local slots = owner("slotsInfo")
+    local module = slots and slots.module
+    local data = module and module.slotdata and module.slotdata[tostring(module.sid)]
+    view.sid = module and module.sid
+    view.general = data and data.general and data.general.iid
     return view
 end
 function LocalSoulMatch(view,name)
@@ -25,6 +30,11 @@ function LocalSoulMatch(view,name)
     if name == "soul" and view.page ~= item.module.selectpage then return end
     if name == "soulInfo" and view.iid ~= item.module.data.iid then return end
     if name == "buyItem" and view.item ~= item.module.data.id then return end
+    if name == "slotsInfo" then
+        local data = item.module.slotdata and item.module.slotdata[tostring(item.module.sid)]
+        if item.module.status ~= "soul" or view.sid ~= item.module.sid or not data or not data.general
+            or view.general ~= data.general.iid then return end
+    end
     return item.module
 end
 
@@ -88,9 +98,17 @@ function UISoulExchange(t)
     if LocalSoulMatch(t.soulView,"soul") then showRewardPopupWindow(t.getsouls) end
 end
 function UISoulUpgrade(t)
+    if t.soulPreview then
+        if not LocalSoulMatch(t.soulView,"slotsInfo") then return end
+        gameWindows:openWindow("confirm",{msg="消耗"..t.soulPreview[4].."灵元，将当前武将已装备命格共提升"..t.soulSteps.."级。\n优先低等级，不自动购买。是否继续？"},function()
+            if LocalSoulMatch(t.soulView,"slotsInfo") then UIRequest({type=2504,batch=t.soulPreview}) end
+        end)
+        return
+    end
     refresh()
     local info = LocalSoulMatch(t.soulView,"soulInfo")
     if info and t.newsoul and t.newsoul.iid == info.data.iid then info:reloaddata(table.merge(info.data,t.newsoul)) end
+    if t.soulSteps and LocalSoulMatch(t.soulView,"slotsInfo") then runGamePrompt({msg="一键强化完成，累计提升"..t.soulSteps.."级"}) end
 end
 function UISoulResolve(t)
     refresh()

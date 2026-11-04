@@ -51,6 +51,14 @@ class SoulTests(unittest.TestCase):
         raw = b"".join(protocol.encode_pb_field(n, 0, v) for n, v in ((1, sid), (2, pos), (3, iid)))
         return self.success(1, 1006, raw=raw)
 
+    def quick_upgrade(self, cost, sid=1):
+        items, slots = soul.read_world(self.save, self.config)
+        values = [0, sid, protocol.pb_get_varint(slots[sid], 2), cost]
+        for pos in range(1, 9):
+            iid = protocol.pb_get_varint(slots[sid], pos + 9) or 0
+            values.extend((iid, items[iid][2] if iid else 0))
+        return values
+
     def assert_rejected(self, opcode, account=1, **kwargs):
         before = copy.deepcopy(self.sessions[account].save)
         disk = self.store.path(account).read_bytes()
@@ -223,6 +231,88 @@ class SoulTests(unittest.TestCase):
         self.assert_rejected(2504, account=2, values=[a])
         self.save["role_state"]["level"] = 41
         self.assert_rejected(1006, raw=raw)
+
+    def test_quick_upgrade_matches_real_single_steps_and_only_spends_confirmed_dust(self):
+        a, b, idle = self.grant(70004), self.grant(70008), self.grant(70012)
+        self.wear(a); self.refresh()
+        self.wear(b, pos=2); self.refresh()
+        self.grant(20099, 100000)
+        self.sessions[2].save = copy.deepcopy(self.save)
+        budget, spent = 3000, 0
+        while True:
+            items = self.items(2)
+            choices = [i for i in (a, b) if self.config["soul"][str(items[i][1])]["upexp"] * 2 ** (items[i][2] - 1) <= budget - spent]
+            if not choices:
+                break
+            iid = min(choices, key=lambda i: (items[i][2], i))
+            spent += self.config["soul"][str(items[iid][1])]["upexp"] * 2 ** (items[iid][2] - 1)
+            self.success(2, 2504, values=[iid])
+        values = self.quick_upgrade(spent)
+        packets = self.request(1, 2504, values=values)
+        self.assertEqual(packets[0][0], 2504)
+        self.assertLess([m for m, _ in packets].index(2504), [m for m, _ in packets].index(1200))
+        self.refresh()
+        self.assertEqual(self.items(), self.items(2))
+        self.assertEqual(self.items()[idle][2], 1)
+        self.assertEqual(self.props(20099), 100000 - spent)
+        self.assertEqual(self.gen(), formation.records(bytes.fromhex(self.sessions[2].save["world_state"]["1002"]), 1, 2)[protocol.pb_get_varint(self.gen(), 2)])
+        before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+        cached = self.sessions[1].handle(2504, self.seq, guild.ids(values))
+        self.assertEqual([(struct.unpack(">IIII", p[:16])[2], p[16:]) for p in cached], packets)
+        self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+        self.reconnect(); self.refresh()
+        self.assertEqual((self.items(), self.props(20099)), (self.items(2), 100000 - spent))
+        self.assert_rejected(2504, values=values)
+
+    def test_quick_upgrade_obeys_every_team_gate_and_item_cap(self):
+        iid = self.grant(70020)
+        self.wear(iid); self.refresh()
+        self.grant(20099, 100000000)
+        current = 1
+        for role_level, maximum in ((55, 10), (70, 11), (80, 12), (90, 13), (100, 14), (110, 15)):
+            self.save["role_state"]["level"] = role_level
+            cost = sum(self.config["soul"]["70020"]["upexp"] * 2 ** (level - 1) for level in range(current, maximum))
+            self.success(1, 2504, values=self.quick_upgrade(cost))
+            self.refresh()
+            self.assertEqual(self.items()[iid][2], maximum)
+            self.assert_rejected(2504, values=self.quick_upgrade(1))
+            current = maximum
+
+    def test_quick_upgrade_skips_unaffordable_and_capped_souls_without_touching_another_slot(self):
+        expensive, cheap, capped, other = [self.grant(cid) for cid in (70053, 70005, 70020, 70012)]
+        player.record_slot_update(self.save, protocol.encode_pb_field(3, 2, soul.record([capped, 70020, 15])))
+        for pos, iid in enumerate((expensive, cheap, capped), 1):
+            self.wear(iid, pos=pos); self.refresh()
+        iid = 2000901
+        player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, recruit.new_general(10201, iid, self.config)))
+        self.success(1, 1003, raw=protocol.encode_pb_field(1, 0, 2) + protocol.encode_pb_field(3, 0, iid)); self.refresh()
+        self.wear(other, sid=2); self.refresh()
+        before = self.gen(iid)
+        self.grant(20099, 120)
+        self.success(1, 2504, values=self.quick_upgrade(120)); self.refresh()
+        self.assertEqual([self.items()[i][2] for i in (expensive, cheap, capped, other)], [1, 3, 15, 1])
+        self.assertEqual((self.gen(iid), self.props(20099)), (before, 0))
+        self.assert_rejected(2504, values=self.quick_upgrade(40))
+
+    def test_quick_upgrade_stale_quotes_targets_insufficient_dust_and_save_failure_are_atomic(self):
+        iid = self.grant(70004)
+        self.wear(iid); self.refresh()
+        self.grant(20099, 1000)
+        valid = self.quick_upgrade(220)
+        for index, value in ((0, 1), (1, 8), (2, valid[2] + 1), (3, 0), (3, 219), (3, 221),
+                             (3, 1540), (4, iid + 1), (5, 2), (6, iid), (7, 1)):
+            values = valid[:]
+            values[index] = value
+            self.assert_rejected(2504, values=values)
+        for values in (valid[:-1], valid + [0], [iid, iid], [0, 1, 220]):
+            self.assert_rejected(2504, values=values)
+        self.assert_rejected(999900, raw=guild.message(2504, guild.ids(valid)))
+        before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 2504, values=valid)
+        self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+        self.save["role_state"]["g_power"] = (1 << 31) - 1
+        self.assert_rejected(2504, values=valid)
 
     def test_growth_dedicated_team_and_battle_inputs_keep_souls_without_double_applying(self):
         a = self.grant(70020)
@@ -462,6 +552,38 @@ class SoulTests(unittest.TestCase):
         mode,opcode,raw=lua.globals().UITimeBagTrigCallBack(lua.table_from({b"opt":1,b"sysID":9}))
         self.assertEqual((mode,opcode,protocol.parse_ids_pb(raw)),(1,2882,[130007]))
 
+    def test_actual_network_quick_upgrade_previews_without_charging_and_commits_one_native_reply(self):
+        iid = self.grant(70004)
+        self.wear(iid); self.refresh()
+        self.grant(20099, 1000)
+        lua = self.network_lua(native_protobuf=True)
+        lua.globals().props_raw = bytes.fromhex(self.save["world_state"]["1200"])
+        lua.execute(b'local t=require("idnums_pb").IdNums();t:ParseFromString(props_raw);gamedata:Props(t.idnums)')
+        before = copy.deepcopy(self.save)
+        req = lua.table_from({b"sid": 1, b"general": protocol.pb_get_varint(self.gen(), 2), b"preview": True})
+        mode, opcode, preview = lua.globals().UISoulUpgradeCallBack(req)
+        self.assertEqual((mode, opcode, preview[b"soulSteps"]), (0, 2504, 2))
+        values = [preview[b"soulPreview"][i] for i in range(1, 21)]
+        self.assertEqual(values, self.quick_upgrade(660))
+        self.assertEqual(self.save, before)
+        self.assertIsNone(lua.globals().gamedata[b"ext"][b"localSoulBusy"])
+        confirm = lua.table_from({b"batch": preview[b"soulPreview"]})
+        mode, opcode, raw = lua.globals().UISoulUpgradeCallBack(confirm)
+        self.assertEqual((mode, opcode, protocol.parse_ids_pb(raw)), (1, 2504, values))
+        self.assertEqual(lua.globals().UISoulUpgradeCallBack(confirm)[0], 0)
+        lua.globals().NetErrorMessageCallback9(lua.table_from({b"rbuf": guild.ids([2502, 0])}))
+        self.assertEqual(lua.globals().gamedata[b"ext"][b"localSoulBusy"], 2504)
+        result = lua.globals().NetSoulUpgradeCallBack(lua.table_from({b"rbuf": self.success(1, 2504, raw=raw)}))
+        self.assertEqual(result[b"soulSteps"], 2)
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"props"][20099][b"num"], 340)
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"souls"][iid][b"level"], 3)
+        self.assertEqual(lua.globals().UISoulUpgradeCallBack(confirm)[0], 0)
+        for lock in (b"localFormationBusy", b"localEquipGrowthBusy"):
+            lua.globals().gamedata[b"ext"][lock] = True
+            self.assertEqual(lua.globals().UISoulUpgradeCallBack(req)[0], 0)
+            lua.globals().gamedata[b"ext"][lock] = None
+        self.assertIsNone(lua.globals().gameConfig)
+
     def test_real_soul_battle_report_converts_actual_animations_and_preserves_terminal_hp(self):
         try:
             from lupa.lua51 import LuaRuntime
@@ -621,6 +743,49 @@ class SoulTests(unittest.TestCase):
             layer.setlistCell(layer,cell,lua.table_from({**data,**extra}))
             cell.button2.callback()
             self.assertIn(message,lua.globals().prompt)
+
+    def test_actual_quick_upgrade_button_is_enabled_and_confirm_binds_slot_page_and_general(self):
+        lua = self.ui_lua()
+        lua.globals().slots_module = lua.execute(self.client_scripts()["assets/scripts/Layer_slotsInfo.so"].decode())
+        lua.execute('''slotpage={rootNode=node(),rootItems=items(),localSoulGeneration=1,sid=1,status="soul",systemid=slots_module.systemid,
+            slotdata={["1"]={sid=1,general={iid=123}}},addedDataNode={general={items=items()}},changeButtonStatus=function() end}
+            GameScene.layers.slotsInfo={show=true,module=slotpage}
+            slots_module.shiftButtonStatus(slotpage)
+            slotpage.rootItems.quickEquipUp.callback()''')
+        page = lua.globals().slotpage
+        self.assertTrue(page.rootItems.quickEquipUp.enabled)
+        self.assertFalse(page.rootItems.quickEquipUp.gray)
+        self.assertFalse(page.rootItems.quickEquipUptext.gray)
+        lua.execute('''GameScene.checkopenlevelbyId=function() return false end
+            slots_module.shiftStatus(slotpage,"stone")
+            assert(slotpage.status=="soul" and slotpage.localSoulGeneration==1)''')
+        req = lua.globals().requests[1]
+        self.assertEqual((req.type, req.sid, req.general, req.preview), (2504, 1, 123, True))
+        preview = lua.table_from({"type": 2504, "soulView": req.soulView, "soulPreview": [0, 1, 123, 660], "soulSteps": 2}, recursive=True)
+        lua.globals().UISoulUpgrade(preview)
+        self.assertEqual(lua.globals().opened.name, "confirm")
+        self.assertIn("660", lua.globals().opened.data.msg)
+        confirm = lua.globals().opened.callback
+        page.slotdata["1"].general.iid = 124
+        confirm()
+        self.assertEqual(len(lua.globals().requests), 1)
+        page.slotdata["1"].general.iid = 123
+        page.localSoulGeneration = 2
+        confirm()
+        self.assertEqual(len(lua.globals().requests), 1)
+        lua.globals().slots_module.shiftButtonStatus(page)
+        page.rootItems.quickEquipUp.callback()
+        preview.soulView = lua.globals().requests[2].soulView
+        lua.globals().UISoulUpgrade(preview)
+        lua.globals().opened.callback()
+        self.assertEqual(lua.globals().requests[3].type, 2504)
+        self.assertEqual(lua.globals().requests[3].batch[4], 660)
+        lua.globals().UISoulUpgrade(lua.table_from({"type": 2504, "soulView": preview.soulView, "soulSteps": 2}))
+        self.assertIn("一键强化完成", lua.globals().prompt)
+        old_button = page.rootItems.quickEquipUp.callback
+        page.status = "equip"
+        old_button()
+        self.assertEqual(len(lua.globals().requests), 3)
 
     def test_actual_page_reentry_and_lingshi_purchase_ignore_old_generations_and_other_windows(self):
         lua = self.ui_lua()

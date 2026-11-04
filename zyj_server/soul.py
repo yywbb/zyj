@@ -259,6 +259,42 @@ def prepare(opcode, save, body, config, now, seed):
                 origin, place = origins[0]
                 slots[origin] = pb_set_varint(slots[origin], place + 9, pb_get_varint(slots[sid], pos + 9) or 0)
             slots[sid] = pb_set_varint(slots[sid], pos + 9, iid)
+    elif opcode == 2504 and len(values) > 1:
+        if len(values) != 20 or values[0] != 0:
+            raise ValueError("一键强化需要阵位、武将、确认消耗和八孔当前命格/等级")
+        _, sid, general, quoted = values[:4]
+        if (sid not in slots or not general or pb_get_varint(slots[sid], 2) != general
+                or sid > min(7, config["role_exp"][str(save["role_state"]["level"])]["slotnum"])):
+            raise ValueError("一键强化的当前武将或阵位已变化")
+        shown, selected = [], []
+        for pos in range(1, 9):
+            iid = pb_get_varint(slots[sid], pos + 9) or 0
+            shown.extend((iid, items[iid][2] if iid else 0))
+            if iid:
+                selected.append(iid)
+        if values[4:] != shown:
+            raise ValueError("已装备命格或等级已变化，请重新确认")
+        integer(quoted, 1)
+        spent = 0
+        while True:
+            available = []
+            for iid in selected:
+                item = items[iid]
+                row = config["soul"][str(item[1])]
+                gate = config["soul_integrate_lv"].get(str(item[2] + 1), {}).get("battle_lv", 0)
+                if item[2] < row["limit1"] and save["role_state"]["level"] >= gate:
+                    amount = integer(row["upexp"] * 2 ** (item[2] - 1), 1)
+                    if amount <= quoted - spent:
+                        available.append((item[2], iid, amount))
+            if not available:
+                break
+            # 本地规则与装备一键强化一致：优先可负担的最低等级，同级按IID。
+            _, iid, amount = min(available)
+            items[iid][2] += 1
+            spent += amount
+        if spent != quoted:
+            raise ValueError("一键强化消耗已变化、灵元不足或已到等级上限，请重新确认")
+        costs = [(20099, spent)]
     elif opcode in (2504, 2506, 2507):
         worn = {pb_get_varint(raw, n) for raw in slots.values() for n in range(10, 18)} - {None, 0}
         if not values or len(values) != len(set(values)) or any(iid not in items for iid in values):

@@ -1886,6 +1886,26 @@ end
     put("window_soulInfo", code)
 
     code = generation(load("Layer_slotsInfo"), "slotsInfo", ("init", "clear"))
+    for marker, changed in (("    if not GameScene:checkopenlevelbyId(self.systemid[status]) then return end\n", "self.status ~= status"),
+                            ("function slotsInfo.setPage(self,page,needReset)\n", "self.sid ~= page")):
+        code = replace(code, marker, marker + f"    if {changed} then self.localSoulGeneration = (self.localSoulGeneration or 0) + 1 end\n")
+    start = code.index("function slotsInfo.shiftButtonStatus(self)\n")
+    end = code.index("\nfunction ", start+1)
+    block = code[start:end]
+    gray_start = block.index('    if self.status == "soul" then\n        ui.addGray("CCControlButton",self.rootItems.quickEquipUp)')
+    gray_end = block.index('    self.rootItems.quickEquip:setSwallowsTouch(true)', gray_start)
+    block = block[:gray_start] + '''    ui.removeGray("CCControlButton",self.rootItems.quickEquipUp)
+    ui.removeGray("CCLabelTTF",self.rootItems.quickEquipUptext)
+    if self.status == "soul" then self.rootItems.quickEquipUp:setEnabled(true) end
+
+''' + block[gray_end:]
+    marker = "    self.rootItems.quickEquipUp:addHandleOfControlEvent(function()\n"
+    block = replace(block, marker, '''    local generation,sid,status = self.localSoulGeneration,self.sid,self.status
+''' + marker + '''        if not self.rootNode or self.localSoulGeneration ~= generation or self.sid ~= sid or self.status ~= status then return end
+''')
+    block = replace(block, '''            -- runGamePrompt({msg = "不能一键强化"})
+            runGamePrompt({msg = gameConfig.strings:string_common("slotsInfo",4)})''', '''            UIRequest({type=2504,sid=slotdata.sid,general=slotdata.general.iid,preview=true})''')
+    code = code[:start] + block + code[end:]
     marker = '            elseif self.status == "soul" then\n'
     code = replace(code, marker, marker + "                local generation,sid = self.localSoulGeneration,self.sid\n")
     marker = '                            UIRequest({type=1006,slot = slotdata.sid, soulpos =slotdata["s"..i].soulpos, soulid = v.iid})'
