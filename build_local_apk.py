@@ -2055,6 +2055,84 @@ def patch_exchange_scripts(patched):
     patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
 
+def patch_dragon_wishing_scripts(patched):
+    for name, filename in (("GameDragonWishing", "dragon_wishing_network.lua"), ("UIDragonWishing", "dragon_wishing_ui.lua")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        if name == "GameDragonWishing":
+            marker = "    dragonwishing.pointstatus = {}"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    dragonwishing.serial = DragonWishingData.ids[156]\n" + marker)
+        else:
+            code = re.sub(r"(?m)^\s*UIRequest\(\{type\s*=\s*1001\}\)\s*$", "", code)
+            marker = '    if t.dragonwishing.time and t.dragonwishing.time > 0 then'
+            assert code.count(marker) == 1
+            code = code.replace(marker, '    gameTimer:UnrigistTimeFunc("shenlongxuyuandice")\n' + marker)
+            code = code.replace('t.dragonwishing.time+1)', 't.dragonwishing.time)')
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            patched[f"assets/scripts/{name}.so"] = xxtea_encrypt((code + "\n" + stream.read()).encode("utf-8"), XXTEA_KEY)
+    for name, prefix in (("Layer_shenlongxuyuan", "shenlongxuyuan"), ("window_shenlongxuyuan_event", "shenlongxuyuan_event"),
+            ("window_shenlongxuyuan_shop", "shenlongxuyuan_shop"), ("window_shenlongxuyuan_reward", "shenlongxuyuan_reward")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for method in (("init", "clear") if name.startswith("Layer_") else ("open", "close")):
+            start = code.index(f"function {prefix}.{method}(self")
+            end = code.index("\n", start) + 1
+            text = "    self.localDragonGeneration=(self.localDragonGeneration or 0)+1\n"
+            if method == "open":
+                text += "    self.localDragonSerial=data and data.dragonSerial\n"
+            code = code[:end] + text + code[end:]
+        if name.startswith("Layer_"):
+            marker = '        gameTimer:rigistTimeFunc("shenlongxuyuandice",function()'
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + '''
+            if self.localDragonRecoverRead then return end
+            gameTimer.times.shenlongxuyuandice=math.max(0,(GameScene.localDragonDiceDeadline or gamedata:time())-gamedata:time())''')
+            marker = '                UIRequest({type = 4901,opt = 2})'
+            assert code.count(marker) == 1
+            code = code.replace(marker, '''                self.localDragonRecoverRead=true
+                gameTimer:UnrigistTimeFunc("shenlongxuyuandice")
+''' + marker)
+        matches = list(re.finditer(rf"^function {prefix}\.[^(]+\(self[^\n]*\n", code, re.M))
+        for index in range(len(matches) - 1, -1, -1):
+            start = matches[index].start()
+            end = matches[index + 1].start() if index + 1 < len(matches) else code.rindex("return ")
+            block = code[start:end]
+            pattern = r"(?m)^([^\n]*?)(addHandleOfControlEvent\(function\([^\n]*?\)|setAnimationCompletedCallback\(function\(\)|rigistTimeFunc\([^\n]*?function\(\)|CCCallFunc:create\(function\([^\n]*?\)|local \w+ = function\([^\n]*?\))"
+            block = re.sub(pattern, lambda m: m.group(0) if m.group(1).lstrip().startswith("--") else m.group(0)
+                + "\n        if not self.rootNode or generation~=self.localDragonGeneration then return end\n", block)
+            if block != code[start:end]:
+                at = block.index("\n") + 1
+                if re.match(rf"function {prefix}\.(?:init|open)\(", block):
+                    at = block.index("\n", at) + 1
+                block = block[:at] + "    local generation=self.localDragonGeneration\n" + block[at:]
+                code = code[:start] + block + code[end:]
+        patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    key = "assets/common_lua/GameErrorMessage.so"
+    raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and error.ids[1]>=4901 and error.ids[1]<=4907 then
+        if gamedata.ext.localDragonBusy==error.ids[1] then
+            gamedata.ext.localDragonBusy=nil
+            gamedata.ext.dragonwishing_roll_gold=nil;gamedata.ext.dragonwishing_event_gold=nil;gamedata.ext.dragonwishing_shop_gold=nil
+        end
+        table.remove((gamedata.ext.localDragonPending or {})[error.ids[1]] or {},1)
+    end
+''')
+    patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    key = "assets/scripts/UIErrorMessage.so"
+    raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = "function UIErrorMessage(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if t.request_opcode and t.request_opcode>=4901 and t.request_opcode<=4907 then
+        local page=GameScene.layers.shenlongxuyuan
+        if page and page.module then page.module.m_bIsAutoGame=-1 end
+    end
+''')
+    patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+
 def patch_nightclub_scripts(patched):
     for name, filename in (("GameNightclub", "nightclub_network.lua"), ("UINightclub", "nightclub_ui.lua")):
         code = read_script(name).decode("utf-8").replace("\r\n", "\n")
@@ -3446,6 +3524,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_exchange_scripts(patched)
     patch_examination_scripts(patched)
     patch_nightclub_scripts(patched)
+    patch_dragon_wishing_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")
