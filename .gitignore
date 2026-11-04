@@ -3,6 +3,7 @@
 *.idsig
 *.log
 phone_screen.png
+/hotupdate_artifacts/
 
 # Misc archives not referenced in README
 1.zip
