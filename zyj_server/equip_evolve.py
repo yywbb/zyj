@@ -1,11 +1,11 @@
-"""普通装备进阶/升星、配置套装与真实材料；不启用注灵或宝物升星。"""
+"""普通装备进阶/升星/注灵、配置套装与真实材料。"""
 
 from collections import Counter
 from fractions import Fraction
 
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
-OPCODES = (1122, 1123)
+OPCODES = (1122, 1123, 5521)
 KINDS = ("weapon", "armor", "accessory", "head")
 FIELDS = {"atk": 6, "def": 7, "hp": 8, "speed": 9, "critical": 10, "dodge": 11,
           "parry": 12, "resilience": 13, "hit": 14, "arp": 15, "criticaldmg": 16}
@@ -25,6 +25,10 @@ def validate(data, row, config):
     if data[11] and (data[11] > row["up_star"] or str(data[11]) not in config.get("equip_star", {})
                      or not config["equip_star"][str(data[11])].get(f'cost_{row["quality"]}')):
         raise ValueError("装备星级或配置无效")
+    if data[12] and (not row["adorn"] or row["quality"] < 3 or data[12] > row["forging_maxlevel"]
+                     or row["forging_attr"] not in ("atk", "def", "hp") or row["forging_method"] != "value"
+                     or row["forging_grow"] <= 0 or str(data[12]) not in config.get("equip_forgingConsume", {})):
+        raise ValueError("装备注灵等级或配置无效")
 
 
 def score(item, config):
@@ -53,7 +57,8 @@ def related(cid, config):
 def rebirth_fee(item, config):
     data = item + [0] * (13 - len(item))
     row, prices = config["equip"][str(data[1])], config["renascence"]
-    fee = prices[str(data[2])]["strengthencost"] + prices[str(data[3])]["equipevolvecost"] + prices[str(data[11])]["star_cost"]
+    fee = (prices[str(data[2])]["strengthencost"] + prices[str(data[3])]["equipevolvecost"]
+           + prices[str(data[11])]["star_cost"] + prices[str(data[12])]["injection"])
     if data[10]:
         fee += int(config["global_kv"]["equip_baptize_cost"]["value"])
     if row["quality"] == 6 and row.get("relative"):
@@ -68,7 +73,7 @@ def rebirth_fee(item, config):
 def attributes(raw, slot, equips, config):
     from . import battle, equip_baptize
 
-    values, groups = {f: Fraction(0) for f in range(6, 17)}, {}
+    values, groups, injections = {f: Fraction(0) for f in range(6, 17)}, {}, []
     general = config["general"][str(pb_get_varint(raw, 1))]
     for field in range(4, 8):
         iid = pb_get_varint(slot, field)
@@ -79,6 +84,9 @@ def attributes(raw, slot, equips, config):
         if row["type"] != KINDS[field-4]:
             raise ValueError("装备穿戴部位无效")
         data = item + [0] * (13 - len(item))
+        injections.append(data[12])
+        if data[12]:
+            values[FIELDS[row["forging_attr"]]] += int(Fraction(str(row["forging_grow"])) * data[12])
         if data[11]:
             name = row["attr1"]
             if name not in FIELDS or row["method1"] != "value":
@@ -107,6 +115,10 @@ def attributes(raw, slot, equips, config):
                 values[FIELDS[name]] += amount
         if row["suit"]:
             groups.setdefault(row["suit"], []).append(data)
+    if len(injections) == 4 and min(injections) >= 5:
+        aura = config["equip_foringlv"][str(min(injections) // 5 * 5)]
+        for name in ("atk", "def", "hp"):
+            values[FIELDS[name]] += aura[name]
     for sid, items in groups.items():
         row = config["suit"][str(sid)]
         levels = []
@@ -185,11 +197,13 @@ def prepare(opcode, save, body, config):
     from . import cheer, equip_baptize, formation, qiankun, recharge, training
 
     fields = list(iter_pb_fields(body))
-    if len(fields) != 1 or fields[0][:2] != (1, 0) or not 0 < fields[0][2] < (1 << 31):
-        raise ValueError("装备养成需要唯一的目标IID")
+    if (len(fields) != (2 if opcode == 5521 else 1)
+            or any((n, w) != (1, 0) or not 0 < value < (1 << 31) for n, w, value in fields)):
+        raise ValueError("装备养成需要目标IID，注灵另需1至10次")
+    unlock = {1122: 150, 1123: 199, 5521: 384}[opcode]
     if (not save.get("has_role") or save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2
-            or save["role_state"]["level"] < config["build"][str(150 if opcode == 1122 else 199)]["level"]):
-        raise ValueError("装备进阶或升星尚未解锁")
+            or save["role_state"]["level"] < config["build"][str(unlock)]["level"]):
+        raise ValueError("装备养成尚未解锁")
     world = bytes.fromhex(save["world_state"]["1002"])
     equips, slots, cheers = formation.records(world, 2, 1), formation.records(world, 4, 1), formation.records(world, 5, 1)
     iid = fields[0][2]
@@ -204,7 +218,19 @@ def prepare(opcode, save, body, config):
     if str(iid) in equip_baptize.get_state(save, config)["pending"]:
         raise ValueError("请先处理本装备的洗炼预览")
     data, materials = item + [0] * (13 - len(item)), Counter()
-    if opcode == 1123:
+    if opcode == 5521:
+        count = fields[1][2]
+        if (not 1 <= count <= 10 or row["quality"] < 3
+                or data[12] + count > min(save["role_state"]["level"], row["forging_maxlevel"])):
+            raise ValueError("注灵次数无效，或超过队伍/装备注灵等级上限")
+        price = Counter()
+        for level in range(data[12] + 1, data[12] + count + 1):
+            step = costs(config["equip_forgingConsume"][str(level)][f'quality{row["quality"]}'])
+            if not step:
+                raise ValueError("装备注灵费用配置无效")
+            price.update(step)
+        data[12] += count
+    elif opcode == 1123:
         following = config["equip_star"].get(str(data[11] + 1))
         if not following or data[11] >= row["up_star"] or not following.get(f'cost_{row["quality"]}'):
             raise ValueError("此装备不能继续升星")

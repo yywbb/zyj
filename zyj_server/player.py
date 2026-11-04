@@ -58,6 +58,7 @@ def load_role_config(config_path):
                               "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "treasure2_star", "build",
                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold",
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
+                             "equip_forgingConsume", "equip_foringlv",
                               "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
                               "hoshimiya_break", "hoshimiya_jihuo", "protagonist_awaken",
                               "mozhao_evolve", "mozhao_soaring", "mozhao_liandan", "mozhao_shop", "mozhao_shoptype",

@@ -34,8 +34,8 @@ def validate(item, config):
     data = item + [0] * (13 - len(item))
     if row["type"] in KINDS:
         from . import equip_evolve
-        if data[4] or data[12]:
-            raise ValueError("装备经验或注灵数据暂不支持")
+        if data[4]:
+            raise ValueError("普通装备经验数据暂不支持")
         equip_evolve.validate(data, row, config)
         caps = limits(row, data[2])
         if any(value > caps[name] for name, value in zip(ATTRS, data[5:10])) or row["quality"] < 3 and data[10]:

@@ -27,7 +27,8 @@ function LocalEquipGrowthPage(view,name)
 end
 local send = UIRequest
 function UIRequest(req,...)
-    if req.type == 1122 or req.type == 1123 or req.type == 1127 or req.type == 12001 and (req.order == 14002 or req.order == 14003 or req.order == 34401) then
+    if req.type == 1122 or req.type == 1123 or req.type == 1127 or req.type == 5521
+        or req.type == 12001 and (req.order == 14002 or req.order == 14003 or req.order == 14004 or req.order == 34401) then
         req.growthView = LocalEquipGrowthContext()
     end
     return send(req,...)

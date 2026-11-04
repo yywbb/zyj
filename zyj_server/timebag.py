@@ -8,6 +8,7 @@ GIFTS = {PET_GIFT: ("pet_gift_state", 59), 130013: ("stone_gift_state", 104), 13
          130004: ("sigil_gift_state", 22), 130010: ("sigil_growth_gift_state", None), 130015: ("treasure_gift_state", 23),
          130016: ("magic_gift_state", 65), 130007: ("soul_gift_state", 73), 130021: ("equip_evolve_gift_state", 75),
           130009: ("equip_star_gift_state", 93), 130006: ("wing_gift_state", 86),
+          130019: ("equip_injection_gift_state", 79),
           130005: ("cover_gift_state", 97), 130017: ("cover_advance_gift_state", 78), 130026: ("cover_soaring_gift_state", 102),
           130018: ("gamestar_gift_state", None)}
 QUERIES = (2880,)

@@ -207,7 +207,7 @@ class EquipBaptizeTests(unittest.TestCase):
         self.session.save["role_state"]["level"] = 55
         for index in (3, 4, 11, 12):
             item = self.equip()
-            item[index] = 1
+            item[index] = 151 if index == 12 else 1
             player.record_slot_update(self.session.save, protocol.encode_pb_field(2, 2, recharge.ids(item)))
             self.assert_rejected(1120, recharge.ids([self.iid, 1, 1]))
             self.add_equip(self.iid, 21201)

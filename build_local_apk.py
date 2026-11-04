@@ -2006,7 +2006,7 @@ def patch_equip_evolve_scripts(patched):
     assert code.count(marker) == 1
     code = code.replace(marker, '''    elseif t.order == 34401 then
         if LocalEquipGrowthPage(t.growthView,"treasureup") then''')
-    for order, next_order in ((14002, 14003), (14003, 14004)):
+    for order, next_order in ((14002, 14003), (14003, 14004), (14004, 10721)):
         start = code.index(f"    elseif t.order == {order} then")
         end = code.index(f"    elseif t.order == {next_order} then", start)
         block = code[start:end]
@@ -2016,6 +2016,47 @@ def patch_equip_evolve_scripts(patched):
                 block = block.replace(marker, f'if LocalEquipGrowthPage(t.growthView,"{name}") then')
         code = code[:start] + block + code[end:]
     put("UIProps", code)
+
+    code = load("UIEquips")
+    start = code.index("function UIEquipCast(t)\n")
+    end = code.index("\nfunction ", start+1)
+    block = code[start:end]
+    assert block.count("    UIRequest({type = 1001})") == 1
+    block = block.replace("function UIEquipCast(t)\n", "function UIEquipCast(t)\n    if not t.equip then return end\n")
+    block = block.replace("    UIRequest({type = 1001})", "")
+    marker = '    if GameScene.layers["equipsup"].show then\n'
+    assert block.count(marker) == 1
+    block = block.replace(marker, '''    local page = LocalEquipGrowthPage(t.growthView,"equipsup")
+    if page and page.data.iid == t.growthIID then
+''')
+    put("UIEquips", code[:start] + block + code[end:])
+
+    code = load("Layer_equip_up")
+    marker = "data.equip.level1 > self.data.level1)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "data.equip.level1 > self.data.level1 or data.equip.level4 > self.data.level4)")
+    start = code.index("function equipUp.setPage_Cast(self)\n")
+    end = code.index("\nfunction ", start+1)
+    block = code[start:end]
+    marker = "    local equipConfig = gamedata.config.equip[tostring(self.data.cid)]\n"
+    assert block.count(marker) == 1
+    block = block.replace(marker, marker + "    local generation,iid = self.localEquipGrowthGeneration,self.data.iid\n")
+    guard = "            if not self.rootNode or self.localEquipGrowthGeneration ~= generation or not self.data or self.data.iid ~= iid or self.selectpage ~= \"cast\" then return end\n"
+    for marker in ("animationManager2:setAnimationCompletedCallback(function()\n", "animationManager:setAnimationCompletedCallback(function()\n",
+                   "self.rootItems.cast_upButton:addHandleOfControlEvent(function()\n", "self.rootItems.cast_addButton:addHandleOfControlEvent(function()\n"):
+        assert block.count(marker) == 1
+        block = block.replace(marker, marker + guard)
+    code = code[:start] + block + code[end:]
+    start = code.index("function equipUp.showAllEquipCast( self )")
+    end = code.index("\nfunction ", start+1)
+    block = code[start:end]
+    for old, new in (("local minLv = 1000;", "local minLv,worn = 1000,0;"),
+                     ("if v.cid == self.data.cid then", "if v.iid == self.data.iid then"),
+                     ("if curLv then", "if curLv then\n                worn = worn+1"),
+                     ("if minLv > 0 then", "if worn == 4 and minLv > 0 then")):
+        assert block.count(old) == 1
+        block = block.replace(old, new)
+    put("Layer_equip_up", code[:start] + block + code[end:])
 
 
 def patch_wing_scripts(patched):
