@@ -592,7 +592,7 @@ class LanBuildTests(unittest.TestCase):
         lua = LuaRuntime()
         lua.execute('''
             print,cclog,printT=function() end,function() end,function() end
-            for _,name in ipairs({'copies_pb','copyattack_pb','copyall3starreward_pb','result_pb','ids_pb','somethings_pb','PickBattleResultReport'}) do
+            for _,name in ipairs({'copies_pb','copyattack_pb','copyall3starreward_pb','result_pb','ids_pb','somethings_pb','PickBattleResultReport','GameRecharge'}) do
                 package.preload[name]=function() return {} end
             end
             package.preload.battleresult_pb=function()
@@ -625,6 +625,7 @@ class LanBuildTests(unittest.TestCase):
             for _,row in ipairs({{0,1},{1,3}}) do
                 local method,attempts=row[1],row[2]
                 gamedata.ext.copyattackwipe={map=42102,point=1,method=method,exchange=0}
+                gamedata.ext.localAutoCopyBusy={type=1307}
                 gamedata.cache.role.stamina=100
                 gamedata.cache.copy[42102].points[1].kill=1
                 local result=NetCopyWipe2Callback({rbuf={result=1,star=3,reward={},generals={},encounters={},
@@ -643,7 +644,7 @@ class LanBuildTests(unittest.TestCase):
         lua.execute('''
             print,cclog,printT,printf=function() end,function() end,function() end,function() end
             for _,name in ipairs({'copies_pb','copyall3starreward_pb','ids_pb','somethings_pb','PickBattleResultReport',
-                                  'battleresult_pb','error_pb','params_pb'}) do
+                                  'battleresult_pb','error_pb','params_pb','GameRecharge'}) do
                 package.preload[name]=function() return {} end
             end
             package.preload.logError=function() return {errorMessage={}} end
@@ -682,262 +683,20 @@ class LanBuildTests(unittest.TestCase):
         self.assertNotIn("UIRequest({type = 1001})", block)
 
     def test_auto_copy_is_opt_in_sequential_and_stops_safely(self):
-        try:
-            from lupa.lua51 import LuaRuntime
-        except ImportError:
-            self.skipTest("自动推图回调验证需本机已有 lupa.lua51")
         scripts = self.client_scripts()
         layer = scripts["assets/scripts/Layer_copy_list.so"]
         self.assertIn("AutoCopyAttach(self,toppos)", layer)
         self.assertIn("AutoCopyDetach(self)", layer)
         self.assertIn("AutoCopyBlockManual()", layer)
         self.assertIn('[1306] = 1', scripts["assets/scripts/gameloop2.so"])
+        self.assertIn('[1307] = 1', scripts["assets/scripts/gameloop2.so"])
         self.assertIn('os.time() > timeinteval[uireq["type"]]+2', scripts["assets/scripts/gameloop2.so"])
-        lua = LuaRuntime()
-        lua.execute('''
-            print,printT,cclog=function() end,function() end,function() end
-            package.preload.BattleReportAbbToKey=function() return {} end
-            events={}; requests={}; notices={}; confirmed=nil
-            wallClock=1000;os.time=function() return math.floor(wallClock) end
-            local function event(kind,value) table.insert(events,{kind=kind,value=value}) end
-            UIRequest=function(req) table.insert(requests,req) end
-            runGamePrompt=function(t) table.insert(notices,t.msg) end
-            RunbattleCallBack=function(kind,t,cb) event('battle',t.result) end
-            updateDataLife=function(reward) event('rewards',reward) end
-            setTriggerGiftEnable=function() end
-            guide={controller={isOnGuide=false}}
-            gamedata={config={copy={
-                ['42101']={['1']={physical=5,challenge=3},['2']={physical=5,challenge=3}},
-                ['42102']={['1']={physical=6,challenge=3}}}}}
-            local function root() return {children={},addChild=function(self,child) table.insert(self.children,child) end} end
-            local function scheduler()
-                return {stopAllActions=function(self) self.action=nil end,
-                    runAction=function(self,action) self.action=action end,
-                    fire=function(self,seconds)
-                        local action=self.action;self.action=nil
-                        if action then wallClock=wallClock+(seconds or math.ceil(action.delay)+1);action.callback() end
-                    end}
-            end
-            CCNode={create=function() return scheduler() end}
-            CCDelayTime={create=function(_,delay) return delay end}
-            CCCallFunc={create=function(_,callback) return callback end}
-            CCSequence={createWithTwoActions=function(_,delay,callback) return {delay=delay,callback=callback} end}
-            CCControlStateNormal=0; CCControlStateHighlighted=1; CCControlStateDisabled=2; CCControlEventTouchUpInside=1
-            CCString={create=function(_,text) return {value=text} end}
-            CCSizeMake=function(w,h) return {width=w,height=h} end
-            ccp=function(x,y) return {x=x,y=y} end
-            CCControlButton={create=function()
-                return {setPreferredSize=function(self,size) self.size=size end,setAnchorPoint=function() end,
-                    setPosition=function(self,position) self.position=position end,
-                    setTouchPriority=function() end,setSwallowsTouch=function() end,
-                    setBackgroundSpriteFrameForState=function(_,frame) assert(frame=='button-frame') end,
-                    setTitleForState=function(self,title,state)
-                        assert(type(title)=='string','native button title must be a Lua string')
-                        self.titles=self.titles or {};self.titles[state]=title;self.title=title
-                    end,
-                    addHandleOfControlEvent=function(self,callback) self.callback=callback end}
-            end}
-            local frames={}
-            CCSpriteFrameCache={sharedSpriteFrameCache=function() return {
-                spriteFrameByName=function(_,name) return frames[name] end,
-                addSpriteFrame=function(_,frame,name) frames[name]=frame end} end}
-            CCSprite={create=function(_,path)
-                if path=='public/publicsprite/b_n_button5.png' then return {displayFrame=function() return 'button-frame' end} end
-            end}
-            ui={createLabel=function(args) return {x=args.x,y=args.y,setString=function(self,value) self.value=value end} end}
-            gameWindows={windows={},openWindow=function(self,name,args,cb) confirmed=cb end}
-            gameConfig={originSize={width=1080}}
-            GameScene={presentLayer='copy_map',roleinfo={stamina=20},layers={
-                copy_map={show=true,module={}},copy_chapter={show=false,module={}}},
-                addUpdate=function() end,checkopenlevelbyId=function() return false end}
-            function makeLayer()
-                local layer={datatype='normal',rootNode=root(),data={id=42101,
-                    points={['1']={id=1,star=0,kill=0}}}}
-                function layer:reloadnormalData(copy,param) self.lastParam=param end
-                GameScene.layers.copy_map.module=layer
-                return layer
-            end
-            function dataFor(map,point,nextmap,nextpoint)
-                return {result=1,map=map,point=point,localAutoCopy=1,localAutoStamina=10,
-                    exp={oldlevel=16,newlevel=16},reward={},copy={['1']={maps={
-                        [tostring(nextmap-42100)]={id=nextmap,points={[tostring(nextpoint)]={id=nextpoint,star=0,kill=0}}}}}}}
-            end
-        ''')
-        lua.execute((Path(__file__).parent / "scripts_clean/setSpriteFrame.lua").read_text())
-        lua.execute(scripts["assets/scripts/UICopy.so"])
-        lua.execute('''
-            layer=makeLayer();AutoCopyAttach(layer,1500)
-            assert(layer.autoCopyButton.title=='自动推图' and #requests==0)
-            assert(layer.autoCopyButton.position.x+layer.autoCopyButton.size.width/2<gameConfig.originSize.width-250)
-            assert(layer.autoCopyLabel.y>layer.autoCopyButton.position.y)
-            for _,state in ipairs({CCControlStateNormal,CCControlStateHighlighted,CCControlStateDisabled}) do
-                assert(layer.autoCopyButton.titles[state]=='自动推图')
-            end
-            layer.autoCopyButton.callback();assert(confirmed and #requests==0)
-            confirmed();assert(layer.autoCopyTimer.action.delay>=3);layer.autoCopyTimer:fire()
-            assert(#requests==1 and requests[1].type==1306 and requests[1].map==42101 and requests[1].point==1)
-            assert(requests[1].local_auto_copy and layer.autoCopyButton.title=='停止推图')
-            for _,state in ipairs({CCControlStateNormal,CCControlStateHighlighted,CCControlStateDisabled}) do
-                assert(layer.autoCopyButton.titles[state]=='停止推图')
-            end
-            assert(AutoCopyBlockManual())
-            UICopyAttack2(dataFor(42101,1,42101,2))
-            assert(#requests==2 and requests[2].type==1001)
-            assert(layer.lastParam.section==1 and layer.lastParam.map==1 and layer.lastParam.point==2)
-            assert(layer.autoCopyTimer.action.delay>=3)
-            layer.autoCopyTimer:fire()
-            assert(#requests==3 and requests[3].point==2)
-            UICopyAttack2(dataFor(42101,2,42102,1))
-            layer.autoCopyTimer:fire()
-            assert(requests[#requests].map==42102 and requests[#requests].point==1)
-            assert(layer.lastParam.section==1 and layer.lastParam.map==2 and layer.lastParam.point==1)
-            local lost=dataFor(42102,1,42102,1);lost.result=0
-            UICopyAttack2(lost)
-            assert(not AutoCopyIsRunning() and layer.autoCopyButton.title=='自动推图')
-            assert(events[#events].kind=='battle' and events[#events].value==0)
-            local count=#requests;layer.autoCopyTimer:fire();assert(#requests==count)
-        ''')
-        lua.execute('''
-            layer=makeLayer();AutoCopyAttach(layer,1500);layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            local before=#requests
-            layer.autoCopyButton.callback();assert(not AutoCopyIsRunning())
-            layer.autoCopyButton.callback();assert(#requests==before)
-            UICopyAttack2(dataFor(42101,1,42101,2))
-            assert(#requests>=before and events[#events].kind=='battle')
-            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            local changed=dataFor(42101,1,42101,2);changed.exp.newlevel=17
-            UICopyAttack2(changed);assert(not AutoCopyIsRunning() and events[#events].kind=='battle')
-        ''')
-        lua.execute('''
-            layer=makeLayer();AutoCopyAttach(layer,1500);layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            local low=dataFor(42101,1,42101,2);low.localAutoStamina=4
-            UICopyAttack2(low);local count=#requests;layer.autoCopyTimer:fire()
-            assert(not AutoCopyIsRunning() and #requests==count and notices[#notices]:find('体力'))
-            layer=makeLayer();AutoCopyAttach(layer,1500);layer.autoCopyButton.callback();confirmed()
-            guide.controller.isOnGuide=true;count=#requests;layer.autoCopyTimer:fire()
-            assert(not AutoCopyIsRunning() and #requests==count and notices[#notices]:find('引导'))
-            guide.controller.isOnGuide=false
-            layer.autoCopyButton.callback();confirmed();gameWindows.windows.interrupt={show=true};layer.autoCopyTimer:fire()
-            assert(not AutoCopyIsRunning() and #requests==count and notices[#notices]:find('弹窗'))
-            gameWindows.windows.interrupt.show=false
-        ''')
-        lua.execute('''
-            layer=makeLayer();GameScene.roleinfo.stamina=4;AutoCopyAttach(layer,1500)
-            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            assert(not AutoCopyIsRunning() and notices[#notices]:find('体力'))
-            GameScene.roleinfo.stamina=20;guide.controller.isOnGuide=true
-            layer.autoCopyButton.callback();assert(not AutoCopyIsRunning() and notices[#notices]:find('引导'))
-            guide.controller.isOnGuide=false
-            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-        ''')
-        lua.execute('package.preload.logError=function() return {errorMessage={},errorFunc={}} end')
-        lua.execute(scripts["assets/scripts/UIPrompt.so"])
-        lua.execute('''
-            local previous=confirmed
-            UIPrompt({msgtype='shortphysical',localAutoCopy=1})
-            assert(not AutoCopyIsRunning() and not AutoCopyBlockManual())
-            assert(confirmed==previous and notices[#notices]:find('体力'))
-            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            layer.autoCopyButton.callback();assert(not AutoCopyIsRunning() and AutoCopyBlockManual())
-            assert(not AutoCopyLocalReject({msgtype='shortphysical'}))
-            assert(AutoCopyBlockManual())
-            UIPrompt({msgtype='shortphysical',localAutoCopy=1})
-            assert(not AutoCopyBlockManual())
-            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            function gameConfig:checkBuildOpen() return true end
-            function gameWindows:closeAllWindowDirect() end
-            function GameScene:UpdatePresentLayer() end
-        ''')
-        lua.execute(scripts["assets/scripts/UIErrorMessage.so"])
-        lua.execute('''
-            UIErrorMessage({errornum=0,request_opcode=1306})
-            assert(not AutoCopyIsRunning() and not AutoCopyBlockManual())
-            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            local count=#requests
-            assert(layer.autoCopyTimer.action.delay==20);layer.autoCopyTimer:fire()
-            assert(not AutoCopyIsRunning() and AutoCopyBlockManual() and #requests==count)
-            layer.autoCopyButton.callback();assert(#requests==count)
-            UICopyAttack2(dataFor(42101,1,42101,2))
-            assert(not AutoCopyBlockManual() and events[#events].kind=='battle')
-            for _,req in ipairs(requests) do assert(req.type==1306 or req.type==1001) end
-            layer.autoCopyButton.callback();confirmed();layer.autoCopyTimer:fire()
-            AutoCopyDetach(layer);assert(not AutoCopyIsRunning())
-        ''')
-        network = LuaRuntime()
-        network.execute('''print,cclog,cctrace=function() end,function() end,function() end
-            package.preload.network=function() return {} end
-            package.preload.uiqueue=function() return {
-                getrequestfromui=function() local t=request;request=nil;return t end,
-                setresponsetoui=function() end,
-                autorelease=function() coroutine.yield() end} end
-            os.time=function() return math.floor(wallClock) end
-            __G_TRACKBACK__=tostring
-            UIReqeustClear=function() end;UIRequest_=function() end
-            checkNetSatus=function() return true end
-            ConnectToServer=function() return {sock={close=function() end}} end
-            TCPSelect1conn=function() return true end
-            accepted=0
-            local runner=coroutine.create(function()
-                GameLoop2({}, {[1306]=function()
-                    accepted=accepted+1;return 0,1306,{type=1306}
-                end},{},{})
-            end)
-            function pump(t)
-                request=t;local before=accepted
-                local ok,err=coroutine.resume(runner)
-                assert(ok and coroutine.status(runner)=='suspended',err)
-                return accepted>before
-            end''')
-        network.execute(scripts["assets/scripts/gameloop2.so"])
-
-        def accepts_request(request):
-            network.globals().wallClock = lua.globals().wallClock
-            return network.globals().pump(network.table_from(dict(request.items())))
-
-        lua.globals().networkAcceptsRequest = accepts_request
-        lua.execute('''
-            UICopyAttack2(dataFor(42101,1,42101,2))
-            local enqueue=UIRequest
-            UIRequest=function(t)
-                enqueue(t)
-                if t.type==1306 then assert(networkAcceptsRequest(t),'native throttle dropped automatic challenge') end
-            end
-            local function fireScaled(speed) layer.autoCopyTimer:fire(layer.autoCopyTimer.action.delay/speed) end
-            for _,speed in ipairs({1,3,10}) do
-                wallClock=wallClock+100
-                assert(networkAcceptsRequest({type=1306})) -- 刚完成一场手动挑战。
-                layer=makeLayer();AutoCopyAttach(layer,1500)
-                layer.autoCopyButton.callback();confirmed()
-                for point=1,2 do
-                    local started=wallClock;local count=#requests
-                    for i=1,500 do
-                        fireScaled(speed)
-                        if #requests>count then break end
-                    end
-                    assert(#requests==count+1 and requests[#requests].type==1306 and requests[#requests].point==point)
-                    assert(wallClock-started>=3.1-1e-6,'scaled timer sent challenge before real-time cooldown')
-                    if point==1 then UICopyAttack2(dataFor(42101,1,42101,2)) end
-                end
-                local waiting=wallClock;local count=#requests
-                for i=1,1000 do
-                    fireScaled(speed)
-                    if not AutoCopyIsRunning() then break end
-                end
-                assert(not AutoCopyIsRunning() and wallClock-waiting>=20-1e-6,'scaled timer timed out too early')
-                assert(AutoCopyBlockManual() and #requests==count) -- 结果未知时仍不可重试。
-                UICopyAttack2(dataFor(42101,2,42102,1))
-                assert(not AutoCopyBlockManual() and events[#events].kind=='battle')
-                AutoCopyDetach(layer)
-            end
-            layer=makeLayer();AutoCopyAttach(layer,1500)
-            layer.autoCopyButton.callback();confirmed()
-            local count=#requests
-            layer.autoCopyTimer:fire(0.1)
-            assert(AutoCopyIsRunning() and #requests==count)
-            layer.autoCopyButton.callback()
-            assert(not AutoCopyIsRunning() and not AutoCopyBlockManual() and layer.autoCopyTimer.action==nil)
-            AutoCopyDetach(layer)
-        ''')
+        self.assertIn('require"window_localAutoCopy"', scripts["assets/scripts/GameWindows.so"])
+        self.assertNotIn("assets/scripts/gameWindows.so", scripts)
+        self.assertIn("AutoCopyHandle(t)", scripts["assets/scripts/UIRecharge.so"])
+        for name in ("UICopyQuery", "UICopyAttack2", "UICopyWipe2", "UICopyResetKill"):
+            self.assertIn(f"function {name}(t)\n    if AutoCopyHandle(t) then return end", scripts["assets/scripts/UICopy.so"])
+        # 状态机、弹窗、真实双Lua限流和付费链的行为覆盖在test_auto_copy。
 
     def test_auto_copy_network_handoff_keeps_real_stamina_and_manual_behavior(self):
         try:
@@ -949,7 +708,7 @@ class LanBuildTests(unittest.TestCase):
             print,cclog,printT=function() end,function() end,function() end
             local function message() return {ids={},SerializeToString=function(self) return self.ids end,
                 ParseFromString=function(self,data) for k,v in pairs(data) do self[k]=v end end} end
-            for _,name in ipairs({'copies_pb','copyattack_pb','copyall3starreward_pb','result_pb','somethings_pb','PickBattleResultReport'}) do
+            for _,name in ipairs({'copies_pb','copyattack_pb','copyall3starreward_pb','result_pb','somethings_pb','PickBattleResultReport','GameRecharge'}) do
                 package.preload[name]=function() return {} end
             end
             package.preload.ids_pb=function() return {Ids=message} end
@@ -968,6 +727,7 @@ class LanBuildTests(unittest.TestCase):
             function gamedata:updateRoleStamina(value) self.cache.role.stamina=self.cache.role.stamina+value end
             function gamedata:Generals() end
             function gamedata:GeneralsEXP() return {} end
+            function gamedata:time() return 1000 end
         ''')
         lua.execute(self.client_scripts()["assets/scripts/GameCopy.so"])
         lua.execute('''
@@ -1537,7 +1297,7 @@ class LanBuildTests(unittest.TestCase):
         ''')
         lua.execute(scripts["assets/scripts/GameCopy.so"])
         lua.execute('''
-            gamedata.cache={copy={stale=true}}
+            gamedata.cache={copy={stale=true}};gamedata.ext={}
             local remote,opcode,body=UICopyQueryCallback({update=true})
             assert(remote==1 and opcode==1300 and body==nil)
         ''')

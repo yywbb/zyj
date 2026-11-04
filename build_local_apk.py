@@ -2585,10 +2585,11 @@ end"""
 ''')
     marker = "    return { type = 9999, errornum = error.ids[2], msg = cnMessage }"
     assert code.count(marker) == 1
-    code = code.replace(marker, "    return { type = 9999, errornum = error.ids[2], msg = cnMessage, request_opcode = error.ids[1] }")
+    code = code.replace(marker, "    return { type = 9999, errornum = error.ids[2], msg = cnMessage, request_opcode = error.ids[1], localAutoCopy = localAutoError and localAutoError.local_auto_copy }")
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
-    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and gamedata.ext.localGuildBusy == error.ids[1] then gamedata.ext.localGuildBusy = nil end
+    code = code.replace(marker, marker + '''    local localAutoError = LocalAutoCopyError and LocalAutoCopyError(error.ids[1])
+    if gamedata and gamedata.ext and gamedata.ext.localGuildBusy == error.ids[1] then gamedata.ext.localGuildBusy = nil end
     if gamedata and gamedata.ext then
         if gamedata.ext.localWorldBossBusy==error.ids[1] then gamedata.ext.localWorldBossBusy=nil end
         local pending=gamedata.ext.localWorldBossPending or {}
@@ -3431,6 +3432,8 @@ end
     block = code[start:end]
     assert block.count("result_pb.Result()") == 1
     code = code[:start] + block.replace("result_pb.Result()", "copyAll3StarAwardResultPb.Result()") + code[end:]
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "auto_copy_network.lua"), encoding="utf-8") as source:
+        code += "\n" + source.read()
     patched["assets/scripts/GameCopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("UICopy").decode("utf-8").replace("\r\n", "\n")
@@ -3439,12 +3442,35 @@ end
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "auto_copy.lua"), encoding="utf-8") as source:
         auto_copy = source.read()
     code = code.replace(marker, auto_copy + "\n" + marker + "    if AutoCopyHandle(t) then return end\n")
+    for name in ("UICopyQuery", "UICopyWipe2", "UICopyResetKill"):
+        marker = f"function {name}(t)\n"
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    if AutoCopyHandle(t) then return end\n")
     start = code.index("function UICopyResetKill(t)\n")
     end = code.index("\nend", start)
     marker = "    UIRequest({type = 1001})\n"
     assert code[start:end].count(marker.rstrip("\n")) == 1
     code = code[:start] + code[start:end].replace(marker.rstrip("\n"), "") + code[end:]
     patched["assets/scripts/UICopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    path = "assets/scripts/UIRecharge.so"
+    raw = xxtea_decrypt(patched[path], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = "function UIUserBuy(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if AutoCopyHandle and AutoCopyHandle(t) then return end\n")
+    marker = "    GameScene.vipstatus= t.vipstatus\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if AutoCopyHandle and AutoCopyHandle(t) then return end\n")
+    patched[path] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = read_script("GameWindows").decode("utf-8").replace("\r\n", "\n")
+    marker = '        setgmspeed = {type = "normal",postype = "center", module = require"window_setgmspeed"},'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '\n        localAutoCopy = {type = "normal",postype = "center", module = require"window_localAutoCopy"},')
+    patched["assets/scripts/GameWindows.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "auto_copy_window.lua"), encoding="utf-8") as source:
+        patched["assets/scripts/window_localAutoCopy.so"] = xxtea_encrypt(source.read().encode("utf-8"), XXTEA_KEY)
 
     code = read_script("Layer_copy_list").decode("utf-8").replace("\r\n", "\n")
     marker = "    self:setParam(param)\n    self:reloaddata()\nend\n"
