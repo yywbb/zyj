@@ -308,7 +308,7 @@ class TreasureRefineTests(unittest.TestCase):
         self.assertIsNone(lua.globals().gameConfig)
         target, food = self.equip(refined=4), self.equip()
         lua.globals().gamedata[b"cache"][b"equips"][food] = lua.table_from({b"iid": food, b"cid": 25401})
-        request = lua.table_from({b"iid": target, b"ids": lua.table_from([food]), b"xprops": lua.table_from([
+        request = lua.table_from({b"iid": target, b"ids": lua.table_from({b"1": food}), b"xprops": lua.table_from([
             lua.table_from({b"cid": 1000, b"num": 80000}), lua.table_from({b"cid": 20256, b"num": 252})])})
         mode, opcode, body = lua.globals().UITreasureRefine2CallBack(request)
         self.assertEqual((mode, opcode, protocol.parse_ids_pb(body)), (1, 1119, [target, food]))
@@ -321,6 +321,18 @@ class TreasureRefineTests(unittest.TestCase):
         lua.globals().gamedata[b"ext"][b"localTreasureBusy"] = True
         lua.globals().NetErrorMessageCallback9(lua.table_from({b"rbuf": recharge.ids([1119, 0])}))
         self.assertFalse(lua.globals().gamedata[b"ext"][b"localTreasureBusy"])
+        for selected, expected in (([food, food + 1], [food, food + 1]),
+                                   ({b"2": food + 1, b"1": food}, [food, food + 1])):
+            request[b"ids"] = lua.table_from(selected)
+            mode, opcode, raw = lua.globals().UITreasureRefine2CallBack(request)
+            self.assertEqual((mode, opcode, protocol.parse_ids_pb(raw)), (1, 1119, [target, *expected]))
+            lua.globals().NetErrorMessageCallback9(lua.table_from({b"rbuf": recharge.ids([1119, 0])}))
+        from lupa.lua51 import LuaError
+        for selected in ({b"2": food}, {1: food, b"1": food + 1}):
+            request[b"ids"] = lua.table_from(selected)
+            with self.assertRaises(LuaError):
+                lua.globals().UITreasureRefine2CallBack(request)
+            self.assertFalse(lua.globals().gamedata[b"ext"][b"localTreasureBusy"])
 
     def test_actual_refine_page_uses_configured_copy_count_and_ignores_late_other_target_callbacks(self):
         try:

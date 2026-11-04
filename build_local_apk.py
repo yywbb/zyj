@@ -960,7 +960,8 @@ def patch_treasure_scripts():
     block = code[start:end]
     marker = "    for k,v in pairs(uireq.ids) do"
     assert block.count(marker) == 1
-    code = code[:start] + block.replace(marker, "    for k,v in ipairs(uireq.ids) do") + code[end:]
+    code = code[:start] + block.replace(marker, '''    for i=1,table.getTableLength(uireq.ids or {}) do
+        local v=assert(uireq.ids[i] or uireq.ids[tostring(i)],"宝物材料列表无效，请重新打开页面")''') + code[end:]
     return {"GameTreasureUp": code}
 
 
