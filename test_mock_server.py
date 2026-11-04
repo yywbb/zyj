@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, formation, guide, mieshendian, pets, player, protocol, qiankun, ranking, recharge, recruit, replay, rob, secret_shop, shop, star_copy, training, welfare
+from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, fashion, formation, guide, mieshendian, pets, player, protocol, qiankun, ranking, recharge, recruit, replay, rob, secret_shop, shop, star_copy, training, welfare
 from zyj_server.session import Session
 
 
@@ -1303,6 +1303,71 @@ class ReplayRoutingTests(unittest.TestCase):
         original = self.save_path.read_bytes()
         self.assertEqual(self.replay([self.activity_request(1074, [80001])])[0]["opcode"], 999999)
         self.assertEqual(self.save_path.read_bytes(), original)
+
+    def test_fashion_switch_uses_previous_coat_mapping_and_preserves_owned_bonuses(self):
+        saved = self.seed_shop_account()
+        player.apply_reward(saved, activities.build_reward(saved, "80001,1;80007,1;", self.role_config), self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(1073, [80001])])
+        before = json.loads(self.save_path.read_text())
+        iid = protocol.pb_get_varint(bytes.fromhex(before["protagonist_snapshot"]), 1)
+        original = self.entity_records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)[iid]
+        old_cid = protocol.pb_get_varint(original, 1)
+        base = next(r["role_id"] for r in self.role_config["fashioncoat"]["80001"].values() if r["coat_id"] == old_cid)
+        for cid in (80007, 80001, 80007):
+            request = self.activity_request(1073, [cid])
+            replies = self.replay([request, request])
+            self.assertEqual([r["opcode"] for r in replies], [1073, 1073])
+            saved = json.loads(self.save_path.read_text())
+            raw = self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2)[iid]
+            expected = self.role_config["fashioncoat"][str(cid)][str(base)]["coat_id"]
+            self.assertEqual(raw, protocol.pb_set_varint(original, 1, expected))
+            self.assertEqual(saved["fashion_state"], {"equipped": cid, "show": 1, "levels": before["fashion_state"]["levels"]})
+            self.assertEqual(saved["role_state"]["profile"], expected)
+            for field in ("coin", "gold", "power", "power_all"):
+                self.assertEqual(saved["role_state"][field], before["role_state"][field])
+        self.assertEqual(protocol.parse_ids_pb(self.query_world(1070)), [80007, 1, 80001, 1, 80007, 1])
+        self.replay([self.activity_request(1071)])
+        self.assertEqual(protocol.pb_get_varint(self.entity_records(self.query_world(1002), 1, 2)[iid], 1), base)
+        self.replay([self.activity_request(1071)])
+        self.assertEqual(protocol.pb_get_varint(self.entity_records(self.query_world(1002), 1, 2)[iid], 1), expected)
+
+    def test_all_owned_fashion_pairs_preserve_each_of_the_21_base_shapes(self):
+        template = self.seed_shop_account()
+        iid = protocol.pb_get_varint(bytes.fromhex(template["protagonist_snapshot"]), 1)
+        original = self.entity_records(bytes.fromhex(template["world_state"]["1002"]), 1, 2)[iid]
+        for base in self.role_config["fashioncoat"]["80001"]:
+            for source, rows in self.role_config["fashioncoat"].items():
+                saved = copy.deepcopy(template)
+                saved["fashion_state"] = {"equipped": int(source), "show": 1,
+                                          "levels": dict.fromkeys(self.role_config["fashioncoat"], 1)}
+                raw = protocol.pb_set_varint(original, 1, rows[base]["coat_id"])
+                player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+                for target, next_rows in self.role_config["fashioncoat"].items():
+                    with self.subTest(base=base, source=source, target=target):
+                        working = copy.deepcopy(saved)
+                        _, costs, changed = fashion.prepare(1073, working, recharge.ids([int(target)]), self.role_config, self.now)
+                        self.assertEqual(costs, [])
+                        self.assertEqual(changed, protocol.pb_set_varint(raw, 1, next_rows[base]["coat_id"]))
+
+    def test_fashion_switch_failure_is_atomic_and_unknown_shapes_still_reject(self):
+        saved = self.seed_shop_account()
+        player.apply_reward(saved, activities.build_reward(saved, "80001,1;80007,1;", self.role_config), self.role_config, self.now)
+        self.save_path.write_text(json.dumps(saved))
+        self.replay([self.activity_request(1073, [80001])])
+        with redirect_stdout(io.StringIO()):
+            session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+            memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                session.handle(1073, 21000, recharge.ids([80007]))
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+            iid = protocol.pb_get_varint(bytes.fromhex(session.save["protagonist_snapshot"]), 1)
+            raw = self.entity_records(bytes.fromhex(session.save["world_state"]["1002"]), 1, 2)[iid]
+            player.record_slot_update(session.save, protocol.encode_pb_field(1, 2, protocol.pb_set_varint(raw, 1, 10201)))
+            memory = copy.deepcopy(session.save)
+            packets = session.handle(1073, 21001, recharge.ids([80007]))
+            self.assertEqual([struct.unpack(">IIII", p[:16])[2] for p in packets], [999999, 1999])
+            self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
 
     def test_fashion_appearance_changes_do_not_emit_zero_power_animations(self):
         self.seed_shop_account()

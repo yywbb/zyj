@@ -74,6 +74,7 @@ def prepare(opcode, save, body, config, now, grant=False):
     if not raw:
         raise ValueError("缺少主角属性")
     old = attributes(levels, config)
+    old_coats = config["fashioncoat"][str(state["equipped"] or 80001)]
     old_wing = wing.attributes(raw, save.get("wing_state"), config)
     costs, upgraded, coin, stones = [], 0, 0, 0
     if opcode == 1071:
@@ -137,8 +138,8 @@ def prepare(opcode, save, body, config, now, grant=False):
             raise ValueError("角色战力超出范围")
     current = pb_get_varint(raw, 1)
     coats = config["fashioncoat"][str(state["equipped"] or 80001)]
-    base = current if str(current) in coats else next((r["role_id"] for r in coats.values() if r["coat_id"] == current), None)
-    if base is None:
+    base = current if str(current) in old_coats else next((r["role_id"] for r in old_coats.values() if r["coat_id"] == current), None)
+    if base is None or str(base) not in coats:
         raise ValueError("此主角暂不支持商城时装")
     current = coats[str(base)]["coat_id"] if state["equipped"] and state["show"] else base
     raw = pb_set_varint(raw, 1, current)
