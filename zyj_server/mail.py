@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import time
 
-from . import activities, player, protocol, ranking, recharge, recruit, storage, world_boss
+from . import activities, examination, player, protocol, ranking, recharge, recruit, storage, world_boss
 
 
 def load_mails(path):
@@ -133,7 +133,7 @@ def list_mails(path, account=None, offset=0, limit=50):
     }
 
 
-def get_player_mails(mail_path, save, viewer, ranking_state, config, world_mails=None):
+def get_player_mails(mail_path, save, viewer, ranking_state, config, world_mails=None, examination_mails=None):
     mails = {}
 
     # 1. 排名奖励邮件 (700000001 ~ 700000010)
@@ -185,6 +185,11 @@ def get_player_mails(mail_path, save, viewer, ranking_state, config, world_mails
         if mid not in claims["deleted"]:
             mails[mid] = {**row, "id": mid, "type": 0, "attachments": {str(cid): n for cid, n in row["gets"]},
                           "status": 2 if mid in claims["claimed"] else 0, "is_rank": False, "is_world_boss": True, "card": 0}
+    exam_claims = examination.get_state(save, config)
+    for mid, row in (examination_mails or {}).items():
+        if mid not in exam_claims["deleted"]:
+            mails[mid] = {**row, "id": mid, "type": 0, "attachments": {str(cid): n for cid, n in row["gets"]},
+                          "status": 2 if mid in exam_claims["claimed"] else 0, "is_rank": False, "is_examination": True, "card": 0}
     return mails
 
 
@@ -193,15 +198,16 @@ def has_unclaimed(mail_path, save, viewer, ranking_state, config):
     return any(m["status"] == 0 and bool(m["attachments"]) for m in mails.values())
 
 
-def prepare(opcode, save, body, mail_path, ranking_state, viewer, config, now=None, *, world_mails=None):
+def prepare(opcode, save, body, mail_path, ranking_state, viewer, config, now=None, *, world_mails=None, examination_mails=None):
     if now is None:
         now = int(time.time())
 
     rank_claims = save.setdefault("rank_mail_state", {"period": ranking_state["opened_at"] if ranking_state else 0, "claimed": [], "deleted": []})
     gm_claims = save.setdefault("mail_state", {"claimed": [], "deleted": []})
 
-    mails = get_player_mails(mail_path, save, viewer, ranking_state, config, world_mails)
+    mails = get_player_mails(mail_path, save, viewer, ranking_state, config, world_mails, examination_mails)
     world_claims = world_boss.get_state(save)
+    exam_claims = examination.get_state(save, config)
 
     if opcode == 3100:
         if body:
@@ -238,7 +244,10 @@ def prepare(opcode, save, body, mail_path, ranking_state, viewer, config, now=No
             m = mails[mid]
             if m["status"] != 2 and m["attachments"]:
                 raise ValueError("请先领取附件，不能删除未领取奖励")
-            if m.get("is_world_boss"):
+            if m.get("is_examination"):
+                save["examination_state"] = exam_claims
+                exam_claims["deleted"].append(mid)
+            elif m.get("is_world_boss"):
                 save["world_boss_state"] = world_claims
                 world_claims["deleted"].append(mid)
             elif m["is_rank"]:
@@ -257,7 +266,10 @@ def prepare(opcode, save, body, mail_path, ranking_state, viewer, config, now=No
 
     for mid in ids:
         m = mails[mid]
-        if m.get("is_world_boss"):
+        if m.get("is_examination"):
+            save["examination_state"] = exam_claims
+            exam_claims["claimed"].append(mid)
+        elif m.get("is_world_boss"):
             save["world_boss_state"] = world_claims
             world_claims["claimed"].append(mid)
         elif m["is_rank"]:

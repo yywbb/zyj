@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from . import activities, cup, friends, guild, guild_chat, guild_games, mail, online_rewards, player, protocol, ranking, storage, welfare, world_boss
+from . import achievements, activities, cup, examination, friends, guild, guild_chat, guild_games, guild_rooms, mail, online_rewards, player, protocol, ranking, storage, welfare, world_boss
 from .session import Session
 
 PASSWORD_ITERATIONS = 600000
@@ -156,6 +156,8 @@ class AccountStore:
             session.guild_profit = lambda now: self.guild_profit(account, now)
             session.guild_level = lambda: self.achievement_guild_level(account)
             session.cup_rank = lambda: self.achievement_cup_rank(account)
+            session.examination_request = lambda current, opcode, seq, body: self.examination_request(account, current, opcode, seq, body)
+            session.examination_ranks = lambda: self.achievement_examination_ranks(account)
             return session
 
     def handle_session(self, account, session, opcode, seq, body):
@@ -303,6 +305,86 @@ class AccountStore:
                 session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state),
                     (now + 28800) // 86400)
             return packets
+
+    def examination_request(self, account, session, opcode, seq, body):
+        with self.lock:
+            saves = self.rank_saves()
+            for save in saves.values():
+                examination.get_state(save, self.role_config)
+            if account not in saves or saves[account]["created_at"] != session.save["created_at"]:
+                raise ValueError("联考需要已初始化的本地角色，请重新登录")
+            moment = time.time()
+            now, stamp = int(moment), int(moment * 1000)
+            path = self.save_path.with_name("examinations.json")
+            state = examination.load(path, saves, self.role_config, now)
+            original = copy.deepcopy(state)
+            examination.recover(state, saves, self.role_config)
+            if opcode in examination.MUTATIONS and now < state["checked_at"]:
+                raise ValueError("联考时钟发生回拨，请稍后重试")
+            examination.settle(state, self.role_config, max(now, state["checked_at"]))
+            cached = session.random_replies.get(opcode) if opcode in examination.MUTATIONS else None
+            if cached and cached[0] == (seq, body):
+                if session.save == cached[2] and state == cached[3] and cached[4] == (now + 28800) // 86400:
+                    return list(cached[1])
+                raise ValueError("该答题操作已结算，请刷新考试状态")
+            before = copy.deepcopy(state)
+            working = copy.deepcopy(session.save)
+            reply, coin, exp = examination.prepare(opcode, body, state, working, account, self.role_config, stamp, secrets.randbits(64))
+            counts = examination.rank_counts(state, account, working["created_at"])
+            achievements_state = achievements.get_state(working, self.role_config)
+            achievements_state["counts"].update(counts)
+            working["achievement_state"] = achievements_state
+            packets = [protocol.pack_frame(opcode, seq, reply)]
+            if coin or exp:
+                player.settle_self_stats(working, self.role_config)
+                online_rewards.settle(working, self.role_config, session.connected_at, now)
+                welfare.settle(working, now)
+                player.settle_stamina(working, self.role_config, now)
+                player.change_item_count(working, 1000, coin, self.role_config, now)
+                guild_rooms.gain_exp(working, exp, 0, self.role_config)
+                packets.append(protocol.pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(working["role_snapshot"]), working, now)))
+                if working["world_state"]["1002"] != session.save["world_state"]["1002"]:
+                    packets.append(protocol.pack_frame(1027, 0, bytes.fromhex(working["world_state"]["1002"])))
+                current, previous = working["role_state"], session.save["role_state"]
+                if any(current[k] != previous[k] for k in ("power", "g_power", "power_all")):
+                    packets.append(protocol.pack_frame(205, 0, guild.ids([v & ((1 << 64) - 1) for v in
+                        (current["power"] - previous["power"], current["power"], current["g_power"] - previous["g_power"], current["g_power"],
+                         current["power_all"] - previous["power_all"], current["power_all"])])))
+            if opcode in examination.MUTATIONS or state != before:
+                working["examination_state"] = examination.get_state(working, self.role_config)
+                state["checked_at"] = max(now, state["checked_at"])
+                examination.stage(state, before, account, working)
+                examination.write(path, state, self.role_config)
+            packets = player.save_response_group(packets, working, session.save, session.save_path, self.step_counts, self.role_config, now)
+            session.save = working
+            saves[account] = working
+            examination.recover(state, saves, self.role_config)
+            if state != original:
+                examination.write(path, state, self.role_config)
+            if opcode in examination.MUTATIONS:
+                session.random_replies[opcode] = ((seq, body), tuple(packets), copy.deepcopy(working), copy.deepcopy(state), (now + 28800) // 86400)
+            return packets
+
+    def examination_mails(self, viewer, identity):
+        with self.lock:
+            saves, now = self.rank_saves(), int(time.time())
+            path = self.save_path.with_name("examinations.json")
+            state = examination.load(path, saves, self.role_config, now)
+            before = copy.deepcopy(state)
+            examination.recover(state, saves, self.role_config)
+            if path.exists():
+                examination.settle(state, self.role_config, max(now, state["checked_at"]))
+                if state != before:
+                    state["checked_at"] = max(now, state["checked_at"])
+                    examination.write(path, state, self.role_config)
+            return examination.reward_mails(state, viewer, identity)
+
+    def achievement_examination_ranks(self, account):
+        with self.lock:
+            saves = self.rank_saves()
+            state = examination.load(self.save_path.with_name("examinations.json"), saves, self.role_config, int(time.time()))
+            examination.recover(state, saves, self.role_config)
+            return examination.rank_counts(state, account, saves.get(account, {}).get("created_at"))
 
     def cup_request(self, account, session, opcode, seq, body):
         with self.lock:
@@ -629,7 +711,8 @@ class AccountStore:
         if opcode in (3100, 3101, 3102):
             return mail.prepare(opcode, save, body, self.save_path.with_name("mails.json"),
                                 self.observe_rankings(), viewer, self.role_config, int(time.time()),
-                                world_mails=self.world_boss_mails(viewer, save["created_at"]))
+                                world_mails=self.world_boss_mails(viewer, save["created_at"]),
+                                examination_mails=self.examination_mails(viewer, save["created_at"]))
         if opcode in (5602, 5603):
             if body:
                 raise ValueError("成长基线查询不接受参数")

@@ -7,7 +7,7 @@ import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from . import cheer, cup, equip_evolve, friends, guild_chat, soul
-from . import achievements, collection, cover, exchange, wing
+from . import achievements, collection, cover, examination, exchange, wing
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -37,6 +37,8 @@ class Session:
         self.guild_profit = None
         self.guild_level = None
         self.cup_rank = None
+        self.examination_request = None
+        self.examination_ranks = None
         self.random_replies = {}
         self.connected_at = int(time.time())
         self.refresh_day = (self.connected_at + 28800) // 86400
@@ -65,6 +67,7 @@ class Session:
         friends.daily(self.save)
         cup.get_state(self.save)
         world_boss.get_state(self.save)
+        examination.get_state(self.save, role_config)
         soul.get_state(self.save)
         equip_evolve.get_version(self.save)
         wing.get_state(self.save, role_config)
@@ -219,6 +222,16 @@ class Session:
             except ValueError as error:
                 return unavailable_response(opcode, seq, b"" if opcode == 2306 else body, str(error))
 
+        if opcode in examination.OPCODES:
+            try:
+                if self.examination_request is None:
+                    if opcode == 7002 and not body:
+                        return [pack_frame(opcode, seq, examination.query(self.save, self.role_config, int(time.time())))]
+                    raise ValueError("三界联考需要绑定本地账号库")
+                return self.examination_request(self, opcode, seq, body)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
+
         if opcode in (*guild.OPCODES, *guild_chat.OPCODES):
             try:
                 if self.guild_request is None:
@@ -307,6 +320,8 @@ class Session:
         watch_comb = False
         pet_comb = False
         if opcode == 999900:
+            if any(mid in examination.MUTATIONS for mid in get_comb_ids(body)):
+                return unavailable_response(opcode, seq, body, "联考答题请从考试页面单独发起")
             if 1004 in get_comb_ids(body):
                 return unavailable_response(opcode, seq, body, "助阵操作请单独发起")
             if any(mid in (*friends.MUTATIONS, 1020, 1022, 2305) for mid in get_comb_ids(body)):
@@ -387,7 +402,7 @@ class Session:
                                  + encode_pb_field(1, 2, encode_pb_field(1, 0, 201) + encode_pb_field(2, 2, b"\x08\x01")))
                     packets = player.prepare_recorded_responses(
                         seq, [{"opcode": opcode, "seq": seq, "hex": reply.hex()}], working, body,
-                        self.save_path, self.step_counts, self.role_config, self.connected_at, guild_profit=self.guild_profit, guild_level=self.guild_level, cup_rank=self.cup_rank)
+                        self.save_path, self.step_counts, self.role_config, self.connected_at, guild_profit=self.guild_profit, guild_level=self.guild_level, cup_rank=self.cup_rank, examination_ranks=self.examination_ranks)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working
@@ -407,7 +422,7 @@ class Session:
                 packets = player.prepare_recorded_responses(
                     seq, [{"opcode": opcode, "seq": seq, "hex": baseline.hex()}], working, body,
                     self.save_path, self.step_counts, self.role_config, self.connected_at,
-                    auto_sigils=self.sigil_auto_pending if opcode == 1002 else None, guild_profit=self.guild_profit, guild_level=self.guild_level, cup_rank=self.cup_rank)
+                    auto_sigils=self.sigil_auto_pending if opcode == 1002 else None, guild_profit=self.guild_profit, guild_level=self.guild_level, cup_rank=self.cup_rank, examination_ranks=self.examination_ranks)
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
             self.save = working

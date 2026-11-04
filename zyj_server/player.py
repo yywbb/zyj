@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, collection, cover, cup, equip_evolve, exchange, soul, wing
+from . import achievements, collection, cover, cup, equip_evolve, examination, exchange, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -51,6 +51,7 @@ def load_role_config(config_path):
                              ("role_exp", "cheer", "copy", "star_copy", "star_map", "expedition2", "expedition_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
                              "begin7day", "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
+                             "sanjie_answer", "sanjie_subject_config", "sanjie_subject_text", "sanjie_answer_reward", "sanjie_reward", "span_sanjie_reward",
                              "goddown_contribution_reward_1", "goddown_exchange_1", "new_generals_exchange_1",
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
@@ -642,6 +643,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if request_body or not save.get("has_role") or gender not in (0, 1):
             raise ValueError("角色性别查询参数或角色状态无效")
         body = encode_pb_field(1, 0, 1 if gender else 2)
+    elif opcode == 7002:
+        if request_body:
+            raise ValueError("联考状态查询不接受参数")
+        body = examination.query(save, role_config, now)
     elif opcode == 1305:
         body = reset_campaign_attempts(save, request_body, role_config, now)
     elif opcode == 999905:
@@ -1138,12 +1143,16 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     return body
 
 
-def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None, guild_level=None, cup_rank=None):
+def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None, guild_level=None, cup_rank=None, examination_ranks=None):
     before = copy.deepcopy(save)
     now = int(time.time())
     if guild_level and responses and responses[0]["opcode"] in achievements.OPCODES:
         state = achievements.get_state(save, role_config)
         state["guild_level"] = guild_level()
+    if examination_ranks and responses and responses[0]["opcode"] in achievements.OPCODES:
+        state = achievements.get_state(save, role_config)
+        state["counts"].update(examination_ranks())
+        save["achievement_state"] = state
     if cup_rank and responses and responses[0]["opcode"] in achievements.OPCODES:
         rank = cup_rank()
         if rank or "cup_state" in save:

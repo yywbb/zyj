@@ -18,6 +18,7 @@ config_overrides.json
 /friends.json
 /cups.json
 /world_boss.json
+/examinations.json
 /mails.json
 *.db
 *.db-shm

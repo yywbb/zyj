@@ -2055,6 +2055,68 @@ def patch_exchange_scripts(patched):
     patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
 
+def patch_examination_scripts(patched):
+    for name, filename in (("GameExamination", "examination_network.lua"), ("UIExamination", "examination_ui.lua")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            patched[f"assets/scripts/{name}.so"] = xxtea_encrypt((code + "\n" + stream.read()).encode("utf-8"), XXTEA_KEY)
+    for name, prefix, methods in (("Layer_examination", "examination", ("init", "clear")),
+                                  ("window_examinnationRank", "examinationrank", ("open",))):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for method in methods:
+            start = code.index(f"function {prefix}.{method}(self")
+            end = code.index("\n", start) + 1
+            code = code[:end] + "    self.localExaminationGeneration = (self.localExaminationGeneration or 0)+1\n" + code[end:]
+        if prefix == "examination":
+            start = code.index("function examination.checkRequestTimeOut(self)\n")
+            end = code.index("\nfunction examination.reloadStartKaoshi", start)
+            code = code[:start] + "function examination.checkRequestTimeOut(self)\nend\n" + code[end:]
+            marker = "        self.countdowntimes  =totimes - nowtime"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "        self.countdowntimes = math.max(0, totimes - nowtime)")
+            start = code.index("        if tonumber(self.countdowntimes) > 40 then")
+            end = code.index("        if tonumber(self.countdowntimes) > 5 then", start)
+            code = code[:start] + code[end:]
+            marker = '    gameTimer:rigistTime("examination_total_flesh", 2*24*3600)'
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    local started = gamedata:time()\n" + marker)
+            marker = "        self.times = self.times + 1"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "        self.times = beforetimes + math.max(0, gamedata:time()-started)")
+            matches = list(re.finditer(r"^function examination\.[^(]+\(self[^\n]*\n", code, re.M))
+            for index in range(len(matches)-1, -1, -1):
+                start = matches[index].start()
+                end = matches[index+1].start() if index+1 < len(matches) else code.index("return examination", start)
+                block = code[start:end]
+                pattern = r"(?m)^([^\n]*?)(CCCallFunc:create\(function\(\)|setAnimationCompletedCallback\(function\(\)|rigistTimeFunc\([^\n]*?function\(\))"
+                block = re.sub(pattern, lambda m: m.group(0) if m.group(1).lstrip().startswith("--") else
+                    m.group(0) + "\n            if not self.rootNode or generation ~= self.localExaminationGeneration then return end\n", block)
+                if block != code[start:end]:
+                    at = block.index("\n") + 1
+                    if "function examination.init(" in block[:at]:
+                        at = block.index("\n", at) + 1
+                    block = block[:at] + "    local generation = self.localExaminationGeneration\n" + block[at:]
+                    code = code[:start] + block + code[end:]
+        else:
+            marker = "    self.data = data\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + "    self.status = {};self.phb=0;self.jifen=0\n")
+        patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    key = "assets/common_lua/GameErrorMessage.so"
+    raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and error.ids[1] >= 7002 and error.ids[1] <= 7005 then
+        if gamedata.ext.localExaminationBusy == error.ids[1] then gamedata.ext.localExaminationBusy=nil end
+        if error.ids[1] == 7003 then gamedata.ext.indatimu=0;gamedata.ext.indatimutype=0 end
+        if error.ids[1] == 7004 then gamedata.ext.indati=0 end
+        table.remove((gamedata.ext.localExaminationPending or {})[error.ids[1]] or {},1)
+    end
+''')
+    patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+
 def patch_cover_scripts(patched):
     def load(name, folder="scripts"):
         raw = patched.get(f"assets/{folder}/{name}.so")
@@ -3300,6 +3362,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_wing_scripts(patched)
     patch_cover_scripts(patched)
     patch_exchange_scripts(patched)
+    patch_examination_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")
