@@ -188,6 +188,37 @@ def patch_game_server_json(raw_bytes, server_ip, accounts):
     print(f"  [GameServer] {accounts} account slots -> {server_ip}:14600 (no ADB)")
     return json.dumps(servers, ensure_ascii=False, indent=2).encode("utf-8")
 
+def load_visual_assets(base, src_apk):
+    with open(os.path.join(base, "client_visual_assets.json"), encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    archive_path = os.path.join(base, manifest["archive"])
+    digest = hashlib.sha256()
+    with open(archive_path, "rb") as stream:
+        for block in iter(lambda: stream.read(1048576), b""):
+            digest.update(block)
+    if digest.hexdigest() != manifest["sha256"]:
+        raise ValueError("视觉原件SHA-256不符，拒绝构建")
+    wanted = ["assets/UI/public/icons/" + name for name in manifest["icons"]]
+    wanted += [f"assets/spine/{name}/{name}{suffix}" for name in manifest["models"]
+               for suffix in (".json", ".atlas", ".png", "_time.json")]
+    with zipfile.ZipFile(archive_path) as archive, zipfile.ZipFile(src_apk) as original:
+        prefixes = tuple(f"compress/battle/{name}/" for name in manifest["skills"])
+        wanted += ["assets/" + name[len("compress/"):] for name in archive.namelist()
+                   if prefixes and name.startswith(prefixes) and not name.endswith("/")]
+        existing = {name.casefold() for name in original.namelist()}
+        assets = {}
+        for name in wanted:
+            if not re.fullmatch(r"assets/(?:UI/public/icons/[A-Za-z0-9_]+\.png|(?:spine|battle)/[A-Za-z0-9_]+/[A-Za-z0-9_]+\.(?:json|atlas|png|jpg|plist|ccbi))", name):
+                raise ValueError("禁止导入非视觉文件或不安全路径: " + name)
+            if name.casefold() in existing:
+                raise ValueError("禁止覆盖资源或产生重复ZIP路径: " + name)
+            source = "compress/" + name[len("assets/"):]
+            if archive.namelist().count(source) != 1:
+                raise ValueError("视觉原件缺失或重复: " + source)
+            assets[name] = archive.read(source)
+            existing.add(name.casefold())
+    return assets
+
 def patch_combo_animation_script(code):
     marker = "local posconfig = {"
     assert code.count(marker) == 1
@@ -222,7 +253,14 @@ local posconfig = {''')
     code = code.replace(marker, "local skillanimation = localBattleSkillAnimation(skill, _animationid)")
     marker = "    local skillanimation =  skillanimationConfig[tostring(skill.animationid)]"
     assert code.count(marker) == 3
-    return code.replace(marker, "    local skillanimation = localBattleSkillAnimation(skill)")
+    code = code.replace(marker, "    local skillanimation = localBattleSkillAnimation(skill)")
+    marker = "        table.insert(effect.shake,data)"
+    assert code.count(marker) == 1
+    return code.replace(marker, '''        -- shortcut: 六个新特效复用shake5, 验证新版背景CCBI兼容后恢复专用震屏。
+        if localSkillVisuals[skill.id] and data.name == "shake_"..skillanimationConfig[tostring(skill.animationid)].name then
+            data.name = "shake5"
+        end
+''' + marker)
 
 
 def patch_recharge_script(code):
@@ -3681,6 +3719,7 @@ def main(argv=None):
     keystore = os.path.join(base, "debug.keystore")
 
     print("[1/4] Preparing patched Lua scripts...")
+    visual_assets = load_visual_assets(base, src_apk)
     patched_lua = get_patched_lua_scripts()
     from build_client_reports import build_assets
     report_assets = build_assets(base, args.server_ip, patched_lua, find_tool, run_tool)
@@ -3727,6 +3766,9 @@ def main(argv=None):
                 zout.writestr(filename, data)
         for filename, data in report_assets.items():
             zout.writestr(filename, data)
+        for filename, data in visual_assets.items():
+            zout.writestr(filename, data)
+        print(f"  [Visuals] Added {len(visual_assets)} verified files; no existing assets replaced")
 
         print("  [Config] Injecting offline JSON configs into APK assets...")
         count = 0

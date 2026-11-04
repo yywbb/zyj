@@ -1,0 +1,45 @@
+{
+  "archive": "hotupdate_artifacts/20261104_android_1863/archives/android_0_to_1863.zip",
+  "sha256": "bf5ef7866837dd7ef751eeb82ac6bff6c0becf44629f9fed272939f512a56645",
+  "icons": [
+    "icon_10zhounianbi.png",
+    "icon_8zhounianbi.png",
+    "icon_dijilingjing.png",
+    "icon_dinghuoxianjing.png",
+    "icon_gaojilingjing.png",
+    "icon_gengjinxianjing.png",
+    "icon_guyushi.png",
+    "icon_renshuixianjing.png",
+    "icon_shengqixuanzexiang1.png",
+    "icon_shengqixuanzexiang2.png",
+    "icon_shengqixuanzexiang3.png",
+    "icon_wutuxianjing.png",
+    "icon_xunbaojuanzhou.png",
+    "icon_yimuxianjing.png",
+    "icon_zhongjilingjing.png"
+  ],
+  "models": [
+    "dijunhong",
+    "dijunjin",
+    "fuxi_sz2",
+    "gonggong_sz1",
+    "lingzhuaobinghong",
+    "lingzhuaobingjin",
+    "motongnezhahong",
+    "motongnezhajin",
+    "nvwa_sz2",
+    "shennongyandi_sz1",
+    "xihehong",
+    "xihejin",
+    "xuanyuanhuangdi_sz1",
+    "zhurong_sz1"
+  ],
+  "skills": [
+    "hunyuanzhu",
+    "shirilingkong",
+    "huojianqiang",
+    "panlongbingchui",
+    "nujisiyanzhen",
+    "lieyankaidao"
+  ]
+}

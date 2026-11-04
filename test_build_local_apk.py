@@ -1,8 +1,10 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import struct
 import tempfile
@@ -490,6 +492,66 @@ class LanBuildTests(unittest.TestCase):
                     self.assertEqual(info.cid, cid)
         ordinary = lua.globals().gamedata.config.combskill['12990']
         self.assertEqual(skill_animation(ordinary).id, ordinary.animationid)
+
+    def test_imported_visuals_resolve_textures_and_use_original_skills_without_replacing_background(self):
+        from lupa.lua51 import LuaRuntime
+        root = Path(__file__).parent
+        assets = builder.load_visual_assets(root, builder.SRC_APK)
+        self.assertEqual(len(assets), 136)
+        self.assertEqual(sum(map(len, assets.values())), 26088735)
+        with zipfile.ZipFile(builder.SRC_APK) as original, zipfile.ZipFile(root / "configs_sec5.zip") as configs:
+            names = set(original.namelist()) | set(assets)
+            background = original.read("assets/UI/backGround/bg.ccbi")
+            self.assertNotIn("assets/UI/backGround/bg.ccbi", assets)
+            for name, data in assets.items():
+                if name.endswith(".plist"):
+                    metadata = plistlib.loads(data)["metadata"]
+                    texture = metadata.get("textureFileName") or metadata["realTextureFileName"]
+                    self.assertIn(str(Path(name).parent / texture), names)
+                elif name.endswith(".atlas"):
+                    lines = data.decode("utf-8-sig").splitlines()
+                    pages = [line.strip() for i, line in enumerate(lines[:-1]) if line.strip() and ":" not in line
+                             and lines[i + 1].strip().startswith(("size:", "format:"))]
+                    self.assertTrue(pages, name)
+                    for texture in pages:
+                        self.assertIn(str(Path(name).parent / texture), names)
+                elif name.startswith("assets/spine/") and name.endswith(".json") and not name.endswith("_time.json"):
+                    model = json.loads(data)
+                    self.assertEqual(model["skeleton"]["spine"], "2.1.27")
+                    self.assertTrue(model["bones"] and model["animations"])
+            config = {name: json.loads(configs.read(f"5/{name}.json"))
+                      for name in ("general", "skill", "combskill", "skillanimation", "generalanimation")}
+            lua = LuaRuntime()
+            lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
+            lua.execute('''print=function() end; printT=print
+                CCFileUtils={sharedFileUtils=function(self) return self end}''')
+            lua.globals().CCFileUtils.isFileExist = lambda _, path: any(n.endswith("/" + path) for n in names)
+            code = self.client_scripts()["assets/scripts/battleReportConvert.so"]
+            skill_animation, general_animation = lua.execute(code + "\nreturn localBattleSkillAnimation, localBattleGeneralAnimation")
+            for sid in (13124, 13125, 12281, 12282, 12283, 12284):
+                table = "combskill" if sid in (13124, 13125) else "skill"
+                skill = lua.globals().gamedata.config[table][str(sid)]
+                animation = skill_animation(skill)
+                self.assertEqual(animation.id, skill.animationid)
+                data = json.loads(assets[f"assets/battle/{animation.name}/{animation.name}.json"])
+                self.assertNotIn(data["shake"]["1"].split(",")[1].encode(), background)
+                for direct in (True, False):
+                    action = lua.table_from({"source": {"pos": [0], "direct": direct}, "dest": []}, recursive=True)
+                    effect = lua.globals().makeScreenEffect(lua.table_from(data, recursive=True), skill, animation,
+                                                           action, lua.table(), table)
+                    self.assertEqual(effect.effect.skillname, animation.name)
+                    self.assertEqual(effect.actiontime, data["times"]["delay1"])
+                    self.assertIn(effect.shake[1].name.encode(), background)
+            for cid in (10853, 10854, 10855, 10856):
+                animation = general_animation(lua.table_from({"cid": cid}))
+                self.assertEqual(animation.id, int(config["general"][str(cid)]["animationid"]))
+                self.assertIn(f"assets/spine/{animation.name}/{animation.name}_time.json", names)
+            skill = lua.globals().gamedata.config.combskill["12989"]
+            animation = skill_animation(skill)
+            data = json.loads(original.read(f"assets/battle/{animation.name}/{animation.name}.json"))
+            effect = lua.globals().makeScreenEffect(lua.table_from(data, recursive=True), skill, animation,
+                                                   action, lua.table(), "combskill")
+            self.assertEqual(effect.shake[1].name, data["shake"]["1"].split(",")[1])
 
     def test_pet_rest_control_is_packaged_and_empty_active_tabs_are_safe(self):
         try:
@@ -1888,6 +1950,8 @@ class LanBuildTests(unittest.TestCase):
             configs.update("props", "20014", {"param1": "37"}, configs.status()["revision"])
             with zipfile.ZipFile(root / "z7_7_4.apk", "w") as archive:
                 archive.writestr("assets/GameServer.json", '{"1":{"id":1}}')
+                archive.writestr("assets/scripts/existing.so", b"local script")
+                archive.writestr("assets/UI/backGround/bg.ccbi", b"original layout")
                 for section in (1, 5):
                     archive.writestr(f"assets/config/{section}/props.json", "old config")
                     archive.writestr(f"assets/config/{section}/client_only.json", "{}")
@@ -1897,6 +1961,7 @@ class LanBuildTests(unittest.TestCase):
                     shutil.copyfile(args[-2], args[-1])
 
             with patch.object(builder, "__file__", str(root / "build_local_apk.py")), \
+                    patch.object(builder, "load_visual_assets", return_value={"assets/UI/public/icons/new.png": b"new icon"}), \
                     patch.object(builder, "get_patched_lua_scripts", return_value={}), \
                     patch.object(report_builder, "build_assets", return_value={"classes2.dex": b"diagnostic dex",
                                  "lib/arm64-v8a/liblocalreports.so": b"arm64 diagnostic",
@@ -1907,6 +1972,10 @@ class LanBuildTests(unittest.TestCase):
                 builder.main(["--server-ip", "192.168.1.20", "--accounts", "2"])
             runtime = player.load_role_config(config_path)
             with zipfile.ZipFile(root / "zyj_local.apk") as archive:
+                self.assertEqual(len(archive.namelist()), len(set(archive.namelist())))
+                self.assertEqual(archive.read("assets/UI/public/icons/new.png"), b"new icon")
+                self.assertEqual(archive.read("assets/scripts/existing.so"), b"local script")
+                self.assertEqual(archive.read("assets/UI/backGround/bg.ccbi"), b"original layout")
                 for section in (1, 5):
                     name = f"assets/config/{section}/props.json"
                     self.assertEqual(archive.namelist().count(name), 1)
@@ -1928,6 +1997,54 @@ class LanBuildTests(unittest.TestCase):
                                    ("lib/armeabi-v7a/liblocalreports.so", b"armv7 diagnostic")):
                     self.assertEqual(archive.namelist().count(name), 1)
                     self.assertEqual(archive.read(name), data)
+
+
+class VisualAssetTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.source = self.root / "original.apk"
+        self.archive = self.root / "visual.zip"
+        with zipfile.ZipFile(self.source, "w") as archive:
+            archive.writestr("assets/UI/public/icons/existing.png", b"existing")
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            archive.writestr("compress/UI/public/icons/new.png", b"new")
+            archive.writestr("compress/scripts/ignored.so", b"never imported")
+        self.manifest = {"archive": "visual.zip", "sha256": hashlib.sha256(self.archive.read_bytes()).hexdigest(),
+                         "icons": ["new.png"], "models": [], "skills": []}
+
+    def load(self):
+        (self.root / "client_visual_assets.json").write_text(json.dumps(self.manifest))
+        return builder.load_visual_assets(self.root, self.source)
+
+    def test_only_pinned_visual_files_are_loaded(self):
+        self.assertEqual(self.load(), {"assets/UI/public/icons/new.png": b"new"})
+
+    def test_modified_or_missing_archive_is_rejected_before_packaging(self):
+        (self.root / "client_visual_assets.json").write_text(json.dumps(self.manifest))
+        output = self.root / "zyj_local.apk"
+        output.write_bytes(b"old APK")
+        self.archive.write_bytes(b"modified")
+        with patch.object(builder, "__file__", str(self.root / "build_local_apk.py")), \
+                patch.object(builder, "get_patched_lua_scripts") as build, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(ValueError):
+                builder.main(["--server-ip", "10.66.0.11"])
+            self.archive.unlink()
+            with self.assertRaises(FileNotFoundError):
+                builder.main(["--server-ip", "10.66.0.11"])
+            build.assert_not_called()
+        self.assertEqual(output.read_bytes(), b"old APK")
+
+    def test_unsafe_code_config_duplicate_and_existing_paths_are_rejected(self):
+        for name in ("../new.png", "/assets/UI/new.png", "a\\b.png", "new.so", "general.json", "bg.ccbi",
+                     "._new.png", "existing.png", "EXISTING.png"):
+            with self.subTest(path=name), self.assertRaises(ValueError):
+                self.manifest["icons"] = [name]
+                self.load()
+        self.manifest["icons"] = ["new.png", "new.png"]
+        with self.assertRaises(ValueError):
+            self.load()
 
 
 if __name__ == "__main__":

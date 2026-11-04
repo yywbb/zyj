@@ -155,6 +155,8 @@ sequenceDiagram
 
 把原版 `z7_7_4.apk` 放在脚本旁，指定**服务端电脑**的 IP：
 
+构建还需本机已校验的`hotupdate_artifacts/20261104_android_1863/archives/android_0_to_1863.zip`（[来源记录](capture_gap_review_20261104.md#热更原件取得2026-11-04续报)）。`client_visual_assets.json`固定原件SHA-256和15种图标／14套模型／6套技能特效白名单，只新增136份视觉文件；原件缺失或校验失败会在打包前停止，不会静默漏资源或覆盖原布局、Lua、配置。原件不进Git，其他机器构建需另行复制。
+
 ```bash
 python3 build_local_apk.py --server-ip 10.66.0.11 --accounts 3
 ```

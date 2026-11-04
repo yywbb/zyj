@@ -10,6 +10,7 @@
 
 ## Run and verify
 
+- 2026-11-04资源版：`client_visual_assets.json`固定本机忽略目录Android1863更新合集SHA和15图标／14精确模型／6技能白名单，构建必须有该原件，只新增136文件，不导入官方更新Lua／配置或覆盖旧布局。六个新特效保留原始模型／命中时间，震屏暂复用已有shake5。成品`zyj_visual_assets_20261104.apk`（10.66.0.11:14600，诊断build1259b6211a0e8325）32项定向、197份Lua5.1／1243对配置／全部新增哈希／631条CCBI引用／签名对齐通过；已按本批明确授权覆盖安装到USB PQY5T21126002875，手机APK SHA与成品一致，UID／数据目录／inode保持不变，未启动游戏／操作账号／部署重启。旧APK保留；仍缺10条图标和6旧模型名，原生播放待用户验证。原件不进Git，其他机器构建须另行复制，缺失／哈希异常应停止而非静默跳过。
 - 2026-11-03 user-confirmed current APK/server endpoint is **10.66.0.11:14600**, not the earlier10.66.0.12 or mistyped10.0.66.11. New app diagnostics use an independent upload-only14602; `client_reports.key` is ignored, scoped only to ingestion and must match between build/server roots. Never embed the admin write token, credentials, full Lua messages, network packets or memory dumps. See `client_reports.md`; native capture is signal/PC/LR/so mapping, not full tombstones, SIGKILL or ANRs. Server+APK must both update; no automatic remote restart/install/account operations were authorized in this batch. NDKr27c/JDK17/SDK34 are required for actual packaging; target `test_client_reports`, changed packaged-Lua/manifest/build fixtures and entrypoint lifecycle tests only, never a full suite by default.
 - 2026-11-04六项收尾：忽略成品`zyj_six_fixes_20261104.apk`（10.66.0.11:14600，诊断build ce95615d2ca5f0ca）已隔离构建并校验，旧zyj_local.apk尺寸／时间戳／SHA保持不变。75项去重定向回归、197份包内Lua/PB5.1编译及源码一致、1243对配置／ZIP CRC／双ABI诊断／签名及对齐通过。SHA和完整范围见guide_implementation_plan.md；未部署重启安装或操作正式账号，蓬莱原入口报错未复现，原生触控／Spine和长期平衡待实机。
 
