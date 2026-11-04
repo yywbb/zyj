@@ -1999,7 +1999,8 @@ def patch_wing_scripts(patched):
 
 
 def patch_exchange_scripts(patched):
-    for name, filename in (("GameActivityMultipleRebate", "exchange_network.lua"), ("UIActivityMultipleRebate", "exchange_ui.lua")):
+    for name, filename in (("GameActivityMultipleRebate", "exchange_network.lua"), ("UIActivityMultipleRebate", "exchange_ui.lua"),
+                           ("GameGeneralCompound", "general_compound_network.lua"), ("UIGenerals", "general_compound_ui.lua")):
         key = f"assets/scripts/{name}.so"
         if key in patched:
             raw = xxtea_decrypt(patched[key], XXTEA_KEY)
@@ -2032,6 +2033,14 @@ def patch_exchange_scripts(patched):
     code = code.replace(marker, marker + '''
         if not self.show or generation ~= self.localExchangeGeneration or pageid ~= self.selectpage then return end''')
     patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    for name, prefix, methods in (("Layer_general", "generalList", ("init", "clear")),
+                                  ("window_infoAndAccess", "infoAndAccess", ("open", "close"))):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for method in methods:
+            start = code.index(f"function {prefix}.{method}(self")
+            end = code.index("\n", start) + 1
+            code = code[:end] + "    self.localCompoundGeneration = (self.localCompoundGeneration or 0)+1\n" + code[end:]
+        patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     key = "assets/common_lua/GameErrorMessage.so"
     raw = xxtea_decrypt(patched[key], XXTEA_KEY)
     code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
@@ -2039,6 +2048,7 @@ def patch_exchange_scripts(patched):
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if gamedata and gamedata.ext then
         if error.ids[1] == 4017 then gamedata.ext.localExchangeBusy=nil end
+        if error.ids[1] == 1016 then gamedata.ext.localCompoundBusy=nil end
         if error.ids[1] == 4016 then table.remove(gamedata.ext.localExchangeQueries or {},1) end
     end
 ''')

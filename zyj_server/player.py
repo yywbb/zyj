@@ -668,6 +668,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if opcode in exchange.MUTATIONS:
             apply_reward(save, body, role_config, now)
+    elif opcode == 1016:
+        body, costs, reward = recruit.compound(save, request_body, role_config)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        apply_reward(save, reward, role_config, now)
     elif opcode in cover.OPCODES:
         body, costs, reward, update, delta = cover.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
@@ -1181,6 +1186,8 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         packets.append(pack_frame(opcode, seq if response["seq"] != 0 else 0, body))
     if responses and responses[0]["opcode"] == 1305:
         packets.append(pack_frame(1300, 0, bytes.fromhex(save["world_state"]["1300"])))
+    if responses and responses[0]["opcode"] in (1016, *exchange.MUTATIONS) and save["world_state"]["1012"] != before["world_state"]["1012"]:
+        packets.append(pack_frame(1012, 0, bytes.fromhex(save["world_state"]["1012"])))
     cheer_update, cheer_power = cheer.growth(save, before, role_config) if not responses or responses[0]["opcode"] != 1004 else (b"", 0)
     if cheer_update:
         apply_sigil_update(save, cheer_update, cheer_power, role_config)

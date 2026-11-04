@@ -135,6 +135,27 @@ def get_pending(save):
     return state
 
 
+def compound(save, body, config):
+    require_role(save)
+    fields = list(iter_pb_fields(body))
+    if len(fields) != 1 or fields[0][:2] != (1, 0) or not 0 < fields[0][2] < (1 << 31):
+        raise ValueError("合成需要一个伙伴CID")
+    cid = fields[0][2]
+    row = config["general"].get(str(cid), {})
+    fragments = [r for r in config["general_fragment"].values() if r["general"] == cid]
+    if row.get("battle") != 1 or row.get("quality") not in range(2, 6) or row.get("init_cid") != cid or len(fragments) != 1:
+        raise ValueError("该伙伴不是可合成的普通伙伴")
+    roster = [v for n, w, v in iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])) if (n, w) == (1, 2)]
+    if any(config["general"][str(pb_get_varint(v, 1))]["init_cid"] == cid for v in roster):
+        raise ValueError("已拥有该伙伴或同源伙伴，无需重复合成")
+    fragment = fragments[0]
+    if type(fragment["num"]) is not int or not 0 < fragment["num"] < (1 << 31):
+        raise ValueError("合成碎片配置无效")
+    reward = build_reward(save, [(cid, 1)], config)
+    reply = b"".join(encode_pb_field(1, 2, v) for n, w, v in iter_pb_fields(reward) if (n, w) == (8, 2))
+    return reply, [(fragment["id"], fragment["num"])], reward
+
+
 def preview(save, opcode, body, config, now, seed):
     if body:
         raise ValueError("封神招募十连操作不接受参数")

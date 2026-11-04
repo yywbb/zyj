@@ -71,7 +71,7 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(self.props(20342), 10)
 
     def test_closed_pages_levels_quantities_and_malformed_payloads_cannot_exchange(self):
-        for values in ([1, 7, 1], [2, 1, 1], [3, 1, 1], [4, 1, 1], [5, 1, 1],
+        for values in ([1, 7, 1], [2, 1, 1], [3, 1, 1], [4, 1, 1], [5, 2, 1],
                        [0, 1, 1], [1, 99, 1], [1, 1], [1, 1, 0], [1, 1, 1000], [1, 1, 1, 0]):
             self.assert_rejected(4017, values=values)
         for raw in (b"\x08", b"\x10\x01", b"\x0a\x00", recharge.ids([1, 1, 1]) + b"\x10\x01"):
@@ -136,6 +136,8 @@ class ExchangeTests(unittest.TestCase):
         start = code.index("function gamedata.ActivityTreasureX3(")
         end = code.index("\nfunction ", start + 1)
         lua.execute(code[start:end].encode())
+        lua.execute(code[code.index("function gamedata.generalfragmentData("):code.index("function gamedata.recruitsData(")].encode())
+        lua.execute(b'gamedata.cache.generalfragments={}')
         lua.eval(b"require")(b"GameActivityMultipleRebate")
         lua.globals().seed_props = bytes.fromhex(self.save["world_state"]["1200"])
         lua.execute(b'local p=require("idnums_pb").IdNums();p:ParseFromString(seed_props);gamedata:Props(p.idnums)')

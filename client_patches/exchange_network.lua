@@ -46,7 +46,7 @@ function UITitbitDiscountX3BuyCallBack(req)
     local page, id, num = tonumber(req.pageid), tonumber(req.id), tonumber(req.num or 1)
     local row = (gamedata.config.exchange_shop[tostring(page)] or {})[tostring(id)]
     local item = ((gamedata.cache.activityTreasureX3 or {})[page] or {})[id]
-    if page ~= 1 or not row or row.open ~= 1 or not item or not num or num < 1 or num % 1 ~= 0 or num > row.count-item.num then
+    if (page ~= 1 and page ~= 5) or not row or row.open ~= 1 or not item or not num or num < 1 or num % 1 ~= 0 or num > row.count-item.num then
         return 0,503,{type=503,msg="兑换状态已变化，请重新打开商店"}
     end
     local values = ids_pb.Ids()
