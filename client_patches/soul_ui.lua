@@ -30,8 +30,9 @@ end
 
 local send = UIRequest
 function UIRequest(req,...)
-    if req.type >= 2501 and req.type <= 2507 or req.type == 1006 or req.type == 1007 or req.type == 5345
-        or req.type == 10026 or req.type == 12001 and (req.order == 25061 or req.order == 33007 or req.order == 32021) then
+    local opcode = tonumber(req.type)
+    if opcode and (opcode >= 2501 and opcode <= 2507 or opcode == 1006 or opcode == 1007 or opcode == 5345
+        or opcode == 10026 or opcode == 12001 and (req.order == 25061 or req.order == 33007 or req.order == 32021)) then
         req.soulView = LocalSoulContext()
     end
     return send(req,...)

@@ -132,6 +132,54 @@ class LanBuildTests(unittest.TestCase):
             end})
             assert(hidden)''')
 
+    def test_vip_week_gift_string_request_survives_chained_ui_patches(self):
+        from lupa.lua51 import LuaRuntime
+        scripts = self.client_scripts()
+        config = player.load_role_config(Path(__file__).parent / "configs_sec5.zip")
+        lua = LuaRuntime()
+        lua.globals().gamedata = lua.table_from({"config": {
+            "build": config["build"], "activity_time": config["activity_time"]}}, recursive=True)
+        lua.execute('''
+            print=function() end;printT=print
+            requests={};UIRequest=function(req,...) requests[#requests+1]=req;return "sent",req,... end
+            package.preload.UIShop=function() end
+            package.preload.UIEquipStarUp=function() end
+            UIActivityBuyItem=function() end
+            GameScene={presentLayer="main",layers={},checkopenlevelbyId=function() return true end}
+            gameScene=GameScene;main={}
+            gameWindows={windows={},closeAllWindowDirect=function() end}
+        ''')
+        for name in ("UISlots", "UISouls", "UIEquipStage", "UIWing"):
+            lua.execute(scripts[f"assets/scripts/{name}.so"])
+        scene = scripts["assets/scripts/GameScene.so"]
+        start = scene.index("function gameScene.shiftLayerById(")
+        lua.execute(scene[start:scene.index("\nfunction ", start + 1)])
+        home = scripts["assets/scripts/Layer_main.so"]
+        start = home.index("main.arrangeconfig = {")
+        lua.execute(home[start:home.index("\n}", start) + 2])
+        lua.execute('''
+            local clicked=false
+            for _,entry in ipairs(main.arrangeconfig) do
+                if entry.name=="vipgift" then entry.func();clicked=true;break end
+            end
+            assert(clicked and #requests==1)
+            local req=requests[1]
+            assert(req.type=="2000" and req.param=="173" and req.page=="1")
+            assert(not req.wingView and not req.coverView and not req.soulView and not req.growthView)
+            local marker={}
+            local status,forwarded,extra=UIRequest(req,marker)
+            assert(status=="sent" and forwarded==req and extra==marker)
+            for _,entry in ipairs({{3740,"wingView"},{3744,"wingView"},
+                    {3730,"coverView"},{3736,"coverView"},{2501,"soulView"},{2507,"soulView"},
+                    {1006,"soulView"},{1007,"soulView"},{5345,"soulView"},{10026,"soulView"}}) do
+                for _,kind in ipairs({entry[1],tostring(entry[1])}) do
+                    local feature={type=kind}
+                    UIRequest(feature)
+                    assert(requests[#requests]==feature and feature.type==kind and feature[entry[2]])
+                end
+            end
+        ''')
+
     def test_lua_reports_capture_all_real_handlers_without_credentials_or_ui_dependencies(self):
         from lupa.lua51 import LuaRuntime
         scripts = self.client_scripts()

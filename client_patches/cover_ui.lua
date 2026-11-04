@@ -1,7 +1,8 @@
 -- 魔罩整组状态更新绑定页面世代；动画另绑定付费目标。
 local send=UIRequest
 function UIRequest(req,...)
-    if req.type>=3730 and req.type<=3736 then
+    local opcode=tonumber(req.type)
+    if opcode and opcode>=3730 and opcode<=3736 then
         local page=package.loaded.Layer_safemask
         local shop=package.loaded.Layer_activity_safemaskshop
         local slot=page and page.slotdata and page.slotdata[tostring(page.generalindex)]

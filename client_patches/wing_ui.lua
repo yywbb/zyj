@@ -1,6 +1,7 @@
 local send=UIRequest
 function UIRequest(req,...)
-    if req.type >= 3740 and req.type <= 3744 then
+    local opcode=tonumber(req.type)
+    if opcode and opcode >= 3740 and opcode <= 3744 then
         local page=package.loaded.Layer_wing_main
         local window=package.loaded.window_wingColor
         req.wingView={page=page and page.localWingGeneration,window=window and window.localWingGeneration}
