@@ -10,6 +10,9 @@ OPCODES = QUERIES + MUTATIONS
 
 def get_state(save, config):
     state = save.get("gamestar_state", {"stage": 1, "step": 0, "checked_at": 0})
+    if isinstance(state, dict) and "checked_at" not in state:
+        # 旧档只有关卡和点数；只补读取视图，成功结算时再落盘。
+        state = dict(state, checked_at=0)
     maximum = max(map(int, config["hoshimiya_break"]))
     if (not isinstance(state, dict) or any(type(state.get(k)) is not int for k in ("stage", "step", "checked_at"))
             or not 1 <= state["stage"] <= maximum + 1 or not 0 <= state["checked_at"] < (1 << 63)

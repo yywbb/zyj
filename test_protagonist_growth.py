@@ -54,6 +54,72 @@ class ProtagonistGrowthTests(unittest.TestCase):
             if cid not in (1000, 1001):
                 self.grant(cid, count)
 
+    def test_legacy_game_progress_without_clock_allows_account_loading_without_rewriting_saves(self):
+        for account in (1, 10):
+            with self.subTest(account=account):
+                legacy = copy.deepcopy(self.save)
+                legacy["gamestar_state"] = {"stage": 1, "step": 0}
+                self.store.close_session(account)
+                self.assertTrue(player.save_role(legacy, self.store.path(account), self.sessions[1].step_counts))
+                before = self.store.path(account).read_bytes()
+                session = self.store.open_session(account, "test-password", ("test-address", account))
+                self.sessions[account] = session
+                self.addCleanup(self.store.close_session, account)
+                self.assertEqual(session.save, legacy)
+                self.assertEqual(self.store.path(account).read_bytes(), before)
+                self.assertEqual(gamestar.get_state(session.save, self.config), {"stage": 1, "step": 0, "checked_at": 0})
+                self.assertEqual(session.save, legacy)
+
+    def test_legacy_game_clock_is_saved_only_with_successful_query_or_paid_activation(self):
+        self.save["gamestar_state"] = {"stage": 1, "step": 0}
+        self.pay_materials(self.config["hoshimiya_jihuo"]["1"]["1"]["activation_cost"])
+        self.assertTrue(player.save_role(self.save, self.store.path(1), self.sessions[1].step_counts))
+        for opcode in (3720, 3721):
+            values = [] if opcode == 3720 else [1, 0]
+            before = copy.deepcopy(self.save)
+            disk = self.store.path(1).read_bytes()
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                self.request(1, opcode, values=values)
+            self.assertEqual((self.save, self.store.path(1).read_bytes()), (before, disk))
+        before = copy.deepcopy(self.save)
+        self.success(1, 3720); self.refresh()
+        self.assertEqual(self.save["gamestar_state"], {"stage": 1, "step": 0, "checked_at": self.now})
+        for key in ("role_state", "world_state", "protagonist_snapshot"):
+            self.assertEqual(self.save[key], before[key])
+        self.save["gamestar_state"].pop("checked_at")
+        self.assertTrue(player.save_role(self.save, self.store.path(1), self.sessions[1].step_counts))
+        before = copy.deepcopy(self.save)
+        self.success(1, 3721, values=[1, 0]); self.refresh()
+        self.assertEqual(self.save["gamestar_state"], {"stage": 1, "step": 1, "checked_at": self.now})
+        self.assertEqual(self.save["role_state"]["coin"], before["role_state"]["coin"] - 33300)
+        self.assertEqual((self.props(20167), self.props(20285)), (0, 0))
+        raw = formation.records(bytes.fromhex(before["world_state"]["1002"]), 1, 2)[protocol.pb_get_varint(self.gen(), 2)]
+        self.assertEqual(protocol.pb_get_varint(self.gen(), 6), protocol.pb_get_varint(raw, 6) + 579)
+        self.reconnect(); self.refresh()
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 3720)), [1, 1])
+        self.clock.return_value -= 1
+        self.assert_rejected(3721, values=[1, 1])
+
+    def test_legacy_clock_default_preserves_nonzero_progress_unknown_fields_and_strict_validation(self):
+        for stage, step in ((1, 0), (12, 5), (30, 9), (31, 0)):
+            state = {"stage": stage, "step": step, "unknown": {"keep": 7}}
+            save = {"gamestar_state": state}
+            before = copy.deepcopy(save)
+            normalized = gamestar.get_state(save, self.config)
+            self.assertEqual(normalized, dict(state, checked_at=0))
+            self.assertEqual(save, before)
+        invalid = [None, [], {}, {"stage": 1}, {"step": 0}, {"stage": 0, "step": 0},
+                   {"stage": 31, "step": 1}, {"stage": 1, "step": 10}, {"stage": True, "step": 0}]
+        invalid += [{"stage": 1, "step": 0, "checked_at": value} for value in (None, False, "0", -1, 1 << 63)]
+        for state in invalid:
+            save = {"gamestar_state": state}
+            before = copy.deepcopy(save)
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                gamestar.get_state(save, self.config)
+            self.assertEqual(save, before)
+        current = {"gamestar_state": {"stage": 12, "step": 5, "checked_at": self.now + 100}}
+        self.assertEqual(gamestar.get_state(current, self.config)["checked_at"], self.now + 100)
+
     def test_game_query_activation_real_costs_stats_and_stale_target_rejection(self):
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 3720)), [1, 0])
         self.refresh()
