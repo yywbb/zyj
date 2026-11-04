@@ -15,7 +15,9 @@ RESOURCES = {"gold": "元宝", "coin": "银币", "stamina": "体力", "energy": 
 ACTIONS = {"grant": "GM 调整与发放", "register": "创建登录账号", "backup": "创建备份",
            "restore": "恢复备份", "reset": "重置账号", "reset-guide": "重置引导", "config": "修改配置",
            "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将",
-           "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件", "kick": "强制下线"}
+           "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件", "kick": "强制下线",
+           "transfer": "转移账号数据到测试号"}
+TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"grant": {"resources", "items"}, "inventory": {"cid", "count"},
                   "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
 COMMON_ITEMS = (20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
@@ -382,3 +384,34 @@ class Workbench:
         details = {"mail_id": mail_id, "reason": reason}
         return self.logged("mail-delete", None, details,
                            lambda: {"deleted": mail.delete_mail(mail_path, mail_id), "mail_id": mail_id})
+
+    def transfer(self, account, reason="GM 转移账号数据"):
+        """把源账号存档复制到测试账号(10)；先备份两端确保可回滚，源账号不变。"""
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 200:
+            raise ValueError("请填写 1–200 字的操作原因")
+        store = self.accounts
+        target = TEST_ACCOUNT
+        with store.lock:
+            store.path(account)
+            store.path(target)
+            source_snapshot = store.snapshot(account)
+            target_snapshot = store.snapshot(target)
+            if source_snapshot["online"] or target_snapshot["online"]:
+                raise ValueError("源账号或测试账号仍在线，请先退出游戏再转移")
+            if source_snapshot["error"] or not source_snapshot["save"].get("has_role"):
+                raise ValueError(source_snapshot["error"] or "源账号尚未创建角色")
+            source_raw = store.path(account).read_bytes()
+            source_backup = storage.backup(store.save_path.parent / "backups" / "accounts" / str(account), source_raw)
+            if store.path(target).exists():
+                target_raw = store.path(target).read_bytes()
+                target_backup = storage.backup(store.save_path.parent / "backups" / "accounts" / str(target), target_raw)
+            else:
+                target_backup = None
+            storage.atomic_write(store.path(target), source_raw)
+            player.save_role(source_snapshot["save"], store.path(target), store.step_counts)
+            return self.logged("transfer", account,
+                               {"target": target, "source_backup_id": source_backup, "target_backup_id": target_backup,
+                                "reason": reason},
+                               lambda: {"account": account, "target": target,
+                                        "source_backup_id": source_backup, "target_backup_id": target_backup,
+                                        "transferred_size": len(source_raw)})
