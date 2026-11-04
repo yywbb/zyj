@@ -244,7 +244,7 @@ def general_experience(unit, gained, config, maximum=None):
 
 
 def _prepare_teams(teams, config):
-    dynamic = {*range(9100001, 9100008), 9000001, 9000008, 9000015, 9000020, 9000023, 9000024, 9000025,
+    dynamic = {*range(9100001, 9100008), 9000001, 9000008, 9000015, 9000020, 9000021, 9000023, 9000024, 9000025,
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
                9000037, 9000038, 9000039, 9000040, 9000400, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
                9000496, 9000501, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
@@ -491,7 +491,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if len(actions) > 2000:
             raise ValueError("战斗事件超出上限，未结算")
 
-    def change_hp(unit, amount, status="N", hits=0, *, shield=True):
+    def change_hp(unit, amount, status="N", hits=0, *, shield=True, healing=False):
+        if amount < 0 and healing and unit["states"].get("close", 0) > round_number:
+            amount = 0
         if amount < 0:
             amount = -int(-amount * (1 + unit.get("soul_effects", {}).get("heal", 0)))
         if amount > 0 and unit["states"].get("invincible", 0) > round_number:
@@ -561,7 +563,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if unit[kind]:
                 unit[kind] = False if kind == "dizzy" else None
                 changes.append(dest(unit, m=[], u={"u": kind, "w": False}))
-        for kind in ("skilllock", "fire"):
+        for kind in ("skilllock", "fire", "close"):
             if kind in unit["states"]:
                 del unit["states"][kind]
                 changes.append(state_event(unit, kind, False))
@@ -632,7 +634,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if effect(unit, 9000027):
                 friends = sorted((u for u in teams[unit["direct"]].values() if u["hp"] > 0), key=lambda u: (u["hp"], u["pos"]))
                 if friends:
-                    event([change_hp(friends[0], -int(stat(unit, "atk") * effect(unit, 9000027)))])
+                    event([change_hp(friends[0], -int(stat(unit, "atk") * effect(unit, 9000027)), healing=True)])
             if effect(unit, 9000040):
                 selected = targets(unit, teams[not unit["direct"]], None, rng)
                 if selected:
@@ -652,11 +654,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         return dest(unit, m=[], u={"u": kind, "w": enabled})
 
     def set_state(unit, kind, duration=1):
-        if kind == "skilllock":
+        if kind in ("skilllock", "close"):
             duration -= int(effect(unit, 9000789))
         if duration <= 0:
             return []
-        unit["states"][kind] = round_number + duration
+        unit["states"][kind] = max(unit["states"].get(kind, 0), round_number + duration)
         return [state_event(unit, kind, True)]
 
     def change_ap(unit, amount):
@@ -730,7 +732,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if sid in (12624, 12631):
             allies = sorted(living(friends), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
             if sid == 12624:
-                changes.extend(change_hp(u, -stat(actor, "atk")) for u in allies)
+                changes.extend(change_hp(u, -stat(actor, "atk"), healing=True) for u in allies)
             elif allies:
                 changes.extend(set_state(allies[0], "invincible"))
         if sid in (12626, 12628, 12630, 12634, 12637):
@@ -822,7 +824,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             for target in selected:
                 amount = queen_recovery(target)
                 if target["hp"] > 0 and amount:
-                    event([change_hp(target, -amount)])
+                    event([change_hp(target, -amount, healing=True)])
         if sid == 12641:
             event([change_hp(actor, actor["maxhp"] // 100, shield=False)])
         actor["strikes"] += 1
@@ -960,7 +962,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 coefficient, growth = map(Fraction, skill["atk-param"].split(";")[:2])
                 multiplier = 1 + max(0, old_ap - skill["ap"]) * Fraction(str(skill["ap_up"]))
                 amount = int(stat(actor, "atk") * (coefficient + (0 if combined else growth * max(0, actor.get("skilllevel", 0) - 1))) * multiplier)
-                destinations.append(change_hp(target, -amount))
+                destinations.append(change_hp(target, -amount, healing=True))
                 if skill.get("effect") == "promote" and roll(skill["effect-trigger"]):
                     change = buff(target, skill)
                     if change:
@@ -1007,6 +1009,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if amount > 0:
                 hit_targets.append(target)
             if target["hp"] > 0 and amount > 0:
+                if skill and 9000021 in actor["effects"]:
+                    destinations.extend(set_state(target, "close", rng.randint(1, 2)))
                 dizzy = (combo_id == 12622 and target["hp"] * 5 < target["maxhp"]
                          or combo_id == 12618 and target["pos"] > 7 and roll(.35)
                          or skill and skill.get("effect") == "dizzy" and roll(skill["effect-trigger"])
@@ -1088,7 +1092,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 event([change])
         for target, amount in recovered:
             if target["hp"] > 0:
-                event([change_hp(target, -amount)])
+                event([change_hp(target, -amount, healing=True)])
         if actor["hp"] > 0 and not actor["dizzy"] and actor["states"].get("skilllock", 0) <= round_number and not finished():
             if combo_id in (12604, 12943) and all(friends[p]["hp"] > 0 and not friends[p]["dizzy"]
                 and friends[p]["states"].get("skilllock", 0) <= round_number for p in participants):
@@ -1112,7 +1116,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         destinations = []
         if cid == 90001:
             selected = sorted(friends, key=lambda u: (u["hp"], u["pos"]))[:skill["randnum"]]
-            destinations = [change_hp(u, -int((u["maxhp"] - u["hp"]) * coefficient)) for u in selected]
+            destinations = [change_hp(u, -int((u["maxhp"] - u["hp"]) * coefficient), healing=True) for u in selected]
         else:
             candidates = enemies if cid in (90003, 90005) else friends
             if cid == 90008:
