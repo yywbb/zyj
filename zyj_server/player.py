@@ -85,6 +85,7 @@ def load_role_config(config_path):
                               "shenlong_map2", "shenlong_random2", "shenlong_type", "shenlong_praram", "shenlong_discount", "shenlong_reward", "zodiac_new",
                              "personalboss_att", "personalboss_date", "equip_baptize", "artifact", "artifact_baptize", "artifact_baptize_xian", "artifact_xian_config", "task", "team_recommend", "cup_reward",
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
+                             "exclusive", "ID_dictionary",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
 
@@ -459,7 +460,8 @@ def change_item_count(save, cid, delta, role_config, now=None):
     if fragment:
         cid = fragment["general"]
     elif (not equip_fragment and str(cid) not in role_config["props"] and str(cid) not in role_config["pet3_fragment"]
-          and str(cid) not in role_config["token"] and str(cid) not in role_config["token_fragment"]):
+          and str(cid) not in role_config["token"] and str(cid) not in role_config["token_fragment"]
+          and str(cid) not in role_config.get("exclusive", {}) and str(cid) not in role_config.get("redl_awake_item", {})):
         raise ValueError(f"未实现的物品类型: {cid}")
     world = save["world_state"]
     body = bytes.fromhex(world[query])

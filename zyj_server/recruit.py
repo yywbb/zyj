@@ -111,11 +111,29 @@ def build_reward(save, gets, config):
     for cid, count in gets:
         if type(count) is not int or not 0 < count < (1 << (63 if cid == 1000 else 31)):
             raise ValueError("奖励数量无效")
-        if str(cid) in config["general"]:
+        if str(cid) in config.get("pet3_attr", {}):
+            from . import pets
+            pstate = pets.get_state(save, config)
+            debris = None
+            if "pet3_fragment" in config:
+                for row in config["pet3_fragment"].values():
+                    if row.get("petid") == cid:
+                        debris = row.get("debris")
+                        break
+            if debris is None:
+                debris = cid + 1000
+            if not any(p[1] == cid for p in pstate["pets"]):
+                new_pet = [max([5000000, *(p[0] for p in pstate["pets"])]) + 1, cid, 0, 1]
+                pstate["pets"].append(new_pet)
+                if pstate["active"] == 0:
+                    pstate["active"] = new_pet[0]
+            props[debris] = props.get(debris, 0) + count * 100
+        elif str(cid) in config["general"]:
             for _ in range(count):
                 if cid in owned:
-                    fragment = fragments[cid]
-                    props[fragment["id"]] = props.get(fragment["id"], 0) + fragment["recruit"]
+                    fragment = fragments.get(cid)
+                    if fragment:
+                        props[fragment["id"]] = props.get(fragment["id"], 0) + fragment["recruit"]
                 else:
                     iid += 1
                     generals.append(encode_pb_field(8, 2, favorite.add_bonus(new_general(cid, iid, config), save, config)))

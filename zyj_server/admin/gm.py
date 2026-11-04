@@ -24,25 +24,158 @@ COMMON_ITEMS = (20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_P
 
 
 def catalog(config):
-    groups = {10000017, 10000018}
-    for row in config["recruit_basic"].values():
-        groups.update(row[key] for key in ("freecardgroupid", "freefirstcardgroupid", "normalfirstcardgroupid", "firsttentavern"))
-    generals = {int(entry.split(",")[0]) for group in groups if group
-                for entry in config["recruit_deck"][str(group)]["resourceid"].split(";") if entry}
-    fragments = {row["general"] for row in config["general_fragment"].values()}
+    id_dict = config.get("ID_dictionary", {})
+    def get_dict_name(cid, fallback=""):
+        s = str(cid)
+        if s in id_dict and "0" in id_dict[s] and id_dict[s]["0"].get("name"):
+            return id_dict[s]["0"]["name"]
+        return fallback
+
     rows = []
-    for table, kind in (("props", "道具"), ("general_fragment", "武将碎片"), ("equip", "普通装备"), ("general", "武将")):
-        for key, row in config[table].items():
+    seen = set()
+
+    # 1. 道具 (props)
+    if "props" in config:
+        for key, row in config["props"].items():
             cid = int(key)
-            if table == "general" and (cid not in generals or cid not in fragments or row["init_cid"] != cid):
-                continue
-            if table == "equip" and row["type"] not in ("weapon", "armor", "head", "accessory"):
-                continue
-            if table == "general_fragment" and str(row["general"]) not in config["general"]:
-                continue
-            name = config["general"][str(row["general"])]["name"] + "碎片" if table == "general_fragment" else row["name"]
-            rows.append({"cid": cid, "name": name, "kind": kind, "description": row.get("desc", ""),
-                         "max": 100 if table in ("equip", "general") else 1000000})
+            seen.add(cid)
+            rows.append({"cid": cid, "name": row.get("name", ""), "kind": "道具", "description": row.get("desc", ""),
+                         "max": 1000000})
+
+    # 2. 战宠碎片 (pet3_fragment) - 包含 91008 鲲碎片 等
+    if "pet3_fragment" in config:
+        for key, row in config["pet3_fragment"].items():
+            debris = int(row.get("debris", key))
+            petid = str(row.get("petid", ""))
+            pet_name = config.get("pet3_attr", {}).get(petid, {}).get("0", {}).get("name") or get_dict_name(petid, "战宠")
+            name = get_dict_name(debris, f"{pet_name}碎片")
+            seen.add(debris)
+            rows.append({"cid": debris, "name": name, "kind": "战宠碎片",
+                         "description": row.get("desc", "") or f"合成战宠【{pet_name}】所需碎片", "max": 1000000})
+
+    # 3. 战宠 (pet3_attr) - 包含 90008 鲲 等
+    if "pet3_attr" in config:
+        for key, row in config["pet3_attr"].items():
+            cid = int(key)
+            name = row.get("0", {}).get("name") or get_dict_name(cid, "战宠")
+            ptype = row.get("0", {}).get("type", "")
+            q = row.get("0", {}).get("quality", "")
+            seen.add(cid)
+            rows.append({"cid": cid, "name": name, "kind": "战宠",
+                         "description": f"战宠 / {ptype} / 品质{q}", "max": 100})
+
+    # 4. 专属装备 (exclusive) - 包含 201532 紫霄神鲲 等
+    if "exclusive" in config:
+        for key, row in config["exclusive"].items():
+            cid = int(key)
+            seen.add(cid)
+            rows.append({"cid": cid, "name": row.get("name", ""), "kind": "专属装备",
+                         "description": row.get("describe", "") or row.get("desc", ""), "max": 100})
+
+    # 5. 武将碎片 (general_fragment)
+    if "general_fragment" in config:
+        for key, row in config["general_fragment"].items():
+            cid = int(key)
+            gid = str(row.get("general", ""))
+            if gid in config.get("general", {}):
+                gname = config["general"][gid].get("name") or get_dict_name(gid, "武将")
+                seen.add(cid)
+                rows.append({"cid": cid, "name": f"{gname}碎片", "kind": "武将碎片",
+                             "description": f"合成武将【{gname}】所需碎片", "max": 1000000})
+
+    # 6. 武将 (general)
+    if "general" in config:
+        for key, row in config["general"].items():
+            cid = int(key)
+            if row.get("battle") == 1 and row.get("name") and row.get("quality", 0) >= 2 and row.get("init_cid") == cid:
+                if cid not in seen:
+                    seen.add(cid)
+                    desc = f"武将 / 品质{row.get('quality')} / 资质{row.get('aptitude', '')}"
+                    rows.append({"cid": cid, "name": row.get("name", ""), "kind": "武将",
+                                 "description": desc, "max": 100})
+
+    # 7. 宝物碎片 / 坐骑碎片 (treasure2_fragment)
+    if "treasure2_fragment" in config:
+        for key, row in config["treasure2_fragment"].items():
+            cid = int(key)
+            if cid not in seen:
+                seen.add(cid)
+                rows.append({"cid": cid, "name": row.get("name", ""), "kind": "宝物碎片",
+                             "description": "宝物/坐骑合成碎片", "max": 1000000})
+
+    # 8. 装备碎片 (equip_fragment)
+    if "equip_fragment" in config:
+        for key, row in config["equip_fragment"].items():
+            cid = int(key)
+            if cid not in seen:
+                seen.add(cid)
+                name = row.get("name", "")
+                rows.append({"cid": cid, "name": name if name.endswith("碎片") else f"{name}碎片", "kind": "装备碎片",
+                             "description": "装备合成碎片", "max": 1000000})
+
+    # 9. 普通装备 (equip)
+    if "equip" in config:
+        for key, row in config["equip"].items():
+            cid = int(key)
+            if row.get("type") in ("weapon", "armor", "head", "accessory"):
+                if cid not in seen:
+                    seen.add(cid)
+                    rows.append({"cid": cid, "name": row.get("name", ""), "kind": "普通装备",
+                                 "description": row.get("desc", ""), "max": 100})
+
+    # 10. 觉醒道具 (redl_awake_item)
+    if "redl_awake_item" in config:
+        for key, row in config["redl_awake_item"].items():
+            cid = int(key)
+            if cid not in seen:
+                seen.add(cid)
+                name = row.get("name", "")
+                rows.append({"cid": cid, "name": name if name.endswith("丹") else f"{name}突破觉醒丹", "kind": "道具",
+                             "description": row.get("desc", ""), "max": 1000000})
+
+    # 11. 令牌 (token) & 令牌碎片 (token_fragment)
+    if "token" in config:
+        for key, row in config["token"].items():
+            cid = int(key)
+            if cid not in seen:
+                seen.add(cid)
+                rows.append({"cid": cid, "name": row.get("desc", "") or f"令牌{cid}", "kind": "道具",
+                             "description": row.get("desc", ""), "max": 1000000})
+    if "token_fragment" in config:
+        for key, row in config["token_fragment"].items():
+            cid = int(key)
+            if cid not in seen:
+                seen.add(cid)
+                rows.append({"cid": cid, "name": row.get("name", "") or f"令牌碎片{cid}", "kind": "道具",
+                             "description": row.get("desc", ""), "max": 1000000})
+
+    # 12. 法宝宝石 (trump_gem)
+    if "trump_gem" in config:
+        for key, row in config["trump_gem"].items():
+            cid = int(key)
+            if cid not in seen:
+                seen.add(cid)
+                rows.append({"cid": cid, "name": row.get("desc", "") or f"宝石{cid}", "kind": "道具",
+                             "description": row.get("desc", ""), "max": 1000000})
+
+    # 13. 战魂 (soul) & 魔符 (sigil)
+    if "soul" in config:
+        for key, row in config["soul"].items():
+            cid = int(key)
+            if cid not in seen:
+                name = get_dict_name(cid, f"战魂{cid}")
+                seen.add(cid)
+                rows.append({"cid": cid, "name": name, "kind": "战魂",
+                             "description": "命格战魂", "max": 100})
+    if "sigil" in config:
+        for key, row in config["sigil"].items():
+            cid = int(key)
+            if cid not in seen:
+                name = get_dict_name(cid, f"魔符{cid}")
+                seen.add(cid)
+                rows.append({"cid": cid, "name": name, "kind": "魔符",
+                             "description": row.get("desc", ""), "max": 100})
+
     return sorted(rows, key=lambda row: row["cid"])
 
 
@@ -66,8 +199,8 @@ def validate(data, items):
         if any(type(data[key]) is not int or not (0 if key in ("count", "position") else 1) <= data[key] < (1 << 31)
                for key in PLAYER_ACTIONS[action]):
             raise ValueError("物品、武将或数量参数无效")
-        if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片"):
-            raise ValueError("只能修正目录中的道具或武将碎片数量")
+        if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片", "战宠碎片", "宝物碎片", "装备碎片"):
+            raise ValueError("只能修正目录中的道具或碎片数量")
         if action == "formation" and data["position"] > 7:
             raise ValueError("阵位必须为 0（下阵）或 1–7")
         return action
@@ -85,10 +218,10 @@ def validate(data, items):
                 or not 1 <= row["count"] <= items[row["cid"]]["max"] or row["cid"] in seen):
             raise ValueError("物品不存在、数量超限或包含重复条目")
         seen.add(row["cid"])
-        if items[row["cid"]]["kind"] in ("普通装备", "武将"):
+        if items[row["cid"]]["kind"] in ("普通装备", "武将", "战宠", "专属装备", "战魂", "魔符"):
             instances += row["count"]
     if instances > 100:
-        raise ValueError("一次最多发放 100 件装备或武将")
+        raise ValueError("一次最多发放 100 件装备、武将或特殊实体")
     if not resources and not rewards:
         raise ValueError("请至少填写一项资源变更或物品")
     return action

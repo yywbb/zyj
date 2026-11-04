@@ -45,7 +45,13 @@ function fields(entries, className = "key-values") {
 function table(rows, columns, empty = "暂无记录。") {
   if (!rows.length) return node("p", empty, "empty");
   const wrapper = node("div", undefined, "table-wrap"), grid = node("table"), head = node("thead"), header = node("tr"), body = node("tbody");
-  columns.forEach(([label]) => { const cell = node("th", label); cell.scope = "col"; header.append(cell); });
+  columns.forEach(([label]) => {
+    const cell = node("th");
+    cell.scope = "col";
+    if (label instanceof Node) cell.append(label);
+    else if (label !== undefined) cell.textContent = label;
+    header.append(cell);
+  });
   head.append(header);
   for (const row of rows) {
     const tr = node("tr");
@@ -491,44 +497,272 @@ async function loadOperations(offset = 0) {
   state.operationsOffset = offset; $("operations-rows").replaceChildren(operationTable(result.rows)); pager("operations", offset, result.total);
 }
 
-function addMailItem(item) {
-  if (!mailCart.some((r) => r.cid === item.cid)) mailCart.push({ ...item, count: 1 });
-  renderMailCart();
+let mailCatalogRows = [];
+const mailSelectedCatalogCids = new Set();
+const mailSelectedCartCids = new Set();
+
+function updateCatalogBatchBar() {
+  const count = mailSelectedCatalogCids.size;
+  const numEl = $("mail-catalog-selected-num");
+  if (numEl) numEl.textContent = count;
+  const btn = $("mail-catalog-add-selected");
+  if (btn) btn.disabled = count === 0;
 }
+
+function updateCartBatchBar() {
+  const selectedCount = mailSelectedCartCids.size;
+  const btn = $("mail-apply-batch-qty");
+  if (btn) {
+    btn.textContent = selectedCount > 0 ? `⚡ 批量设为 (${selectedCount}件)` : "⚡ 一键设置";
+  }
+}
+
+function updateMailSummary() {
+  const targetType = $("mail-target-type") ? $("mail-target-type").value : "all";
+  const targetText = targetType === "all" ? "全服所有玩家" : `账号 #${$("mail-target-account")?.value || 1}`;
+  const itemsCount = mailCart.length;
+  const totalQty = mailCart.reduce((sum, item) => sum + (Number(item.count) || 0), 0);
+
+  const parts = [`目标: ${targetText}`];
+  if (itemsCount > 0) {
+    parts.push(`附件: ${itemsCount}种物品 (共${number(totalQty)}件)`);
+  } else {
+    parts.push("无附件物品");
+  }
+
+  const resList = [];
+  const gold = Number($("mail-res-gold")?.value) || 0;
+  const coin = Number($("mail-res-coin")?.value) || 0;
+  const stamina = Number($("mail-res-stamina")?.value) || 0;
+  const energy = Number($("mail-res-energy")?.value) || 0;
+  if (gold > 0) resList.push(`元宝+${number(gold)}`);
+  if (coin > 0) resList.push(`银币+${number(coin)}`);
+  if (stamina > 0) resList.push(`体力+${number(stamina)}`);
+  if (energy > 0) resList.push(`精力+${number(energy)}`);
+  if (resList.length > 0) parts.push(resList.join(" "));
+
+  const rechargePreset = $("mail-recharge-preset")?.value || "0";
+  if (rechargePreset === "25_card1") parts.push("充值: 25元月卡");
+  else if (rechargePreset === "98_card2") parts.push("充值: 98元终身卡");
+  else if (rechargePreset !== "0" && rechargePreset !== "custom") parts.push(`充值: ${rechargePreset}元档`);
+  else if (rechargePreset === "custom") {
+    const rmb = Number($("mail-recharge-rmb")?.value) || 0;
+    if (rmb > 0) parts.push(`充值: ￥${rmb}`);
+  }
+
+  const summaryEl = $("mail-summary-text");
+  if (summaryEl) summaryEl.textContent = `已就绪：${parts.join(" · ")}`;
+}
+
+function addMailItem(item) {
+  const defaultQty = Math.max(1, Number($("mail-batch-qty").value) || 1);
+  const existing = mailCart.find((r) => r.cid === item.cid);
+  if (existing) {
+    message(`「${item.name || item.cid}」已在附件清单中。`);
+  } else {
+    mailCart.push({ ...item, count: defaultQty });
+    renderMailCart();
+    message(`已添加「${item.name || item.cid}」到附件清单 (数量: ${defaultQty})。`);
+  }
+}
+
+function addSelectedCatalogItems() {
+  if (mailSelectedCatalogCids.size === 0) return;
+  const qty = Math.max(1, Number($("mail-batch-qty").value) || 1);
+  let addedCount = 0;
+  for (const cid of mailSelectedCatalogCids) {
+    let item = mailCatalogRows.find((r) => r.cid === cid);
+    if (!item && info?.common_items) {
+      item = info.common_items.find((r) => r.cid === cid);
+    }
+    if (item) {
+      const existing = mailCart.find((r) => r.cid === item.cid);
+      if (existing) {
+        existing.count = qty;
+      } else {
+        mailCart.push({ ...item, count: qty });
+      }
+      addedCount++;
+    }
+  }
+  mailSelectedCatalogCids.clear();
+  renderMailCatalogRows();
+  updateCatalogBatchBar();
+  renderMailCart();
+  message(`已将 ${addedCount} 种物品批量加入附件清单 (数量: ${qty})。`);
+}
+
+function applyBatchQuantity(customQty) {
+  if (mailCart.length === 0) {
+    message("附件清单为空，请先从物品库勾选或添加物品。");
+    return;
+  }
+  const isMax = customQty === "max";
+  const qty = isMax ? null : Math.max(1, Math.min(1000000, Number(customQty ?? $("mail-batch-qty").value) || 1));
+  if (!isMax) {
+    $("mail-batch-qty").value = qty;
+  }
+
+  const targetList = mailSelectedCartCids.size > 0 
+    ? mailCart.filter((r) => mailSelectedCartCids.has(r.cid))
+    : mailCart;
+
+  for (const item of targetList) {
+    item.count = isMax ? (item.max || 1000000) : Math.min(qty, item.max || 1000000);
+  }
+
+  renderMailCart();
+  if (isMax) {
+    const scopeText = mailSelectedCartCids.size > 0 ? `勾选的 ${targetList.length} 种` : `全部 ${targetList.length} 种`;
+    message(`已将${scopeText}物品设为各自允许的默认最大值。`);
+  } else {
+    if (mailSelectedCartCids.size > 0) {
+      message(`已将勾选的 ${targetList.length} 种物品数量设置为 ${qty}。`);
+    } else {
+      message(`已将附件全部 ${targetList.length} 种物品数量设置为 ${qty}。`);
+    }
+  }
+}
+
 function renderMailCart() {
   $("mail-cart-count").textContent = `${mailCart.length} 种物品`;
-  $("mail-cart").replaceChildren(table(mailCart, [
-    ["物品", (r) => r.name || String(r.cid)],
-    ["数量", (r) => {
-      const input = node("input"); input.type = "number"; input.min = "1"; input.max = r.max || 1000000; input.step = "1"; input.required = true; input.value = r.count;
-      input.setAttribute("aria-label", `${r.name || r.cid}数量`); input.oninput = () => { r.count = Number(input.value); }; return input;
+
+  const allSelected = mailCart.length > 0 && mailCart.every((r) => mailSelectedCartCids.has(r.cid));
+  const someSelected = mailCart.some((r) => mailSelectedCartCids.has(r.cid));
+
+  const selectAll = node("input");
+  selectAll.type = "checkbox";
+  selectAll.title = "全选/取消全选附件物品";
+  selectAll.checked = allSelected;
+  selectAll.indeterminate = !allSelected && someSelected;
+  selectAll.onchange = () => {
+    for (const r of mailCart) {
+      if (selectAll.checked) mailSelectedCartCids.add(r.cid);
+      else mailSelectedCartCids.delete(r.cid);
+    }
+    renderMailCart();
+  };
+
+  const columns = [
+    [selectAll, (r) => {
+      const chk = node("input");
+      chk.type = "checkbox";
+      chk.checked = mailSelectedCartCids.has(r.cid);
+      chk.title = `勾选 ${r.name || r.cid}`;
+      chk.onchange = () => {
+        if (chk.checked) mailSelectedCartCids.add(r.cid);
+        else mailSelectedCartCids.delete(r.cid);
+        selectAll.checked = mailCart.length > 0 && mailCart.every((it) => mailSelectedCartCids.has(it.cid));
+        selectAll.indeterminate = !selectAll.checked && mailCart.some((it) => mailSelectedCartCids.has(it.cid));
+        updateCartBatchBar();
+      };
+      return chk;
     }],
-    ["操作", (r) => button("移除", () => { mailCart = mailCart.filter((item) => item.cid !== r.cid); renderMailCart(); })]
-  ], "从左侧目录添加本次要发放的物品。"));
+    ["物品", (r) => {
+      const span = node("span", r.name || String(r.cid));
+      span.title = `ID: ${r.cid}${r.kind ? ` · ${r.kind}` : ""}`;
+      return span;
+    }],
+    ["数量", (r) => {
+      const input = node("input");
+      input.type = "number";
+      input.min = "1";
+      input.max = r.max || 1000000;
+      input.step = "1";
+      input.required = true;
+      input.value = r.count;
+      input.style.width = "85px";
+      input.style.padding = "4px 6px";
+      input.setAttribute("aria-label", `${r.name || r.cid}数量`);
+      input.oninput = () => {
+        r.count = Math.max(1, Number(input.value) || 1);
+        updateMailSummary();
+      };
+      return input;
+    }],
+    ["操作", (r) => button("移除", () => {
+      mailCart = mailCart.filter((item) => item.cid !== r.cid);
+      mailSelectedCartCids.delete(r.cid);
+      renderMailCart();
+    })]
+  ];
+
+  $("mail-cart").replaceChildren(table(mailCart, columns, "从上方目录添加本次要发放的物品。"));
+  updateCartBatchBar();
+  updateMailSummary();
 }
+
+function renderMailCatalogRows() {
+  const allVisibleSelected = mailCatalogRows.length > 0 && mailCatalogRows.every((r) => mailSelectedCatalogCids.has(r.cid));
+  const someVisibleSelected = mailCatalogRows.some((r) => mailSelectedCatalogCids.has(r.cid));
+
+  const selectAll = node("input");
+  selectAll.type = "checkbox";
+  selectAll.title = "全选/取消全选本页物品";
+  selectAll.checked = allVisibleSelected;
+  selectAll.indeterminate = !allVisibleSelected && someVisibleSelected;
+  selectAll.onchange = () => {
+    for (const r of mailCatalogRows) {
+      if (selectAll.checked) mailSelectedCatalogCids.add(r.cid);
+      else mailSelectedCatalogCids.delete(r.cid);
+    }
+    renderMailCatalogRows();
+    updateCatalogBatchBar();
+  };
+
+  const columns = [
+    [selectAll, (r) => {
+      const chk = node("input");
+      chk.type = "checkbox";
+      chk.checked = mailSelectedCatalogCids.has(r.cid);
+      chk.title = `选中 ${r.name || r.cid}`;
+      chk.onchange = () => {
+        if (chk.checked) mailSelectedCatalogCids.add(r.cid);
+        else mailSelectedCatalogCids.delete(r.cid);
+        selectAll.checked = mailCatalogRows.length > 0 && mailCatalogRows.every((it) => mailSelectedCatalogCids.has(it.cid));
+        selectAll.indeterminate = !selectAll.checked && mailCatalogRows.some((it) => mailSelectedCatalogCids.has(it.cid));
+        updateCatalogBatchBar();
+      };
+      return chk;
+    }],
+    ["物品", (r) => {
+      const span = node("span", r.name);
+      span.title = r.description || "";
+      return span;
+    }],
+    ["ID / 类型", (r) => `${r.cid} / ${r.kind}`],
+    ["操作", (r) => button("添加", () => addMailItem(r))]
+  ];
+
+  $("mail-catalog-rows").replaceChildren(table(mailCatalogRows, columns, "未找到物品，请修改名称、ID 或类型。"));
+}
+
 async function loadMailCatalog(offset = 0) {
   const request = ++mailCatalogRequest;
   const result = await api(`/api/catalog?${new URLSearchParams({ q: $("mail-catalog-query").value.trim(), kind: $("mail-catalog-kind").value, offset })}`);
   if (request !== mailCatalogRequest) return;
   state.mailCatalogOffset = offset;
-  $("mail-catalog-rows").replaceChildren(table(result.rows, [
-    ["物品", (r) => { const span = node("span", r.name); span.title = r.description; return span; }],
-    ["ID / 类型", (r) => `${r.cid} / ${r.kind}`],
-    ["操作", (r) => button("添加", () => addMailItem(r))]
-  ], "未找到物品，请修改名称、ID 或类型。"));
+  mailCatalogRows = result.rows || [];
+  renderMailCatalogRows();
   pager("mail-catalog", offset, result.total);
+  updateCatalogBatchBar();
 }
+
 function renderMailCommonItems() {
   if (!info || !info.common_items || $("mail-common-items").children.length) return;
   for (const item of info.common_items) {
     $("mail-common-items").append(button(item.name, () => addMailItem(item)));
   }
 }
+
 async function loadMails(offset = 0) {
   const request = ++mailRequest;
   const result = await api(`/api/mails?offset=${offset}&limit=25`);
   if (request !== mailRequest) return;
   state.mailOffset = offset;
+  if ($("mail-history-badge")) {
+    $("mail-history-badge").textContent = result.total || 0;
+  }
   const columns = [
     ["编号", (r) => String(r.id)],
     ["目标", (r) => r.target === 0 ? badge("全服所有玩家", "online") : link(`账号 ${r.target}`, `#account/${r.target}/summary`)],
@@ -564,9 +798,47 @@ async function loadMails(offset = 0) {
   $("mail-list-rows").replaceChildren(table(result.rows, columns, "暂无已发送的系统邮件。"));
   pager("mail-list", offset, result.total, 25);
 }
+
+function switchMailTab(tabName) {
+  const isCompose = tabName === "compose";
+  $("mail-tab-compose").classList.toggle("active", isCompose);
+  $("mail-tab-compose").setAttribute("aria-selected", String(isCompose));
+  $("mail-tab-history").classList.toggle("active", !isCompose);
+  $("mail-tab-history").setAttribute("aria-selected", String(!isCompose));
+
+  $("mail-pane-compose").hidden = !isCompose;
+  $("mail-pane-history").hidden = isCompose;
+
+  if (!isCompose) {
+    run(() => loadMails(0));
+  }
+}
+
+function resetMailForm() {
+  $("mail-target-type").value = "all";
+  $("mail-target-account-box").hidden = true;
+  $("mail-target-account").value = "1";
+  $("mail-title").value = "GM系统福利发放";
+  $("mail-content").value = "这是为您发放的专属系统福利，请在附件中查收，祝您游戏愉快！";
+  $("mail-reason").value = "GM福利发放";
+  $("mail-recharge-preset").value = "0";
+  $("mail-recharge-custom-box").hidden = true;
+  $("mail-recharge-gold-box").hidden = true;
+  $("mail-res-gold").value = "";
+  $("mail-res-coin").value = "";
+  $("mail-res-stamina").value = "";
+  $("mail-res-energy").value = "";
+  $("mail-batch-qty").value = "99";
+  mailCart = [];
+  mailSelectedCartCids.clear();
+  renderMailCart();
+  message("已重置系统邮件表单。");
+}
+
 async function loadMailsPage() {
   renderMailCommonItems();
   renderMailCart();
+  updateMailSummary();
   await Promise.all([loadMailCatalog(0), loadMails(0)]);
 }
 async function submitSendMail(event) {
@@ -629,8 +901,9 @@ async function submitSendMail(event) {
 
   const result = await api("/api/mails", payload);
   message(`系统邮件 #${result.id} 发送成功！`);
-  $("mail-title").value = "";
-  $("mail-content").value = "";
+  $("mail-title").value = "GM系统福利发放";
+  $("mail-content").value = "这是为您发放的专属系统福利，请在附件中查收，祝您游戏愉快！";
+  $("mail-reason").value = "GM福利发放";
   $("mail-res-gold").value = "";
   $("mail-res-coin").value = "";
   $("mail-res-stamina").value = "";
@@ -639,6 +912,7 @@ async function submitSendMail(event) {
   $("mail-recharge-custom-box").hidden = true;
   $("mail-recharge-gold-box").hidden = true;
   mailCart = [];
+  mailSelectedCartCids.clear();
   renderMailCart();
   await loadMails(0);
 }
@@ -703,12 +977,37 @@ $("revert-config").onclick = () => run(() => saveConfig(true));
 $("operations-search").onsubmit = (event) => { event.preventDefault(); run(() => loadOperations(0)); };
 $("operations-previous").onclick = () => run(() => loadOperations(Math.max(0, state.operationsOffset - 50)));
 $("operations-next").onclick = () => run(() => loadOperations(state.operationsOffset + 50));
-$("mail-target-type").onchange = () => { $("mail-target-account-box").hidden = $("mail-target-type").value !== "single"; };
+$("mail-target-type").onchange = () => {
+  $("mail-target-account-box").hidden = $("mail-target-type").value !== "single";
+  updateMailSummary();
+};
 $("mail-recharge-preset").onchange = () => {
   const isCustom = $("mail-recharge-preset").value === "custom";
   $("mail-recharge-custom-box").hidden = !isCustom;
   $("mail-recharge-gold-box").hidden = !isCustom;
+  updateMailSummary();
 };
+$("mail-tab-compose").onclick = () => switchMailTab("compose");
+$("mail-tab-history").onclick = () => switchMailTab("history");
+$("mail-catalog-add-selected").onclick = addSelectedCatalogItems;
+$("mail-apply-batch-qty").onclick = () => applyBatchQuantity();
+document.querySelectorAll(".quick-preset-pills .pill-btn").forEach((btn) => {
+  btn.onclick = () => {
+    const raw = btn.dataset.qty;
+    applyBatchQuantity(raw === "max" ? "max" : Number(raw));
+  };
+});
+$("mail-clear-cart").onclick = () => {
+  if (mailCart.length === 0) return;
+  mailCart = [];
+  mailSelectedCartCids.clear();
+  renderMailCart();
+  message("已清空邮件附件清单。");
+};
+$("mail-reset-btn").onclick = resetMailForm;
+for (const id of ["mail-target-account", "mail-res-gold", "mail-res-coin", "mail-res-stamina", "mail-res-energy", "mail-recharge-rmb"]) {
+  $(id)?.addEventListener("input", updateMailSummary);
+}
 $("mail-form").onsubmit = (event) => run(() => submitSendMail(event));
 $("mail-catalog-search").onclick = () => run(() => loadMailCatalog(0));
 $("mail-catalog-query").onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); run(() => loadMailCatalog(0)); } };

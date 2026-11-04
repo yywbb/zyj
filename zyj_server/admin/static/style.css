@@ -129,6 +129,74 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 #mail-catalog-rows thead { position: sticky; top: 0; }
 #catalog-rows { max-height: 390px; overflow: auto; }
 #catalog-rows thead { position: sticky; top: 0; }
+
+/* Compact System Mail & Tabs */
+.compact-page-heading { margin-bottom: 12px; }
+.mail-tabs { display: flex; gap: 8px; border-bottom: 2px solid var(--line); margin-bottom: 14px; padding-bottom: 0; }
+.mail-tabs .tab-btn { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); padding: 8px 16px; font-size: 14px; font-weight: 500; margin-bottom: -2px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.mail-tabs .tab-btn:hover { color: var(--ink); background: #f0f4f8; }
+.mail-tabs .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; background: none; }
+.mail-tabs .badge { background: #e2e8f0; color: #475569; font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: normal; }
+.mail-tabs .tab-btn.active .badge { background: #d0ebf0; color: var(--accent); }
+
+.mail-compose-grid { display: grid; grid-template-columns: 370px minmax(0, 1fr); gap: 14px; align-items: stretch; }
+.mail-meta-column { display: flex; flex-direction: column; gap: 10px; }
+.mail-items-column { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+.compact-panel { padding: 12px 14px; margin-bottom: 0; background: white; border: 1px solid var(--line); border-radius: 6px; }
+.compact-panel .form-field { margin-bottom: 8px; }
+.compact-panel .form-field:last-child { margin-bottom: 0; }
+.compact-panel label { margin-bottom: 3px; font-size: 11px; font-weight: 500; }
+.compact-panel input, .compact-panel select, .compact-panel textarea { padding: 5px 8px; font-size: 12px; }
+.compact-panel textarea { min-height: 44px; height: 46px; resize: vertical; line-height: 1.4; }
+
+.compact-title { margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+.compact-title h3 { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0; }
+
+.mail-row-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+
+.compact-resource-inputs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 4px; }
+.compact-resource-inputs label { font-size: 11px; margin-bottom: 2px; }
+.compact-resource-inputs input { padding: 4px 6px; font-size: 12px; }
+
+.mail-submit-card { background: #f8fafc; border: 1.5px solid #bdd3df; border-radius: 6px; padding: 12px 14px; margin-top: auto; box-shadow: 0 2px 6px rgba(19, 119, 139, 0.08); }
+.mail-summary-bar { margin-bottom: 8px; }
+.mail-summary-text { font-size: 12px; color: var(--accent); font-weight: 500; word-break: break-all; }
+.mail-submit-actions { display: flex; gap: 8px; }
+.mail-submit-btn { flex: 1; padding: 9px 16px; font-size: 14px; font-weight: 600; text-align: center; }
+
+.catalog-heading-left { display: flex; align-items: baseline; gap: 8px; }
+.catalog-panel, .cart-panel { display: flex; flex-direction: column; }
+.compact-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.compact-actions button { padding: 2px 7px; font-size: 11px; border-radius: 3px; }
+.compact-filters { display: flex; gap: 6px; align-items: center; margin: 4px 0 8px; }
+.compact-filters input, .compact-filters select { padding: 4px 7px; font-size: 12px; }
+.compact-filters button { padding: 4px 10px; font-size: 12px; }
+
+.compact-table-scroll { max-height: 185px; overflow-y: auto; border: 1px solid var(--line); border-radius: 4px; background: white; }
+.compact-table-scroll thead { position: sticky; top: 0; background: #f6f8fb; z-index: 2; }
+.compact-table-scroll th, .compact-table-scroll td { padding: 5px 8px; font-size: 12px; }
+.compact-table-scroll th input[type="checkbox"], .compact-table-scroll td input[type="checkbox"] { width: 14px; height: 14px; margin: 0; cursor: pointer; vertical-align: middle; }
+
+.compact-pager { display: flex; justify-content: end; align-items: center; gap: 6px; margin-top: 6px; }
+.compact-pager button { padding: 2px 8px; font-size: 11px; }
+
+.cart-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.cart-batch-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.batch-qty-bar { display: inline-flex; align-items: center; gap: 5px; background: #eef3f7; padding: 2px 6px; border-radius: 4px; border: 1px solid #cbd5e1; }
+.batch-qty-label { font-size: 11px; color: var(--muted); margin: 0; white-space: nowrap; }
+.batch-qty-input { width: 68px !important; padding: 3px 5px !important; font-size: 12px !important; border-radius: 3px !important; text-align: center; }
+.quick-preset-pills { display: inline-flex; gap: 3px; }
+.pill-btn { padding: 2px 6px; font-size: 11px; border: 1px solid #c4d0dc; background: white; border-radius: 3px; cursor: pointer; line-height: 1.3; }
+.pill-btn:hover { background: #dceef2; border-color: var(--accent); color: var(--accent); }
+.pill-btn-max { font-weight: 600; color: #0d6e82; background: #e6f4f7; border-color: #8accd8; }
+.pill-btn-max:hover { background: #ceeaf0; color: #084c5a; border-color: var(--accent); }
+.compact-btn { padding: 3px 9px; font-size: 12px; }
+
+@media (max-width: 1024px) {
+  .mail-compose-grid { grid-template-columns: 1fr; }
+  .compact-table-scroll { max-height: 220px; }
+}
 #gm-form h2 + label { margin-top: 16px; }
 #gm-preview { margin-top: 18px; }
 #gm-identity { flex: 1 1 220px; }
