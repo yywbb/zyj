@@ -162,8 +162,8 @@ local function autoCopyRun(role, vipstatus, now)
     if not data or not config or not role then AutoCopyStop("挂机已停止：关卡或资源状态无效"); return end
     if autoCopy.mode == "sweep" then
         local vip = gamedata.config.vip[tostring(role.vip)]
-        if data.star ~= 3 or not vip or (role.level < tonumber(gamedata.config.global_kv.copy_wipe_level.value) and vip.b_fbsd == 0) then
-            AutoCopyStop("挂机已停止：尚未解锁此关卡扫荡"); return
+        if data.star ~= 3 or not vip or (role.level < tonumber(gamedata.config.global_kv.copy_wipe_level10.value) and vip.copy_sweep == 0) then
+            AutoCopyStop("挂机已停止：尚未解锁此关卡批量扫荡"); return
         end
     end
     autoCopyLabel(autoCopyModes[autoCopy.mode].." "..map.."-"..point)
@@ -190,7 +190,7 @@ local function autoCopyRun(role, vipstatus, now)
         if role.gold < resetPrice then AutoCopyStop("挂机已停止：重置所需元宝不足"); return end
         autoCopySend({type = 1305, map = map, point = point})
     else
-        autoCopySend({type = autoCopy.mode == "sweep" and 1307 or 1306, map = map, point = point, method = 0, exchange = 0})
+        autoCopySend({type = autoCopy.mode == "sweep" and 1307 or 1306, map = map, point = point, method = autoCopy.mode == "sweep" and 1 or 0, exchange = 0})
     end
 end
 
@@ -248,7 +248,7 @@ function AutoCopyStart(mode, buy, reset)
     if getbattlecallbackactive and getbattlecallbackactive() then runGamePrompt({msg = "请先结束当前战斗"}); return end
     local rules = mode == "progress" and "从当前地图开始连续挑战未通关主线；失败或升级时停止。"
         or mode == "stars" and "从头扫描已通关的1/2星关卡，每轮每关挑战一次；失败或升级时停止。"
-        or "固定扫荡进度最靠后的三星关，每次一次，不兑换经验；升级后继续。"
+        or "固定扫荡进度最靠后的三星关，每次按剩余次数和当前体力取最大可扫次数，不兑换经验；升级后继续。"
     rules = rules.."\n自动买体力："..(buy and "开（每次购买1份，按当前次数/星期报价，受VIP日限）" or "关")
         .."\n自动重置："..(reset and "开（每次关卡挑战次数×5元宝）" or "关")
         .."\n"..((buy or reset) and "可能连续消耗元宝直至不足；停止不能撤回已发出的扣费。" or "不购买体力、不用体力丹、不重置。")

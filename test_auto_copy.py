@@ -19,8 +19,8 @@ gameConfig={originSize={width=1080}}
 gamedata={config={copy={
     ['42101']={['1']={physical=5,challenge=3,xp=10},['2']={physical=5,challenge=3,xp=10}},
     ['42102']={['1']={physical=6,challenge=2,xp=12}}},
-    vip={['0']={b_physical=3,b_fbsd=0}},
-    global_kv={basic_buy_stamina={value='50'},copy_wipe_level={value='1'}},
+    vip={['0']={b_physical=3,b_fbsd=0,copy_sweep=0},['2']={b_physical=3,b_fbsd=1,copy_sweep=1}},
+    global_kv={basic_buy_stamina={value='50'},copy_wipe_level={value='1'},copy_wipe_level10={value='30'}},
     buycount_price={['1']={stamina=50},['2']={stamina=100},['3']={stamina=150}},
     activity_huodong={['1']={param=3,open_time=3,modulus=0.8}}}}
 function node()
@@ -64,7 +64,7 @@ end}
 function gameWindows:closeWindow(name) self:closeWindowDirect(name) end
 function gameWindows:closeAllWindowDirect() for name in pairs(self.windows) do self:closeWindowDirect(name) end end
 function confirmNow() local cb=confirmation;confirmation=nil;gameWindows:closeWindowDirect('confirm');assert(cb);cb() end
-GameScene={presentLayer='copy_map',roleinfo={stamina=30,gold=1000,level=16,vip=0},
+GameScene={presentLayer='copy_map',roleinfo={stamina=30,gold=1000,level=30,vip=0},
     layers={copy_map={show=true,module={}},copy_chapter={show=false,module={}}},
     addUpdate=function() end,checkopenlevelbyId=function() return false end,UpdatePresentLayer=function() end}
 function copies(a,b,c,kill)
@@ -88,7 +88,7 @@ function respond(data,request)
     elseif req.type==1305 then t.copy=t.copy or layer.normaldata;UICopyResetKill(t)
     elseif req.type==301 then UIUserBuy(t)
     else
-        t.copy=t.copy or layer.normaldata;t.result=t.result or 1;t.reward={};t.exp=t.exp or {oldlevel=16,newlevel=16}
+        t.copy=t.copy or layer.normaldata;t.result=t.result or 1;t.reward={};t.exp=t.exp or {oldlevel=30,newlevel=30}
         if req.type==1306 then UICopyAttack2(t) else UICopyWipe2(t) end
     end
     return t
@@ -155,11 +155,30 @@ class AutoCopyTests(unittest.TestCase):
             assert(not AutoCopyIsRunning() and notices[#notices]:find('补星'))
             attach(copies(3,2,3));start('sweep');readCycle()
             assert(requests[#requests].type==1307 and requests[#requests].map==42102)
-            assert(requests[#requests].method==0 and requests[#requests].exchange==0)
+            assert(requests[#requests].method==1 and requests[#requests].exchange==0)
             local count=#battles
-            respond({exp={oldlevel=16,newlevel=17}});readCycle()
+            respond({exp={oldlevel=30,newlevel=31}});readCycle()
             assert(AutoCopyIsRunning() and #battles==count and requests[#requests].type==1307)
-            assert(requests[#requests].map==42102 and rewardUpdates>=5)
+            assert(requests[#requests].map==42102 and requests[#requests].method==1 and rewardUpdates>=5)
+            assert(confirmationText:find('最大可扫次数'))
+        ''')
+
+    def test_batch_sweep_gate_precedes_paid_supply_and_never_falls_back_to_singles(self):
+        self.lua.execute('''
+            gamedata.config.vip['0'].b_fbsd=1 -- 只解锁单次仍不能进入批量循环。
+            for _,case in ipairs({{29,0,false},{29,2,true},{30,0,true}}) do
+                attach(copies(3,0,0,3));GameScene.roleinfo.level=case[1];GameScene.roleinfo.vip=case[2]
+                GameScene.roleinfo.stamina=0
+                start('sweep',true,true);readCycle()
+                local req=requests[#requests]
+                if case[3] then
+                    assert(AutoCopyIsRunning() and req.type==300)
+                    AutoCopyServerError({request_opcode=300,localAutoCopy=req.local_auto_copy})
+                else
+                    assert(not AutoCopyIsRunning() and req.type==1300 and notices[#notices]:find('批量扫荡'))
+                end
+                assert(not AutoCopyBlockManual())
+            end
         ''')
 
     def test_scan_reaches_earlier_maps_and_fresh_midnight_counts_avoid_paid_reset(self):
@@ -263,9 +282,9 @@ class AutoCopyTests(unittest.TestCase):
             assert(not AutoCopyIsRunning() and #requests==0);guide.controller.isOnGuide=false
             start('sweep');gameWindows.windows.other={show=true};tick()
             assert(not AutoCopyIsRunning() and #requests==0);gameWindows.windows.other.show=false
-            gamedata.config.global_kv.copy_wipe_level.value='50'
+            gamedata.config.global_kv.copy_wipe_level10.value='50'
             start('sweep');readCycle();assert(not AutoCopyIsRunning() and requests[#requests].type==1300)
-            gamedata.config.global_kv.copy_wipe_level.value='1'
+            gamedata.config.global_kv.copy_wipe_level10.value='30'
             start('sweep');AutoCopyDetach(layer);assert(not AutoCopyIsRunning())
         ''')
 
@@ -373,6 +392,26 @@ class AutoCopyTests(unittest.TestCase):
         lua.execute(self.scripts["assets/scripts/GameCopy.so"])
         lua.execute(self.scripts["assets/common_lua/GameErrorMessage.so"])
         return lua
+
+    def test_batch_sweep_handoff_uses_max_mode_and_settles_actual_attempts_once(self):
+        self.lua.execute("attach(copies(3,0,0));start('sweep');readCycle()")
+        lua = self.network()
+        lua.globals().request = lua.table_from(dict(self.lua.eval("requests[#requests]").items()))
+        lua.execute('''
+            for _,case in ipairs({{50,0,3},{12,0,2},{50,2,1},{5,0,1}}) do
+                gamedata.cache.role.stamina=case[1];gamedata.cache.copy[42101].points[1].kill=case[2]
+                local remote,opcode,body=UICopyWipe2Callback(request)
+                assert(remote==1 and opcode==1307 and #body==4)
+                assert(body[1]==42101 and body[2]==1 and body[3]==1 and body[4]==0)
+                local t=NetCopyWipe2Callback({rbuf={reward={},generals={},encounters={},exp={generals={{exp=case[3]*10}}}}})
+                assert(t.localAutoCopy==request.local_auto_copy and t.map==42101 and t.point==1)
+                assert(t.localAutoRole.stamina==case[1]-case[3]*5)
+                assert(gamedata.cache.copy[42101].points[1].kill==case[2]+case[3])
+                assert(gamedata.cache.role.gold==1000 and not gamedata.ext.localAutoCopyBusy)
+                t=NetCopyWipe2Callback({rbuf={}})
+                assert(t.localAutoCopyIgnored and gamedata.cache.role.stamina==case[1]-case[3]*5)
+            end
+        ''')
 
     def test_network_serializes_manual_and_automatic_mutations_and_preserves_native_costs(self):
         lua = self.network()
