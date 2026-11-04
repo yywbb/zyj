@@ -466,9 +466,9 @@ class FriendsTests(unittest.TestCase):
                 cls._client_scripts[name] = data[:struct.unpack("<I", data[-4:])[0]]
         return cls._client_scripts
 
-    def network_lua(self, account=1):
+    def network_lua(self, account=1, *, native_protobuf=False):
         import test_activity_copy
-        lua = test_activity_copy.ActivityCopyTests.network_lua(self)
+        lua = test_activity_copy.ActivityCopyTests.network_lua(self, native_protobuf=native_protobuf)
         def native(value):
             if isinstance(value, dict):
                 return lua.table_from({native(k): native(v) for k, v in value.items()})

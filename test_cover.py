@@ -31,7 +31,18 @@ class CoverTests(unittest.TestCase):
     client_scripts = classmethod(test_soul.SoulTests.client_scripts.__func__)
     client_call = test_soul.SoulTests.client_call
     give = test_wing.WingTests.give
-    network_lua = test_soul.SoulTests.network_lua
+
+    def network_lua(self):
+        import build_local_apk as builder
+        lua = test_soul.SoulTests.network_lua(self, native_protobuf=True)
+        native = builder.read_script("gamedata").decode()
+        for start_name, end_name in (("SafeMask", "GoddownStatus"), ("ActivitySafeMaskShop", None)):
+            start = native.index("function gamedata." + start_name + "(")
+            end = native.index("function gamedata." + end_name + "(", start) if end_name else native.index("\nfunction ", start + 1)
+            lua.execute(native[start:end].encode())
+        lua.globals().cover_props = bytes.fromhex(self.save["world_state"]["1200"])
+        lua.execute(b'local p=require("idnums_pb").IdNums();p:ParseFromString(cover_props);gamedata:Props(p.idnums);gamedata.cache.safemaskshop={}')
+        return lua
 
     def setUp(self):
         test_soul.SoulTests.setUp(self)
@@ -262,16 +273,9 @@ class CoverTests(unittest.TestCase):
             self.assert_rejected(2881, values=[gid])
 
     def test_actual_network_pb_atomic_state_costs_and_mandatory_shop_quote(self):
-        import build_local_apk as builder
         lua = self.network_lua()
-        native = builder.read_script("gamedata").decode()
-        for start_name, end_name in (("SafeMask", "GoddownStatus"), ("ActivitySafeMaskShop", None)):
-            start = native.index("function gamedata." + start_name + "(")
-            end = native.index("function gamedata." + end_name + "(", start) if end_name else native.index("\nfunction ", start + 1)
-            lua.execute(native[start:end].encode())
-        lua.globals().cover_props = bytes.fromhex(self.save["world_state"]["1200"])
-        lua.execute(b'local p=require("idnums_pb").IdNums();p:ParseFromString(cover_props);gamedata:Props(p.idnums);gamedata.cache.safemaskshop={}')
         self.client_call(lua, 1, "UISlotCoverQueryCallBack", "NetSlotCoverQueryCallBack", {})
+        self.client_call(lua, 1, "UISlotCoverMasterQueryCallBack", "NetSlotCoverMasterQueryCallBack", {})
         price = [lua.table_from({b"cid": cid, b"num": num}) for cid, num in ((20296, 3), (20322, 3), (20318, 3), (20314, 3), (1000, 15000))]
         bad = lua.table_from({b"sid": 1, b"cost": lua.table_from([])})
         self.assertEqual(lua.globals().UISlotCoverupCallBack(bad)[0], 0)
@@ -309,14 +313,75 @@ class CoverTests(unittest.TestCase):
         remote, opcode, body = lua.globals().UISafeMaskShopRewardCallBack(request)
         self.assertEqual((remote, opcode, protocol.parse_ids_pb(body)), (1, 3734, [1, 1, quote]))
         before = self.save["role_state"]["gold"]
-        lua.globals().NetSafeMaskShopRewardCallBack(lua.table_from({b"rbuf": self.success(1, 3734, raw=body)})); self.refresh()
+        result = lua.globals().NetSafeMaskShopRewardCallBack(lua.table_from({b"rbuf": self.success(1, 3734, raw=body)})); self.refresh()
         self.assertEqual(cache[b"role"][b"gold"], before - quote)
+        cid, count = map(int, self.config["mozhao_shop"]["1"]["reward"].strip(";").split(","))
+        self.assertEqual((result[b"reward"][1][b"cid"], result[b"reward"][1][b"num"]), (cid, count))
+        self.assertEqual(cache[b"props"][cid][b"num"], self.props(cid))
         lua.globals().UISafeMaskShopRewardCallBack(request)
         lua.globals().NetErrorMessageCallback9(lua.table_from({b"rbuf": recharge.ids([3731, 0])}))
         self.assertEqual(lua.globals().gamedata[b"ext"][b"localCoverBusy"], 3734)
         lua.globals().NetErrorMessageCallback9(lua.table_from({b"rbuf": recharge.ids([3734, 0])}))
         self.assertIsNone(lua.globals().gamedata[b"ext"][b"localCoverBusy"])
         self.assertIsNone(lua.globals().gameConfig)
+
+    def test_original_apk_decoder_stays_unchanged_and_cover_parsers_receive_separate_fields(self):
+        lua = self.network_lua()
+        from lupa.lua51 import LuaError
+        native = recharge.ids([10] * 7 + [1] * 7 + [2] * 7)
+        mask = protocol.encode_pb_field(100, 2, native)
+        masters = protocol.encode_pb_field(101, 2, recharge.ids([1] + [0] * 6))
+        lua.globals().mixed_cover = native + mask + masters
+        for constructor in ('require("localcoverupdate_pb").LocalCoverUpdate', 'require("ids_pb").Ids'):
+            with self.assertRaisesRegex(LuaError, "ReadTag expects a number"):
+                lua.execute(f'local p={constructor}();p:ParseFromString(mixed_cover)'.encode())
+        scripts = self.client_scripts()
+        for name in ("protobuf", "decoder", "ids_pb", "generals_pb", "somethings_pb"):
+            self.assertFalse(any(path.endswith("/" + name + ".so") for path in scripts))
+        for raw in (native + mask + masters, mask + native + masters, masters + native[:14] + mask + native[14:]):
+            with self.subTest(order=raw[:3]):
+                fd = lua.table_from({b"rbuf": raw})
+                result = lua.globals().NetSlotCoverQueryCallBack(fd)
+                self.assertEqual(fd[b"rbuf"], raw)
+                self.assertEqual(result[b"safemask"][b"7"][b"level3"], 2)
+                self.assertEqual([result[b"safemaskmaster"][str(i).encode()][b"masterid"] for i in range(1, 8)], [1] + [0] * 6)
+
+    def test_malformed_cover_extensions_never_update_caches_or_deduct_native_costs(self):
+        lua = self.network_lua()
+        from lupa.lua51 import LuaError
+        self.client_call(lua, 1, "UISlotCoverQueryCallBack", "NetSlotCoverQueryCallBack", {})
+        native = protocol.encode_pb_field(1, 2, self.gen())
+        mask = protocol.encode_pb_field(100, 2, recharge.ids([0] * 21))
+        masters = protocol.encode_pb_field(101, 2, recharge.ids([0] * 7))
+        extension = mask + masters
+        malformed = [b"", mask, masters, extension + mask, extension + masters,
+                     protocol.encode_pb_field(100, 0, 1) + masters,
+                     protocol.encode_pb_field(100, 2, recharge.ids([0] * 20)) + masters,
+                     mask + protocol.encode_pb_field(101, 2, recharge.ids([0] * 6)),
+                     mask + protocol.encode_pb_field(101, 2, recharge.ids([999] + [0] * 6)),
+                     extension[:-1], extension + b"\x80", extension + b"\x00",
+                     extension + protocol.encode_varint(1 << 32), extension + b"\x0b",
+                     extension + b"\x0c", extension + b"\x0e", extension + b"\x0f",
+                     extension + b"\x09\x00", extension + b"\x0d\x00",
+                     extension + b"\x0a\x80", extension + b"\x0a\x05\x00",
+                     extension + b"\x08" + b"\xff" * 10,
+                     extension + b"\x0a" + protocol.encode_varint((1 << 64) - 1)]
+        for index, value in ((0, 241), (7, 19), (14, 91), (0, (1 << 64) - 1)):
+            values = [0] * 21
+            values[index] = value
+            malformed.append(protocol.encode_pb_field(100, 2, recharge.ids(values)) + masters)
+        lua.execute(b'''cover_old_mask=gamedata.cache.safemask;cover_old_masters=gamedata.cache.safemaskmaster
+            cover_old_coin=gamedata.cache.role.coin;cover_old_props=gamedata.cache.props[20296].num''')
+        for index, extra in enumerate(malformed):
+            with self.subTest(case=index):
+                lua.execute(b'''gamedata.ext.localCoverBusy=nil
+                    local price=gamedata.getIDandNUMs(gamedata.config.mozhao_break["0"].lv_cost)
+                    assert(UISlotCoverupCallBack({sid=1,cost=price})==1)''')
+                with self.assertRaises((LuaError, ValueError)):
+                    lua.globals().NetSlotCoverupCallBack(lua.table_from({b"rbuf": native + extra}))
+                lua.execute(b'''assert(gamedata.cache.safemask==cover_old_mask and gamedata.cache.safemaskmaster==cover_old_masters)
+                    assert(gamedata.cache.role.coin==cover_old_coin and gamedata.cache.props[20296].num==cover_old_props)
+                    assert(gamedata.ext.localCoverBusy==3731)''')
 
     def test_actual_page_waits_for_cover_query_before_rendering_and_rejects_closed_reads(self):
         import build_local_apk as builder

@@ -281,7 +281,7 @@ class ActivityCopyTests(unittest.TestCase):
             raw = activity_copy.reward(self.session.save, 2, 1, percent, self.config, day, 7)
             self.assertEqual(protocol.pb_get_varint(raw, 1), expected)
 
-    def network_lua(self):
+    def network_lua(self, *, native_protobuf=False):
         try:
             from lupa.lua51 import LuaRuntime
         except ImportError:
@@ -349,6 +349,29 @@ class ActivityCopyTests(unittest.TestCase):
         lua.globals().decode_message = decode_message
         lua.globals().encode_message = encode_message
         lua.globals().gamedata[b"config"] = native(self.config)
+        if native_protobuf:
+            # 仅替代 Android C pb 原语；消息解析和未知字段跳过使用 APK 原件。
+            def signed_varint(raw, pos):
+                value, end = protocol.parse_varint(raw, pos)
+                return value - (1 << 64) if value >= (1 << 63) else value, end
+
+            def encode_varint(write, value):
+                write(protocol.encode_varint(int(value) & ((1 << 64) - 1)))
+
+            lua.globals().package[b"loaded"][b"pb"] = lua.table_from({
+                b"varint_decoder": protocol.parse_varint, b"signed_varint_decoder": signed_varint,
+                b"varint_encoder": encode_varint, b"signed_varint_encoder": encode_varint,
+            })
+            lua.execute(b'''local pb=require("pb")
+                pb.read_tag=function(raw,pos)
+                    assert(type(pos)=="number","ReadTag expects a number")
+                    local _,endpos=pb.varint_decoder(raw,pos)
+                    return raw:sub(pos+1,endpos),endpos
+                end
+                package.preload.protobuf=nil''')
+            for name in ("descriptor", "type_checkers", "listener", "containers", "text_format",
+                         "wire_format", "encoder", "decoder", "protobuf"):
+                lua.execute(builder.read_script(name, "common_lua"))
         for name in ("ids_pb", "copies_pb", "copyattack_pb", "copyall3starreward_pb", "result_pb", "somethings_pb", "battleresult_pb"):
             lua.execute(builder.read_script(name, "pb"))
         lua.execute(builder.read_script("PickBattleResultReport"))

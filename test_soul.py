@@ -346,8 +346,8 @@ class SoulTests(unittest.TestCase):
         self.assertEqual(soul.read_world(temporary,self.config)[1][2] and protocol.pb_get_varint(soul.read_world(temporary,self.config)[1][2],10),a)
         self.assertEqual(self.gen(iid),grown)
 
-    def network_lua(self):
-        lua = test_friends.FriendsTests.network_lua(self)
+    def network_lua(self, *, native_protobuf=False):
+        lua = test_friends.FriendsTests.network_lua(self, native_protobuf=native_protobuf)
         scripts = self.client_scripts()
         with zipfile.ZipFile(builder.SRC_APK) as archive:
             modules = {name[len("assets/"):].rsplit("/",1)[-1][:-3]:name for name in archive.namelist()
@@ -367,7 +367,8 @@ class SoulTests(unittest.TestCase):
             for _,n in ipairs({"Newartifact","Jewel","slotGems"}) do gamedata[n]=function() end end''')
         code = scripts["assets/scripts/gamedata.so"].decode()
         for name in ("Souls","SoulHuntQuery","SoulHunt","SlotInfoProcess","Slots","Protagonist","Generals","Equips","equipData","checkIsMainChacter", "Props","propData",
-                     "updateprops","updateStaff","updateRoleCoin","updateRoleGold","getIDandNUMs","getStaffNum","IDconfig","coinConfig","goldConfig","checkStaffEnough"):
+                     "updateprops","updateStaff","updateRoleCoin","updateRoleGold","getIDandNUMs","getStaffNum","IDconfig","coinConfig","goldConfig","checkStaffEnough",
+                     "illusions","ExclusiveArtifactQiLingDatas"):
             start = code.index("function gamedata."+name+"(")
             end = code.find("\nfunction ",start+1)
             lua.execute(code[start:end if end!=-1 else len(code)].encode())
