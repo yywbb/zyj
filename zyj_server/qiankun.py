@@ -37,6 +37,7 @@ def protected(save):
     iids = {pb_get_varint(v, 2) for n, w, v in iter_pb_fields(world) if n in (4, 5) and w == 2}
     iids.add(pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1))
     iids.update(iid for team in save.get("single_boss_state", {}).get("teams", {}).values() if team for iid in team[:7])
+    iids.update(job["iid"] for job in save.get("nightclub_state", {}).get("jobs", {}).values())
     return iids - {None, 0}
 
 

@@ -2055,6 +2055,88 @@ def patch_exchange_scripts(patched):
     patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
 
+def patch_nightclub_scripts(patched):
+    for name, filename in (("GameNightclub", "nightclub_network.lua"), ("UINightclub", "nightclub_ui.lua")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        if name == "GameNightclub":
+            marker = "gamedata.cache.generals[vv].cid"
+            assert code.count(marker) == 3
+            code = code.replace(marker, "(gamedata.cache.generals[vv] or {}).cid or 0")
+            marker = "    t.battlereport = PickBattleResultReport(EncounterOptResultPb)"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    if EncounterOptResultPb.result ~= -1 then t.battlereport = PickBattleResultReport(EncounterOptResultPb) end")
+        else:
+            code = re.sub(r"(?m)^\s*UIRequest\(\{type\s*=\s*1001\}\)\s*$", "", code)
+            marker = "    local function tmpDone()\n"
+            assert code.count(marker) == 2
+            code = code.replace(marker, marker + "        if not localNightclubCurrent(t) then return end\n")
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            patched[f"assets/scripts/{name}.so"] = xxtea_encrypt((code + "\n" + stream.read()).encode("utf-8"), XXTEA_KEY)
+    for name, prefix, methods in (("Layer_nightclub_main", "nightclub", ("init", "clear")),
+            ("Layer_nightclub_cell", "clubcell", ("init", "clear")),
+            ("Layer_nightclub_oneAdd", "oneAddclub", ("init", "clear")),
+            ("window_nightclubchance", "clubchance", ("open", "close"))):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for method in methods:
+            start = code.index(f"function {prefix}.{method}(self")
+            end = code.index("\n", start) + 1
+            code = code[:end] + "    self.localNightclubGeneration=(self.localNightclubGeneration or 0)+1\n" + code[end:]
+        if prefix == "clubchance":
+            marker = "    self.up_needprops = {}"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + "\n    self.localNightclubToken={stamp=data._stamp,event=data._type}\n")
+        if prefix in ("clubcell", "oneAddclub"):
+            marker = "_type = data[\"2\"]}" if prefix == "clubcell" else "_type = v[\"2\"],"
+            if prefix == "clubcell":
+                assert code.count(marker) == 1
+                code = code.replace(marker, '_type = data["2"],_stamp=data["7"]}')
+            else:
+                marker = '_type = self.speacialData[index]["data"]["2"],'
+                assert code.count(marker) == 1
+                code = code.replace(marker, marker + '_stamp=self.speacialData[index]["data"]["7"],')
+        if prefix != "clubchance":
+            start = code.index(f"function {prefix}.updatetimeFunc(")
+            end = code.index("\nfunction ", start + 1)
+            block = code[start:end]
+            marker = "    gameTimer:rigistTime(tmpStr, times)"
+            assert block.count(marker) == 1
+            block = block.replace(marker, "    local deadline=gamedata:time()+times\n" + marker)
+            marker = '    gameTimer:rigistTimeFunc(tmpStr,function()'
+            assert block.count(marker) == 1
+            block = block.replace(marker, marker + "\n        gameTimer.times[tmpStr]=math.max(0,deadline-gamedata:time())\n")
+            code = code[:start] + block + code[end:]
+        # 原生事件按钮/延迟动画不应存活到下一次页面或楼层。
+        matches = list(re.finditer(rf"^function {prefix}\.[^(]+\(self[^\n]*\n", code, re.M))
+        for index in range(len(matches)-1, -1, -1):
+            start = matches[index].start()
+            end = matches[index+1].start() if index+1 < len(matches) else code.rindex("return ")
+            block = code[start:end]
+            pattern = r"(?m)^([^\n]*?)(addHandleOfControlEvent\(function\([^\n]*?\)|setAnimationCompletedCallback\(function\(\)|rigistTimeFunc\([^\n]*?function\(\)|local (?:function \w+|\w+ = function)\([^\n]*?\))"
+            block = re.sub(pattern, lambda m: m.group(0) if m.group(1).lstrip().startswith("--") else m.group(0)
+                + "\n        if not self.rootNode or generation~=self.localNightclubGeneration then return end\n", block)
+            if block != code[start:end]:
+                at = block.index("\n") + 1
+                if re.match(rf"function {prefix}\.(?:init|open)\(", block):
+                    at = block.index("\n", at) + 1
+                block = block[:at] + "    local generation=self.localNightclubGeneration\n" + block[at:]
+                code = code[:start] + block + code[end:]
+        patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    key = "assets/common_lua/GameErrorMessage.so"
+    raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext and ((error.ids[1]>=4500 and error.ids[1]<=4505) or (error.ids[1]>=4509 and error.ids[1]<=4511)) then
+        if gamedata.ext.localNightclubBusy==error.ids[1] then
+            gamedata.ext.localNightclubBusy=nil
+            for _,key in ipairs({"shaType","shaNum","baoNum","clubGold","clubCoin","clubItem","clubNums"}) do gamedata.ext[key]=nil end
+        end
+        table.remove((gamedata.ext.localNightclubPending or {})[error.ids[1]] or {},1)
+    end
+''')
+    patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+
 def patch_examination_scripts(patched):
     for name, filename in (("GameExamination", "examination_network.lua"), ("UIExamination", "examination_ui.lua")):
         code = read_script(name).decode("utf-8").replace("\r\n", "\n")
@@ -3363,6 +3445,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_cover_scripts(patched)
     patch_exchange_scripts(patched)
     patch_examination_scripts(patched)
+    patch_nightclub_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")

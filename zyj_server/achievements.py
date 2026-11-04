@@ -13,7 +13,7 @@ COUNTERS = ("equipbaptize", "robcount", "penglairewardcount", "petbreakcount", "
             "question_month_three", "question_month_two", "question_month_one")
 SUPPORTED_TYPES = {
     "level", "athletics", "cuprank", "blood", "copy", "equip_strengthen", "general", "gang_level", "gang_contribution", "soul",
-    "copystar", "generalbreak", "treasurerefine", "treasurestrengthen", "magicstonelevellimit", "petnum", "vip",
+    "copystar", "generalbreak", "treasurerefine", "treasurestrengthen", "magicstonelevellimit", "petnum", "vip", "tiantingyz",
     "stone_copy", "blackmarketgoldbuycount", "artifact", "personalboss1", "personalboss2", "battle_power", "fashioncoat",
     *COUNTERS, *(f"sigil{i}" for i in (1, 3, 5, 10, 15, 20, 25, 30, 35, 40)),
     *(f"equip_evolve{i}" for i in (1, 4, 8, 12, 20, 28)),
@@ -79,6 +79,7 @@ def snapshot(save, config):
                   artifact=len(save.get("magic_state", {}).get("items", {})),
                   personalboss1=save.get("single_boss_state", {}).get("cleared", {}).get("1", 0),
                   personalboss2=save.get("single_boss_state", {}).get("cleared", {}).get("2", 0),
+                  tiantingyz=len(save.get("nightclub_state", {}).get("cleared", [])),
                   fashioncoat=len(save.get("fashion_state", {}).get("levels", {})),
                   equip_strengthen=max((item[2] for item in ordinary), default=0))
     return {"scalars": scalar, "partners": partners, "treasures": treasures, "copies": copies,
