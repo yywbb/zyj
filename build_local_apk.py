@@ -1998,6 +1998,53 @@ def patch_wing_scripts(patched):
     put("GameErrorMessage", code, "common_lua")
 
 
+def patch_exchange_scripts(patched):
+    for name, filename in (("GameActivityMultipleRebate", "exchange_network.lua"), ("UIActivityMultipleRebate", "exchange_ui.lua")):
+        key = f"assets/scripts/{name}.so"
+        if key in patched:
+            raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+            code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+        else:
+            code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            patched[key] = xxtea_encrypt((code + "\n" + stream.read()).encode("utf-8"), XXTEA_KEY)
+    name = "Layer_activity_treasuresDiscount_x3"
+    code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+    for method in ("init", "clear"):
+        start = code.index(f"function treasuresDiscount_x3.{method}(self")
+        end = code.index("\n", start) + 1
+        code = code[:end] + "    self.localExchangeGeneration = (self.localExchangeGeneration or 0)+1\n" + code[end:]
+    marker = "                if up_level == 999 then"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''                self.treasuresStatusAll[i][k].isshow = 0
+                if exchange[tostring(i)][tostring(k)].open ~= 1 then
+                elseif up_level == 999 then''')
+    marker = "                    if level == currentMaxLevel then"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '                    if level == currentMaxLevel and exchange[tostring(i)][tostring(k)].open == 1 then')
+    marker = "    item.exchangeBtn:addHandleOfControlEvent(function()"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    local generation, pageid = self.localExchangeGeneration, self.selectpage
+    item.exchangeBtn:addHandleOfControlEvent(function()
+        if not self.show or generation ~= self.localExchangeGeneration or pageid ~= self.selectpage then return end''')
+    marker = "        local cb = function(num)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''
+        if not self.show or generation ~= self.localExchangeGeneration or pageid ~= self.selectpage then return end''')
+    patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    key = "assets/common_lua/GameErrorMessage.so"
+    raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''    if gamedata and gamedata.ext then
+        if error.ids[1] == 4017 then gamedata.ext.localExchangeBusy=nil end
+        if error.ids[1] == 4016 then table.remove(gamedata.ext.localExchangeQueries or {},1) end
+    end
+''')
+    patched[key] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+
 def patch_cover_scripts(patched):
     def load(name, folder="scripts"):
         raw = patched.get(f"assets/{folder}/{name}.so")
@@ -3242,6 +3289,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_equip_evolve_scripts(patched)
     patch_wing_scripts(patched)
     patch_cover_scripts(patched)
+    patch_exchange_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")

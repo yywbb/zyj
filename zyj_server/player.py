@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, collection, cover, cup, equip_evolve, soul, wing
+from . import achievements, collection, cover, cup, equip_evolve, exchange, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -662,6 +662,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = timebag.prepare(opcode, save, request_body, role_config, now, body)
         if opcode == 2881:
             apply_reward(save, body, role_config, now)
+    elif opcode in exchange.OPCODES:
+        body, costs = exchange.prepare(opcode, save, request_body, role_config, now)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if opcode in exchange.MUTATIONS:
+            apply_reward(save, body, role_config, now)
     elif opcode in cover.OPCODES:
         body, costs, reward, update, delta = cover.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
@@ -1195,12 +1201,12 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     soul_change = responses and (responses[0]["opcode"] in soul.OPCODES or responses[0]["opcode"] == 1007 and parse_ids_pb(request_body)[1:2] == [2])
     if soul_change and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1002, 0, bytes.fromhex(save["world_state"]["1002"])))
-    if responses and responses[0]["opcode"] in (*penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
+    if responses and responses[0]["opcode"] in (*exchange.MUTATIONS, *penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
         packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
     if responses and responses[0]["opcode"] in (1120, 1365, *equip_evolve.OPCODES, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     baptize_cost = responses and responses[0]["opcode"] in equip_baptize.OPCODES and save["world_state"]["1002"] != before["world_state"]["1002"]
-    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 1305, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES, *wing.MUTATIONS, *cover.MUTATIONS):
+    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 1305, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *exchange.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES, *wing.MUTATIONS, *cover.MUTATIONS):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
