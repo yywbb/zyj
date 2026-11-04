@@ -2,8 +2,11 @@
 
 import copy
 from fractions import Fraction
+import json
+from pathlib import Path
 import unittest
 from unittest.mock import patch
+import zipfile
 
 import test_soul
 import test_wing
@@ -314,6 +317,66 @@ class CoverTests(unittest.TestCase):
         lua.globals().NetErrorMessageCallback9(lua.table_from({b"rbuf": recharge.ids([3734, 0])}))
         self.assertIsNone(lua.globals().gamedata[b"ext"][b"localCoverBusy"])
         self.assertIsNone(lua.globals().gameConfig)
+
+    def test_actual_page_waits_for_cover_query_before_rendering_and_rejects_closed_reads(self):
+        import build_local_apk as builder
+        lua = test_soul.SoulTests.ui_lua(self)
+        scripts = self.client_scripts()
+        with zipfile.ZipFile(Path(__file__).parent / "configs_sec5.zip") as archive:
+            lua.globals().gamedata.config.generalanimation = lua.table_from(
+                json.loads(archive.read("5/generalanimation.json")), recursive=True)
+        native = builder.read_script("ui", "common_lua").decode()
+        lua.execute(native[native.index("function ui.getSTRandNUM("):native.index("function ui.getXGroupByString(")])
+        native = builder.read_script("gamedata").decode()
+        lua.execute(native[native.index("function gamedata.SafeMask("):native.index("function gamedata.GoddownStatus(")])
+        lua.execute(scripts["assets/scripts/UISlots.so"].decode())
+        lua.globals().cover_page = lua.execute(scripts["assets/scripts/Layer_safemask.so"].decode())
+        lua.globals().mask_values = lua.table_from(protocol.parse_ids_pb(self.success(1, 3730)))
+        generals = formation.records(bytes.fromhex(self.save["world_state"]["1002"]), 1, 2)
+        lua.globals().cover_cids = lua.table_from([protocol.pb_get_varint(raw, 1) for raw in generals.values()][:2])
+        lua.execute('''
+            CCNode={create=node};LuaEventHandler={create=function(_,callback) return callback end}
+            ui.createLuaTableView=function() return node() end
+            ui.itemcache={loadSkeleton=function(_,name) assert(name);return node() end}
+            ui.getGeneralAnimationid=function(name) return name end
+            setControlButtonFrame=function() end
+            guide={controller={addComplete=function() end}}
+            gamedata.cache={};gamedata:SafeMask(mask_values)
+            GameScene.protagonist={w_l=0,w_c=0};GameScene.roleinfo.coin=1000000
+            GameScene.layers.slotsInfo={module={safemask={}}}
+            GameScene.layers.safemask={show=true,module=cover_page}
+            package.loaded.Layer_safemask=cover_page
+            local slots={['1']={sid=1,general={cid=cover_cids[1]}},['4']={sid=4,general={cid=cover_cids[2]}}}
+            local param={sid=4,slotdata=slots,safemask={}}
+            requests={};cover_page:init(node(),0,param)
+            assert(#requests==2 and requests[1].type==3730 and requests[2].type==3732)
+            assert(not cover_page.localCoverReady and not cover_page.rootItems.upnode.visible
+                and not cover_page.rootItems.feishengnode.visible)
+            local old_view=requests[1].coverView
+            assert(old_view.sid==4)
+            cover_page:shiftPage('stage')
+            assert(#requests==2 and not rawget(cover_page.rootItems.upButton,'callback'))
+            local reply={coverView=old_view,safemask=gamedata.cache.safemask,safemaskmaster={}}
+            UISlotCoverQuery(reply)
+            assert(cover_page.localCoverReady and cover_page.rootItems.upnode.visible)
+            assert(cover_page.safemask['4'].level==0 and cover_page.generalindex==2)
+            assert(requests[#requests].type==12001 and requests[#requests].order==37322)
+            cover_page:shiftPage('up')
+            assert(cover_page.rootItems.num1.text==gamedata.config.mozhao_break['0'].value)
+            assert(cover_page.rootItems.coin.text==15000 and cover_page.up_needprops['20296'].num==3)
+            for _,req in ipairs(requests) do assert(req.type==3730 or req.type==3732 or req.type==12001) end
+            cover_page:clear();GameScene.layers.safemask.show=false
+            UISlotCoverQuery(reply)
+            assert(cover_page.rootNode==nil)
+            requests={};GameScene.layers.safemask.show=true
+            cover_page:init(node(),0,param)
+            assert(not cover_page.localCoverReady and requests[1].type==3730)
+            UISlotCoverQuery(reply)
+            assert(not cover_page.localCoverReady)
+            reply.coverView=requests[1].coverView
+            UISlotCoverQuery(reply)
+            assert(cover_page.localCoverReady and cover_page.safemask['4'].level==0)
+        ''')
 
     def test_actual_ui_updates_only_its_generation_and_animates_only_its_target(self):
         try:

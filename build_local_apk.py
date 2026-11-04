@@ -2014,6 +2014,22 @@ def patch_cover_scripts(patched):
         with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
             put(name, (load(name, folder) + "\n" if folder == "scripts" else "") + stream.read(), folder)
     code = load("Layer_safemask")
+    marker = "    self:ReloadData()\n    --\n    UIRequest({type = 3732})"
+    assert code.count(marker) == 1
+    code = code.replace(marker, """    self.localCoverReady=false
+    self.rootItems.upnode:setVisible(false)
+    self.rootItems.feishengnode:setVisible(false)
+    UIRequest({type = 3730})
+    --
+    UIRequest({type = 3732})""")
+    marker = "    self.selectpage = type\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if not self.localCoverReady then return end\n")
+    marker = "function safemask.ReloadData(self,data)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + """    if data and data.safemask then self.localCoverReady=true end
+    if not self.localCoverReady then return end
+""")
     matches = list(re.finditer(r"^function safemask\.[^(]+\(self[^\n]*\n", code, re.M))
     for index in range(len(matches)-1, -1, -1):
         start = matches[index].start()
