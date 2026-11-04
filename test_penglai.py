@@ -11,7 +11,7 @@ from unittest.mock import patch
 import zipfile
 
 import build_local_apk as builder
-from zyj_server import battle, formation, guide, penglai, player, protocol, recharge, replay
+from zyj_server import activities, battle, formation, guide, penglai, player, protocol, recharge, replay
 from zyj_server.session import Session
 
 
@@ -112,6 +112,113 @@ class PenglaiTests(unittest.TestCase):
         self.session.handle(201, 700, protocol.encode_pb_field(1, 0, 105) + protocol.encode_pb_field(2, 0, 1))
         self.session = self.reconnect()
         self.assertEqual(self.session.save["guide"]["sections"]["105"]["status"], 2)
+
+    def test_actual_daily_button_scene_route_and_native_island_init_only_request_2120(self):
+        from lupa.lua51 import LuaRuntime
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.globals().gamedata = lua.table_from({"config": self.config}, recursive=True)
+        with zipfile.ZipFile(ROOT / "configs_sec5.zip") as archive:
+            lua.globals().gamedata.config.generalanimation = lua.table_from(json.loads(archive.read("5/generalanimation.json")), recursive=True)
+        lua.execute('''print=function() end;printT=print
+            function node() return setmetatable({}, {__index=function(t,k)
+                if k=="addHandleOfControlEvent" then return function(self,f) self.callback=f end end
+                if k=="getPositionX" or k=="getPositionY" then return function() return 0 end end
+                return function() end
+            end}) end
+            function items() return setmetatable({}, {__index=function(t,k) local n=node();rawset(t,k,n);return n end}) end
+            function CCBReaderLoad() return node(),items() end
+            getAnimationManager=function() return node() end
+            ccp=function(...) return {...} end;ccc3=ccp
+            setControlButtonFrame=function() end;setSpriteFrameByName=function() end
+            gameTouch={};guide={};ui={sethint=function() end,setLabelString=function() end,setNewIcon=function() end,
+                getIDandNUM=function() return 20262,1 end,penglaiCidNum=function() return {cid=20223,num=30} end,
+                itemcache={loadSkeleton=function() return node() end}}
+            gameConfig={checkBuildOpen=function() return true end,strings={string_common=function() return "%d" end}}
+            gameWindows={closeAllWindowDirect=function() end}
+            requests={};UIRequest=function(t) requests[#requests+1]=t end
+            GameScene={hintdata={},protagonist={general={cid=10101}},checkopenlevelbyId=function(self,id)
+                return gamedata.config.build[tostring(id)].level<=22 end}
+            gameScene=GameScene
+        ''')
+        daily = lua.execute(builder.read_script("Layer_daily").decode())
+        island = lua.execute(builder.read_script("Layer_island2").decode())
+        lua.globals().island = island
+        # GameScene另有日切补丁；执行实际将发布的路由，不用分析树代替。
+        patched = builder.get_patched_lua_scripts()
+        raw = builder.xxtea_decrypt(patched["assets/scripts/GameScene.so"], builder.XXTEA_KEY)
+        scene = raw[:struct.unpack("<I", raw[-4:])[0]].decode()
+        start = scene.index("function gameScene.shiftLayerById(")
+        lua.execute(scene[start:scene.index("\nfunction ", start + 1)])
+        lua.execute('''island.doubleRewardSet=function() end
+            GameScene.shiftLayer=function(self,key)
+                assert(key=="penglai");self.presentLayer=key;island:init(node(),1600)
+            end
+            cell=items()
+        ''')
+        daily.setone(daily, lua.table_from({"systemid": 22, "bgname": "penglaixiandao"}), lua.globals().cell, 1)
+        lua.globals().cell.button.callback()
+        self.assertEqual(lua.globals().GameScene.presentLayer, "penglai")
+        requests = lua.globals().requests
+        self.assertEqual([requests[i].type for i in range(1, len(requests) + 1)], [2120])
+        import test_activity_copy
+        network = test_activity_copy.ActivityCopyTests.network_lua(self)
+        network.execute(builder.read_script("combmessages_pb", "pb"))
+        code = builder.read_script("gamedata").decode()
+        network.execute(code[code.index("function gamedata.Penglai3("):code.index("function gamedata.Penglai(")].encode())
+        network.execute(b"gamedata.cache.penglai3={}")
+        network.execute(builder.read_script("GameIsland"))
+        mode, opcode, body = network.globals().UIPenglai3CallBack(network.table_from({}))
+        self.assertEqual((mode, opcode, body), (1, 2120, None))
+        result = network.globals().NetPenglai3CallBack(network.table_from({b"rbuf": self.call(2120)[0][16:]}))
+        self.assertEqual((result[b"type"], result[b"penglai"][b"location"]), (2120, 1))
+
+    def test_daily_participation_counts_real_regular_remote_and_batch_rolls_not_queries_or_failures(self):
+        self.query()
+        flags, counts, _ = activities.liveness_statuses(self.session.save, self.config, NOW)
+        self.assertEqual((flags[20], counts[20]), (0, 0))
+        self.assert_rejected(2121, recharge.ids([1]))
+        for method in ("regular", "remote", "batch"):
+            self.session.save = copy.deepcopy(self.baseline)
+            if method == "remote":
+                self.give(20262, 1)
+                self.call(2121, [1])
+            elif method == "batch":
+                self.session.save["role_state"]["level"] = 50
+                self.call(2128, [0], seed=7)
+            else:
+                self.call(2121)
+            flags, counts, _ = activities.liveness_statuses(self.session.save, self.config, NOW)
+            self.assertEqual((flags[20], counts[20]), (1, 1), method)
+            self.session = self.reconnect()
+            coin = self.session.save["role_state"]["coin"]
+            self.call(2411, [120])
+            self.assertEqual(self.session.save["role_state"]["coin"] - coin, 2000)
+            self.assert_rejected(2411, recharge.ids([120]))
+            self.assertEqual(protocol.parse_ids_pb(self.call(6517)[0][16:])[0], 5)
+
+    def test_daily_claim_failure_midnight_and_new_75_point_box_keep_rewards_atomic(self):
+        self.call(2121)
+        memory, disk = copy.deepcopy(self.session.save), self.path.read_bytes()
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.call(2411, [120])
+        self.assertEqual((self.session.save, self.path.read_bytes()), (memory, disk))
+        self.session = self.reconnect()
+        for task in activities.LIVENESS_TASKS:
+            if task != 7:
+                activities.record_liveness(self.session.save, task, self.config["liveness"][str(task)]["num"], self.config, NOW)
+        self.session.save["welfare_state"]["sign_day"] = (NOW + 28800) // 86400
+        self.call(2411)
+        self.assertEqual(activities.liveness_statuses(self.session.save, self.config, NOW)[2], [1, 1, 1, 0, 0])
+        before = copy.deepcopy(self.session.save)
+        self.call(2411, [3])
+        expected = activities.build_reward(before, self.config["liveness_reward"]["3"]["reward"], self.config)
+        player.apply_reward(before, expected, self.config, NOW)
+        self.assertEqual((self.session.save["role_state"], self.session.save["world_state"]), (before["role_state"], before["world_state"]))
+        self.assert_rejected(2411, recharge.ids([3]))
+        self.clock.return_value += 86400
+        self.call(2410)
+        self.assertEqual(activities.liveness_statuses(self.session.save, self.config, NOW + 86400)[0][20], 0)
+        self.assert_rejected(2411, recharge.ids([120]))
 
     def test_regular_dice_free_then_ordinal_gold_and_remote_uses_only_owned_prop(self):
         state = self.state()

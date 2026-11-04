@@ -237,7 +237,7 @@ def prepare(opcode, save, body, config, now, seed):
         return recharge.ids([len(card["opened"]), *(v for i, cid in enumerate(card["ids"], 1) for v in (cid, int(i in card["opened"])))]), [], b""
     costs, gets, report = [], [], None
     if opcode in (2121, 2128):
-        from . import achievements
+        from . import achievements, activities
         if opcode == 2128 and (save["role_state"]["level"] < global_value(config, "penglai_onekey_openlv")
                               and not config["vip"][str(save["role_state"]["vip"])]["penglai3_onekey"]):
             raise ValueError("蓬莱一键探索等级或VIP不足")
@@ -247,6 +247,7 @@ def prepare(opcode, save, body, config, now, seed):
         for _ in range(count):
             fee, prizes, report = roll(state, save, config, rng, values[0] if opcode == 2121 and values else 0)
             achievements.record(save, "penglairewardcount", 1, config)
+            activities.record_liveness(save, 20, 1, config, now)
             costs.extend(fee)
             gets.extend(prizes)
             if opcode == 2128 and state["card"] is not None:

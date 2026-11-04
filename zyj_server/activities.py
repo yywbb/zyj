@@ -10,7 +10,7 @@ UNSUPPORTED_OPCODES = (2081, 2082, 7092, 4811, 4812, 5011, 5012, 5013, 5014, 501
 OPCODES = (3610, 3611, 2410, 2411, 6517, 4600, *PAGE_OPCODES, *TRANSACTION_OPCODES)
 CLAIM_OPCODES = (3611, 2411, 5040)
 BEGIN_REWARDS = (*range(80001, 80015), 80030)
-LIVENESS_TASKS = (1, 3, 7, 8, 9, 11, 14, 16, 17, 22, 23, 25, 37, 48)
+LIVENESS_TASKS = (1, 3, 7, 8, 9, 11, 14, 16, 17, 20, 22, 23, 25, 37, 48)
 HINT_IDS = (40, *range(82, 110), 542, 30, 32, 36, 132, 245, 252, 429, 551, 44)
 
 
@@ -401,7 +401,7 @@ def prepare_response(opcode, save, request_body, config, now):
             raise ValueError("活动奖励未解锁或不支持")
         if boxes[box - 1] == 2:
             raise ValueError("活动奖励已领取")
-        # shortcut: 已接任务最多65分，仅可达25/50分基础宝箱；高档附奖随更多玩法接入。
+        # shortcut: 只发原表基础reward；仙币和限时附奖待相应玩法接入。
         reward = build_reward(save, config["liveness_reward"][str(box)]["reward"], config)
         state["liveness_boxes"].append(box)
         return reward
