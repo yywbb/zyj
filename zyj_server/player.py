@@ -72,7 +72,7 @@ def load_role_config(config_path):
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
                              "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "pet3_illustrated", "trigger_gift2", "boss2", "boss2_rewards1", "boss2_rewards2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
-                             "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "activity_huodong",
+                              "watchstar_reward", "watchstar_lv_reward", "watchstar_starextra", "watchstar_change", "watchstar_fix", "game_helper", "activity_huodong",
                              "mystery_shop", "renascence", "redl_awake_item", "gang2_level", "gang2_incense",
                              "gang2_shop", "gang2_bait", "gang2_fishpond", "gang2_fishpondexp",
                              "gang2_skill_open", "gang2_skill_level", "gang2_boss", "gang2_boss_reward", "gang2_boss_contribution", "gang2_boss_encouraging",

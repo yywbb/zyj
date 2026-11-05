@@ -7,7 +7,7 @@ import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from . import cheer, cup, equip_evolve, friends, guild_chat, soul
-from . import achievements, collection, cover, deployment, dragon_wishing, examination, exchange, gamestar, nightclub, wing
+from . import achievements, collection, cover, deployment, dragon_wishing, examination, exchange, game_helper, gamestar, nightclub, wing
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -70,6 +70,7 @@ class Session:
         examination.get_state(self.save, role_config)
         soul.get_state(self.save)
         equip_evolve.get_version(self.save)
+        game_helper.receipt(self.save)
         wing.get_state(self.save, role_config)
         cover.get_state(self.save, role_config)
         gamestar.get_state(self.save, role_config)
@@ -189,6 +190,12 @@ class Session:
 
         if opcode in (5520, 8204):
             return unavailable_response(opcode, seq, body, "此高级养成没有完整消耗记录，安全保护：未扣款、未重生。")
+
+        if opcode in (6211, 6212):
+            try:
+                return game_helper.handle(self, opcode, seq, body)
+            except ValueError as error:
+                return unavailable_response(opcode, seq, body, str(error))
 
         if opcode in pets.UNSUPPORTED:
             return unavailable_response(opcode, seq, body, "此接口属于旧版魔宠，当前版本请使用进阶、图鉴和技能页面，未扣除资源。")

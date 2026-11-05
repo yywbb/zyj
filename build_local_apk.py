@@ -2659,6 +2659,91 @@ def patch_cover_scripts(patched):
     put("GameErrorMessage", code, "common_lua")
 
 
+def patch_game_helper_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    def replace(code, old, new):
+        assert code.count(old) == 1, old
+        return code.replace(old, new)
+
+    for name, filename in (("GameHelper", "game_helper_network.lua"), ("UIHelper", "game_helper_ui.lua")):
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, load(name)+"\n"+stream.read())
+    code = load("Layer_gameHelper")
+    for method in ("init", "clear", "setStatus", "shiftPage"):
+        marker = f"function helper.{method}("
+        assert code.count(marker) == 1
+        pos = code.index("\n", code.index(marker))+1
+        code = code[:pos]+"    self.localHelperGeneration=(self.localHelperGeneration or 0)+1\n"+code[pos:]
+    marker = '    self:reloadMingjiang(items)'
+    code = replace(code, marker, '    items.cl7:setString("后续批次补齐")')
+    code = replace(code, '    local _curNum = initNum', '    local _curNum = math.max(minNum,math.min(tonumber(initNum) or minNum,maxNum))')
+    start, end = code.index("function helper.reloadPenglai("), code.index("function helper.reloadShenlong(")
+    block = code[start:end]
+    block = replace(block, '    local totalcount = gamedata.config.vip[tostring(GameScene.vip.vip)].penglai3_times', '    local totalcount = 0')
+    block = replace(block, '    local minNum = 1', '    local minNum = 0')
+    code = code[:start]+block+code[end:]
+    for name, item in (("reloadFriendCopy", 10), ("reloadKingman", 12)):
+        start = code.index(f"function helper.{name}(")
+        end = code.index("\nfunction helper.", start+1)
+        block = code[start:end]
+        block = replace(block, '    local maxChallengeTimes = freetimes + canbuytimes_max', '    local maxChallengeTimes = data.challengeTimes')
+        block = replace(block, f'self.params[3][{item}][1] = math.max(num - data.challengeTimes,0)', f'self.params[3][{item}][1] = math.min(num,data.challengeTimes)')
+        block = replace(block, '    local minNum = 1', '    local minNum = math.min(1,maxChallengeTimes)')
+        code = code[:start]+block+code[end:]
+    start, end = code.index("function helper.refreshChallenge("), code.index("function helper.reloadMingjiang(")
+    block = code[start:end]
+    block = replace(block, '            local maxChallengeTimes = freetimes + canbuytimes_max', '            local maxChallengeTimes = freetimes')
+    code = code[:start]+block+code[end:]
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "game_helper_layer.lua"), encoding="utf-8") as stream:
+        code = replace(code, 'return helper', stream.read()+"\nreturn helper")
+    put("Layer_gameHelper", code)
+    code = load("window_gameHelperConfirm")
+    code = replace(code, 'content = "本次执行将消耗 "', 'content = "本次执行最多消耗 "')
+    marker = '    ui.createRichLabel(contents,self.rootItems["richNode"],false,{horizontal = "center", vertical = "center"})'
+    code = replace(code, marker, '''    if data.helper then
+        if goldnum==0 and coinnum==0 and g_goldnum==0 then
+            table.insert(contents,2,{fontID=131,content="0元宝",fontSize=40})
+        end
+        table.insert(contents,{fontID=131,content="\\n"..data.helperInfo,fontSize=26})
+    end
+'''+marker)
+    put("window_gameHelperConfirm", code)
+    code = load("window_gameHelperLog")
+    code = replace(code, '    if data.type == 2 then', '    if not data.helperMessage and data.type == 2 then')
+    code = replace(code, '    if data.type == 3 and data.id == 7 and data.index == 1 then', '''    if data.helperMessage then
+        items.des:setString(config.activity)
+    elseif data.type == 3 and data.id == 7 and data.index == 1 then''')
+    marker = '    local cw1 = items.des1:getContentSize().width'
+    code = replace(code, marker, '''    if data.helperMessage then
+        items.des1:setFontSize(24)
+        items.des1:setDimensions(CCSizeMake(900,90))
+        items.des1:setString(data.helperMessage)
+        items.des2:setString("")
+    end
+'''+marker)
+    put("window_gameHelperLog", code)
+    code = load("GameErrorMessage", "common_lua")
+    marker = '    local error = initPb(ids_pb, fd)\n'
+    code = replace(code, marker, marker+'''    if LocalHelperError and fd.ser~=0 then
+        local pending=LocalHelperError(error.ids[1])
+        if pending then return {type=9999,localHelperError=true,helperView=pending.view,helperAction=pending.action} end
+    end
+''')
+    put("GameErrorMessage", code, "common_lua")
+    code = load("UIErrorMessage")
+    marker = 'function UIErrorMessage(t)\n'
+    put("UIErrorMessage", replace(code, marker, marker+'    if LocalHelperUIError and LocalHelperUIError(t) then return end\n'))
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -3866,6 +3951,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_examination_scripts(patched)
     patch_nightclub_scripts(patched)
     patch_dragon_wishing_scripts(patched)
+    patch_game_helper_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")

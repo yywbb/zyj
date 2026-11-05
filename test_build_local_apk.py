@@ -151,7 +151,7 @@ class LanBuildTests(unittest.TestCase):
             gameScene=GameScene;main={}
             gameWindows={windows={},closeAllWindowDirect=function() end}
         ''')
-        for name in ("UISlots", "UISouls", "UIEquipStage", "UIWing"):
+        for name in ("UISlots", "UISouls", "UIEquipStage", "UIWing", "UIHelper"):
             lua.execute(scripts[f"assets/scripts/{name}.so"])
         scene = scripts["assets/scripts/GameScene.so"]
         start = scene.index("function gameScene.shiftLayerById(")
