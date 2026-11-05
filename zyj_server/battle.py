@@ -189,7 +189,7 @@ def rosters(save, point, config):
 
 
 def damage(attacker, defender, config, skill_id=None, critical=False, *, multiplier=Fraction(1),
-           flat=0, critical_multiplier=Fraction(3, 2), combo=False, final_multiplier=Fraction(1)):
+           flat=0, critical_multiplier=Fraction(3, 2), combo=False, final_multiplier=Fraction(1), clip=True):
     """倍率在分段取整前应用，固定加减伤在求和后应用，最后死亡截断。"""
     coefficient, hits = Fraction(1), 1
     if skill_id is not None:
@@ -209,7 +209,8 @@ def damage(attacker, defender, config, skill_id=None, critical=False, *, multipl
         raise ValueError("技能减伤比例无效")
     if skill_id is not None:
         final_multiplier *= 1 - reduction
-    return min(defender["hp"], max(0, int((total + flat) * final_multiplier)))
+    amount = max(0, int((total + flat) * final_multiplier))
+    return min(defender["hp"], amount) if clip else amount
 
 
 def _gain_experience(level, experience, gained, table, field, maximum=None):
@@ -253,7 +254,7 @@ def general_experience(unit, gained, config, maximum=None):
 def _prepare_teams(teams, config):
     dynamic = {*range(9100001, 9100008), 9000001, 9000008, 9000015, 9000020, 9000021, 9000023, 9000024, 9000025,
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
-               9000037, 9000038, 9000039, 9000040, 9000400, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
+               9000037, 9000038, 9000039, 9000040, 9000062, 9000400, 9000401, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
                9000496, 9000501, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
                9000324, 9000327, 9000328, 9000329}
     flat_defense = {9000047, 9000049, 9000072, 9000078, 9000082}
@@ -1002,14 +1003,26 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if parry:
                 multiplier *= Fraction(3, 10)
             attacker, defender = {**actor, "atk": max(1, stat(actor, "atk"))}, {**target, "def": stat(target, "def"), "hp": damage_hp(target)}
+            shared = [target]
+            if (not skill and 9000401 in target["effects"] and not target.get("absorbing")
+                    and target["states"].get("invincible", 0) <= round_number):
+                shared = [u for u in living(enemies) if u is target or config["general"][str(u["cid"])]["region"] == "13"]
             amount = damage(attacker, defender, config, skill_id, critical, multiplier=multiplier, combo=combined,
                             flat=actor["flat_out"] - target["flat_in"],
                              critical_multiplier=Fraction(3, 2) + Fraction(actor.get("criticaldmg", 0) + actor.get("pet_rates", {}).get("criticaldmg", 0), 100)
-                            + (Fraction(1, 10) if combo_id == 12627 else 0))
-            hit = change_hp(target, amount, "parry" if parry else "C" if critical else "N",
-                             skill["count"] if critical and skill else int(critical))
-            dealt += max(0, hit["m"]["m"])
-            killed += int(target["hp"] == 0)
+                            + (Fraction(1, 10) if combo_id == 12627 else 0), clip=len(shared) == 1)
+            portion, remainder = divmod(amount, len(shared))
+            hits = [(u, change_hp(u, portion + int(i < remainder), "parry" if parry else "C" if critical else "N",
+                                  skill["count"] if critical and skill else int(critical))) for i, u in enumerate(shared)]
+            hit = next(change for u, change in hits if u is target)
+            for recipient, change in hits:
+                if recipient is not target:
+                    destinations.append(change)
+                    recovery = queen_recovery(recipient)
+                    if recipient["hp"] > 0 and change["m"]["m"] + change["m"].get("M", 0) > 0 and recovery:
+                        recovered.append((recipient, recovery))
+            dealt += sum(max(0, change["m"]["m"]) for _, change in hits)
+            killed += sum(u["hp"] == 0 for u, _ in hits)
             amount = hit["m"]["m"] + hit["m"].get("M", 0)
             if skill and amount > 0 and target["states"].pop("fire", None):
                 destinations.append(state_event(target, "fire", False))
@@ -1074,6 +1087,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         event(destinations, source)
         if combo_id in MULTI_COMBOS:
             combo_effects(actor, skill, hit_targets, killed)
+        if skill and not followup and effect(actor, 9000062):
+            allies = sorted((u for u in living(friends) if u is not actor), key=lambda u: (u["ap"], u["pos"]))
+            if allies:
+                event([change_ap(allies[0], int(effect(actor, 9000062)))])
         if skill and skill.get("effect") == "suck" and dealt and actor["hp"] > 0:
             amount = min(actor["maxhp"] - actor["hp"], int(dealt * Fraction(skill["effect-param"])))
             if amount:
