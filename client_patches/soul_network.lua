@@ -27,13 +27,13 @@ end
 local upgrade = UISoulUpgradeCallBack
 function UISoulUpgradeCallBack(req)
     if req.preview or req.batch then
-        local sid = req.batch and req.batch[2] or req.sid
+        local sid = req.batch and (req.batch[2] or req.batch["2"]) or req.sid
         local slot = gamedata.cache.slots[sid]
         if not slot or not slot.general or req.general and req.general ~= slot.general then
             return 0,503,{type=503,msg="当前武将已变化，请重新确认"}
         end
         local dust = gamedata.cache.props[20099] and gamedata.cache.props[20099].num or 0
-        local budget = req.batch and req.batch[4] or dust
+        local budget = req.batch and (req.batch[4] or req.batch["4"]) or dust
         if budget > dust then return 0,503,{type=503,msg="灵元不足，请重新确认"} end
         local values,items = {0,sid,slot.general,0},{}
         for pos=1,8 do
@@ -66,7 +66,7 @@ function UISoulUpgradeCallBack(req)
             return 0,2504,{type=2504,soulPreview=values,soulSteps=steps,soulView=req.soulView}
         end
         for i=1,20 do
-            if req.batch[i] ~= values[i] then return 0,503,{type=503,msg="命格或强化消耗已变化，请重新确认"} end
+            if (req.batch[i] or req.batch[tostring(i)]) ~= values[i] then return 0,503,{type=503,msg="命格或强化消耗已变化，请重新确认"} end
         end
         local data = ids_pb.Ids()
         for _,value in ipairs(values) do table.insert(data.ids,value) end

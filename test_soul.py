@@ -584,6 +584,33 @@ class SoulTests(unittest.TestCase):
             lua.globals().gamedata[b"ext"][lock] = None
         self.assertIsNone(lua.globals().gameConfig)
 
+    def test_actual_quick_upgrade_confirmation_accepts_native_queue_string_indices(self):
+        iid = self.grant(70004)
+        self.wear(iid); self.refresh()
+        self.grant(20099, 1000)
+        lua = self.network_lua(native_protobuf=True)
+        lua.globals().props_raw = bytes.fromhex(self.save["world_state"]["1200"])
+        lua.execute(b'local t=require("idnums_pb").IdNums();t:ParseFromString(props_raw);gamedata:Props(t.idnums)')
+        values = self.quick_upgrade(660)
+        batch = lua.table_from({str(i).encode(): value for i, value in enumerate(values, 1)})
+        confirm = lua.table_from({b"batch": batch})
+        before = copy.deepcopy(self.save)
+        for index, value in ((b"3", values[2] + 1), (b"4", 661), (b"5", iid + 1), (b"6", 2)):
+            original = batch[index]
+            batch[index] = value
+            self.assertEqual(lua.globals().UISoulUpgradeCallBack(confirm)[0], 0)
+            self.assertIsNone(lua.globals().gamedata[b"ext"][b"localSoulBusy"])
+            batch[index] = original
+        self.assertEqual(self.save, before)
+        mode, opcode, raw = lua.globals().UISoulUpgradeCallBack(confirm)
+        self.assertEqual((mode, opcode), (1, 2504))
+        self.assertEqual(protocol.parse_ids_pb(raw), values)
+        lua.globals().NetSoulUpgradeCallBack(lua.table_from({b"rbuf": self.success(1, opcode, raw=raw)}))
+        self.refresh()
+        self.assertEqual((self.props(20099), self.items()[iid][2]), (340, 3))
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"props"][20099][b"num"], 340)
+        self.assertEqual(lua.globals().UISoulUpgradeCallBack(confirm)[0], 0)
+
     def test_real_soul_battle_report_converts_actual_animations_and_preserves_terminal_hp(self):
         try:
             from lupa.lua51 import LuaRuntime
@@ -786,6 +813,22 @@ class SoulTests(unittest.TestCase):
         page.status = "equip"
         old_button()
         self.assertEqual(len(lua.globals().requests), 3)
+
+    def test_actual_quick_upgrade_preview_accepts_native_queue_string_indices(self):
+        lua = self.ui_lua()
+        lua.execute('''slotpage={rootNode=node(),localSoulGeneration=1,sid=1,status="soul",
+            slotdata={["1"]={sid=1,general={iid=123}}}}
+            GameScene.layers.slotsInfo={show=true,module=slotpage}''')
+        values = [0, 1, 123, 660, 3000001, 1] + [0] * 14
+        preview = lua.table_from({"type": 2504, "soulView": lua.globals().LocalSoulContext(),
+                                  "soulSteps": 2, "soulPreview": lua.table_from({str(i): value for i, value in enumerate(values, 1)})})
+        lua.globals().UISoulUpgrade(preview)
+        self.assertIn("660", lua.globals().opened.data.msg)
+        self.assertEqual(len(lua.globals().requests), 0)
+        lua.globals().opened.callback()
+        req = lua.globals().requests[1]
+        self.assertEqual(req.type, 2504)
+        self.assertEqual([req.batch[str(i)] for i in range(1, 21)], values)
 
     def test_actual_page_reentry_and_lingshi_purchase_ignore_old_generations_and_other_windows(self):
         lua = self.ui_lua()

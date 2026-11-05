@@ -100,7 +100,7 @@ end
 function UISoulUpgrade(t)
     if t.soulPreview then
         if not LocalSoulMatch(t.soulView,"slotsInfo") then return end
-        gameWindows:openWindow("confirm",{msg="消耗"..t.soulPreview[4].."灵元，将当前武将已装备命格共提升"..t.soulSteps.."级。\n优先低等级，不自动购买。是否继续？"},function()
+        gameWindows:openWindow("confirm",{msg="消耗"..(t.soulPreview[4] or t.soulPreview["4"]).."灵元，将当前武将已装备命格共提升"..t.soulSteps.."级。\n优先低等级，不自动购买。是否继续？"},function()
             if LocalSoulMatch(t.soulView,"slotsInfo") then UIRequest({type=2504,batch=t.soulPreview}) end
         end)
         return
