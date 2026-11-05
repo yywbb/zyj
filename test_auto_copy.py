@@ -288,6 +288,21 @@ class AutoCopyTests(unittest.TestCase):
             start('sweep');AutoCopyDetach(layer);assert(not AutoCopyIsRunning())
         ''')
 
+    def test_manual_challenge_keeps_playback_and_live_refreshes_without_hell_preload(self):
+        self.lua.execute('''
+            GameScene.roleinfo.level=60
+            GameScene.checkopenlevelbyId=function(_,id) return id==148 or id==430 end
+            for _,result in ipairs({0,1}) do
+                requests={}
+                local response={type=1306,map=42101,point=1,result=result,copy=copies(3,0,0),
+                    reward={},exp={oldlevel=60,newlevel=60},layerTag='map'}
+                UICopyAttack2(response)
+                assert(battles[#battles].kind=='copy' and battles[#battles].t==response)
+                assert(layer.normaldata==response.copy)
+                assert(#requests==2 and requests[1].type==1001 and requests[2].type==1350)
+            end
+        ''')
+
     def test_manual_battle_start_or_late_result_stops_automation_before_any_payment(self):
         self.lua.execute('''
             manualBattle=false;getbattlecallbackactive=function() return manualBattle end

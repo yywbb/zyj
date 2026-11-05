@@ -13,6 +13,7 @@ import shutil
 import re
 
 from zyj_server.configuration import iter_config_bytes
+from zyj_server.timebag import GIFTS
 
 DELTA = 0x9E3779B9
 XXTEA_KEY = b"3c883f7813a3ee68"
@@ -966,6 +967,13 @@ def patch_sigil_scripts():
     patched["Layer_slotsInfo"] = code
 
     code = read_script("GameTimeBag").decode("utf-8").replace("\r\n", "\n")
+    marker = "function UITimeBagTrigCallBack(uireq)\n"
+    assert code.count(marker) == 1
+    enabled = ",".join(f"[{gift}]=true" for gift in sorted(GIFTS))
+    code = code.replace(marker, marker + f"    local supportedGifts = {{{enabled}}}\n")
+    marker = "            if v.type==uireq.opt \n                and tonumber(v.param1)==uireq.sysID \n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker.replace("if v.type", "if supportedGifts[v.id] and v.type"))
     start = code.index("    elseif uireq.opt == 2 then\n")
     end = code.index("    elseif uireq.opt == 3 then\n", start)
     block = code[start:end]
@@ -3787,6 +3795,11 @@ end
     patched["assets/scripts/GameCopy.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
 
     code = read_script("UICopy").decode("utf-8").replace("\r\n", "\n")
+    marker = '''    if GameScene:checkopenlevelbyId(430,true) then
+        UIRequest({type = 1370})
+    end'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    -- shortcut: 地狱副本未接通，接入1370后再恢复所需刷新。")
     marker = "function UICopyAttack2(t)\n"
     assert code.count(marker) == 1
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "auto_copy.lua"), encoding="utf-8") as source:

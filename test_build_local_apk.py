@@ -134,6 +134,46 @@ class LanBuildTests(unittest.TestCase):
             end})
             assert(hidden)''')
 
+    def test_feature_entry_only_triggers_server_supported_timebags(self):
+        from lupa.lua51 import LuaRuntime
+        from zyj_server import timebag
+
+        config = player.load_role_config(Path(__file__).parent / "configs_sec5.zip")
+        lua = LuaRuntime()
+        lua.globals().gift_config = lua.table_from(config["trigger_gift2"], recursive=True)
+        lua.execute('''
+            print=function() end; cclog=print
+            package.preload.ids_pb=function() return {Ids=function()
+                return {ids={},SerializeToString=function(self) return self.ids end}
+            end} end
+            package.preload.somethings_pb=function() return {} end
+            gamedata={config={trigger_gift2=gift_config},cache={role={level=150},timebag={}},ext={}}
+            function gamedata:time() return 1800000000 end
+            for _,row in pairs(gift_config) do
+                gamedata.cache.timebag[row.id]={cid=row.id,status=-1,time=0,recivetime=gamedata:time()}
+            end
+        ''')
+        lua.execute(self.client_scripts()["assets/scripts/GameTimeBag.so"])
+        for row in config["trigger_gift2"].values():
+            if row["type"] != 1:
+                continue
+            with self.subTest(gift=row["id"]):
+                status, opcode, data = lua.globals().UITimeBagTrigCallBack(lua.table_from({"opt": 1, "sysID": row["param1"]}))
+                self.assertEqual(opcode, 2882)
+                self.assertEqual(status, int(row["id"] in timebag.GIFTS))
+                if status:
+                    self.assertEqual(list(data.values()), [row["id"]])
+                self.assertEqual(lua.globals().gamedata.cache.timebag[row["id"]].status, -1)
+        lua.execute('''
+            local gift=gamedata.cache.timebag[130012]
+            for _,status in ipairs({0,1,2,-2}) do
+                gift.status=status;gift.time=43200
+                assert(UITimeBagTrigCallBack({opt=1,sysID=49})==0)
+            end
+            gift.status=-1;gamedata.cache.role.level=20
+            assert(UITimeBagTrigCallBack({opt=1,sysID=49})==0)
+        ''')
+
     def test_vip_week_gift_string_request_survives_chained_ui_patches(self):
         from lupa.lua51 import LuaRuntime
         scripts = self.client_scripts()
