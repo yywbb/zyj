@@ -260,7 +260,7 @@ def _prepare_teams(teams, config):
     dynamic = {*range(9100001, 9100008), 9000001, 9000008, 9000015, 9000020, 9000021, 9000023, 9000024, 9000025,
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
                9000037, 9000038, 9000039, 9000040, 9000062, 9000400, 9000401, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
-               9000496, 9000501, 9000502, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
+               9000496, 9000501, 9000502, 9000506, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
                9000324, 9000327, 9000328, 9000329}
     flat_defense = {9000047, 9000049, 9000072, 9000078, 9000082}
     stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
@@ -395,6 +395,12 @@ def _prepare_teams(teams, config):
                                     add(target, attr, value * (len(members) if code == 9000400 else 1), "percent")
                     if code == 9000791 and len(members) <= 2:
                         add(provider, "atk", Fraction(str(row["value2"])), "percent")
+                elif code == 9000506 and (direct, code) not in applied:
+                    applied.add((direct, code))
+                    count = sum(matches(unit, "13", "all") for unit in team.values())
+                    amount = min(value * count, Fraction(str(row["value2"])))
+                    for target in team.values():
+                        add(target, "atk", amount, "percent")
                 elif code == 9000008:
                     add(provider, "reduction", value)
                 elif code == 9000028 and provider.get("npc"):

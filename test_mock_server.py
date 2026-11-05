@@ -6158,6 +6158,102 @@ class ReplayRoutingTests(unittest.TestCase):
         row.update({f"break{i}": pid for i, pid in enumerate(ids, 1)})
         return {**self.role_config, "general": {**self.role_config["general"], str(cid): row}}
 
+    def test_yuding_actual_chanxin_breakthrough_counts_main_clan_and_caps_on_both_sides(self):
+        for cid in (10609, 10831):
+            for direct in (True, False):
+                for count in (1, 2, 4, 5, 7):
+                    with self.subTest(cid=cid, direct=direct, count=count):
+                        teams = {direct: {pos: self.combat_unit(cid if i == 0 else 10608 if i < count else 10201,
+                                                               iid=pos, advance=9 if i == 0 else 0)
+                                          for i, pos in enumerate(battle.POSITIONS)},
+                                 not direct: {2: self.combat_unit(10608, iid=1)}}
+                        upgraded = copy.deepcopy(teams)
+                        upgraded[direct][2]["advance"] = 10
+                        battle._prepare_teams(teams, self.role_config)
+                        battle._prepare_teams(upgraded, self.role_config)
+                        for pos in battle.POSITIONS:
+                            self.assertEqual(upgraded[direct][pos]["atk"] - teams[direct][pos]["atk"], min(count * 4, 16))
+                            for name in ("def", "hp", "speed", "ap"):
+                                self.assertEqual(upgraded[direct][pos][name], teams[direct][pos][name])
+                        self.assertEqual(upgraded[not direct][2]["atk"], teams[not direct][2]["atk"])
+
+    def test_chanxin_uses_snapshot_attack_once_without_counting_enemies_or_supports(self):
+        config = self.passive_config(10201, 9000544)
+        enemy = {2: self.combat_unit(10608, iid=1, atk=1, speed=1)}
+        for count in (0, 1, 4, 5):
+            team = {2: self.combat_unit(10201, advance=1, atk=103, speed=300, initial_ap=0)}
+            team.update({pos: self.combat_unit(10608, iid=pos, atk=1, speed=1)
+                         for pos in battle.POSITIONS[1:count + 1]})
+            before = copy.deepcopy((team, enemy))
+            report = battle.simulate(team, enemy, config, 7, attack_cheer=[10598, 10609], max_rounds=1)
+            first = next(a for a in report["b"]["a"] if a["s"].get("r") and a["s"].get("p") == [2])
+            self.assertEqual(first["e"][0]["m"]["m"], int(103 * (1 + min(Fraction(count, 25), Fraction(4, 25)))))
+            self.assertEqual((team, enemy), before)
+            self.assertEqual(report, battle.simulate(team, enemy, config, 7, attack_cheer=[10598, 10609], max_rounds=1))
+            self.assert_battle_report(report)
+        team = {2: self.combat_unit(10201, advance=1, atk=103),
+                8: self.combat_unit(10201, iid=8, advance=1, atk=103),
+                10: self.combat_unit(10608, iid=10, atk=103)}
+        teams = {True: team, False: enemy}
+        battle._prepare_teams(teams, config)
+        self.assertEqual([u["atk"] for u in team.values()], [107, 107, 107])
+        with self.assertRaisesRegex(ValueError, "9000506"):
+            battle.simulate({2: self.combat_unit(10201, advance=1)}, enemy,
+                            self.passive_config(10201, 9000506), 7, max_rounds=1)
+
+    def test_chanxin_opening_bonus_survives_provider_death_without_changing_saved_inputs(self):
+        config = self.passive_config(10609, 9000544)
+        attack = {2: self.combat_unit(10609, advance=1, hp=1, speed=1, initial_ap=0),
+                  8: self.combat_unit(10201, iid=8, speed=200, initial_ap=0)}
+        defense = {2: self.combat_unit(10201, iid=1, atk=2, speed=300, initial_ap=0)}
+        before = copy.deepcopy((attack, defense))
+        report = battle.simulate(attack, defense, config, 7, max_rounds=2)
+        hits = [d["m"]["m"] for a in report["b"]["a"] if a["s"].get("r") and a["s"].get("p") == [8]
+                for d in a["e"] if d["r"] is False and isinstance(d.get("m"), dict)]
+        self.assertEqual(hits, [104, 104])
+        self.assertEqual(report["endmeta"]["attack"]["2"]["h"], 0)
+        self.assertEqual((attack, defense), before)
+        self.assert_battle_report(report)
+
+    def test_yuding_current_challenge_cost_retry_reconnect_and_failed_save_are_atomic(self):
+        original = self.seed_activity_account()
+        for point in range(1, 10):
+            player.record_copy_win(original, recharge.ids([42177, point]), 3, self.role_config)
+        for win in (True, False):
+            saved = copy.deepcopy(original)
+            saved["role_state"]["stamina"] = 100
+            for iid, raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).items():
+                if iid == 7060:
+                    raw = protocol.pb_set_varint(protocol.pb_set_varint(raw, 1, 10609), 4, 10)
+                for field in (6, 7, 8, 9):
+                    raw = protocol.pb_set_varint(raw, field, 100000000 if win else 1)
+                player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+                player.record_protagonist_general(saved, raw)
+            self.save_path.write_text(json.dumps(saved))
+            with self.subTest(win=win), redirect_stdout(io.StringIO()), patch.object(player.random, "getrandbits", return_value=7):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                body = recharge.ids([42177, 10])
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(1306, 22000, body)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                packets = session.handle(1306, 22000, body)
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1306)
+                self.assertEqual(protocol.pb_get_varint(packets[0][16:], 1), int(win))
+                self.assert_battle_report(json.loads(next(v for n, w, v in protocol.iter_pb_fields(packets[0][16:]) if n == 5)))
+                self.assertEqual(session.save["role_state"]["stamina"], 92)
+                self.assertEqual(session.save["role_state"]["coin"] > saved["role_state"]["coin"], win)
+                expected_gold = battle.victory_role_reward(saved["role_state"], self.role_config["copy"]["42177"]["10"], 0,
+                                                           protocol.pb_get_varint(packets[0][16:], 2), self.role_config)["gold"] if win else 0
+                self.assertEqual(session.save["role_state"]["gold"], saved["role_state"]["gold"] + expected_gold)
+                committed = self.save_path.read_bytes()
+                self.assertEqual(session.handle(1306, 22000, body), packets)
+                self.assertEqual(self.save_path.read_bytes(), committed)
+                reconnected = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                self.assertEqual(reconnected.save["last_battle"], session.save["last_battle"])
+                self.assertEqual(reconnected.save["world_state"], session.save["world_state"])
+
     def test_guangchengzi_pingyuan_actual_breakthrough_and_ap_threshold_on_both_sides(self):
         for cid in (10608, 10830):
             for advance in (7, 8):
@@ -6991,6 +7087,22 @@ class ReplayRoutingTests(unittest.TestCase):
                     for pos, unit in report["endmeta"][side].items():
                         self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
                         self.assertEqual(ext.endinfo[key][pos].ap, unit["ap"])
+
+            for cid in (10609, 10831):
+                for direct in (True, False):
+                    teams = {direct: {2: self.combat_unit(cid, advance=10, initial_ap=0, speed=300),
+                                      8: self.combat_unit(10608, iid=8, initial_ap=0)},
+                             not direct: {2: self.combat_unit(10201, iid=1, initial_ap=4)}}
+                    report = battle.simulate(teams[True], teams[False], self.role_config, 7, max_rounds=3)
+                    self.assert_battle_report(report)
+                    native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
+                    atk, enemy = lua.globals().getBattleInitSlotInfo(native)
+                    animations, ext = lua.globals().convertBattleReportToAnimationSub(native, atk, enemy)
+                    self.assertGreater(len(animations), 1)
+                    for side, key in (("attack", "atk"), ("defense", "def")):
+                        for pos, unit in report["endmeta"][side].items():
+                            self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
+                            self.assertEqual(ext.endinfo[key][pos].ap, unit["ap"])
 
             for cid in (10608, 10830):
                 for direct in (True, False):
