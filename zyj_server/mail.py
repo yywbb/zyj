@@ -45,9 +45,13 @@ def send_mail(path, target, title, content, attachments=None, recharge_info=None
             raise ValueError("附件必须为键值对")
         for k, v in attachments.items():
             cid, count = int(k), int(v)
-            if not 0 < count < (1 << 31):
+            limit = 1 << (63 if cid == 1000 else 31)
+            if not 0 < count < limit:
                 raise ValueError("附件物品数量无效")
-            attach[str(cid)] = attach.get(str(cid), 0) + count
+            total = attach.get(str(cid), 0) + count
+            if total >= limit:
+                raise ValueError("附件物品数量无效")
+            attach[str(cid)] = total
 
     # 处理充值信息
     rmb = 0

@@ -1686,7 +1686,7 @@ class AdminHttpTests(AdminFixture):
         data = self.request("/api/accounts/1")[2]
         self.assertEqual(len(data["business"]["recruit"]), 4)
         self.assertEqual({row["id"] for row in data["business"]["activities"] if row["id"] < 100},
-                         {1, 3, 7, 8, 9, 11, 14, 16, 17, 20, 22, 23, 25, 27, 35, 37, 43, 48})
+                         {1, 3, 7, 8, 9, 11, 14, 16, 17, 20, 22, 23, 25, 27, 35, 37, 43, 48, 50})
         self.assertEqual(data["business"]["recharge"]["rmb"], SAVE["recharge_state"]["rmb"])
         self.assertTrue(data["copies"][0]["points"])
         self.assertEqual(data["general_level_cap"], 12)
@@ -1794,9 +1794,23 @@ class AdminHttpTests(AdminFixture):
         code, _, filter_res2 = self.request("/api/mails?account=2")
         self.assertEqual(filter_res2["total"], 1) # 仅全服邮件 (0)
 
-        # 5. 校验非法邮件参数拦截
+        # 5. 校验非法邮件参数拦截与合法大额银币 (int64)
         self.assertEqual(self.request("/api/mails", {"title": "", "target": 1})[0], 400)
         self.assertEqual(self.request("/api/mails", {"title": "有效标题", "target": 9999})[0], 400)
+        # 道具数量超过 int32 拦截 (400)
+        self.assertEqual(self.request("/api/mails", {"title": "道具超限", "target": 1, "items": [{"cid": 20014, "count": 1 << 31}]})[0], 400)
+        # 银币为 int64，允许超过 2^31 (如 100 亿、9999 亿)
+        code, _, big_coin_res = self.request("/api/mails", {
+            "target": 1,
+            "title": "海量银币福利",
+            "resources": {"coin": 10000000000},
+            "reason": "测试超int32大额银币发放"
+        })
+        self.assertEqual(code, 200)
+        self.assertEqual(big_coin_res["attachments"]["1000"], 10000000000)
+        # 银币超过 int64 范围依然拦截 (400)
+        self.assertEqual(self.request("/api/mails", {"title": "银币超限", "target": 1, "resources": {"coin": 1 << 63}})[0], 400)
+        self.request(f"/api/mails/{big_coin_res['id']}/delete", {"reason": "清理测试邮件"})
 
         # 6. 删除/撤回邮件
         code, _, del_res = self.request(f"/api/mails/{mail1_id}/delete", {"reason": "撤回个人邮件"})
@@ -1829,11 +1843,12 @@ class AdminHttpTests(AdminFixture):
             "reason": "测试全服充值"
         })
 
-        # GM 发送指定账号 1 的专属月卡邮件
+        # GM 发送指定账号 1 的专属月卡邮件 (包含 50 亿大额银币)
         self.request("/api/mails", {
             "target": 1,
             "title": "专属月卡体验",
             "content": "专属月卡已送达",
+            "resources": {"coin": 5000000000},
             "recharge": {"card": 1},
             "items": [{"cid": 20014, "count": 10}],
             "reason": "测试账号1月卡与招募令"
@@ -1869,8 +1884,9 @@ class AdminHttpTests(AdminFixture):
             del_packet = session.handle(3102, 2, protocol.encode_pb_field(1, 0, personal_mid))
             self.assertEqual(struct.unpack(">IIII", del_packet[0][:16])[2], 999999)
 
-            # 3. 领取账号 1 的个人邮件 (月卡 + 10个招募令)
+            # 3. 领取账号 1 的个人邮件 (月卡 + 10个招募令 + 50亿银币)
             before_gold = session.save["role_state"]["gold"]
+            before_coin = session.save["role_state"]["coin"]
             claim_packet = session.handle(3101, 3, protocol.encode_pb_field(1, 0, personal_mid))
             self.assertEqual(struct.unpack(">IIII", claim_packet[0][:16])[2], 3101)
 
@@ -1881,6 +1897,7 @@ class AdminHttpTests(AdminFixture):
             self.assertEqual(rstate["rmb"], 25)
             self.assertEqual(session.save["role_state"]["vip"], recharge.vip(rstate, CONFIG))
             self.assertEqual(session.save["role_state"]["gold"], before_gold + 250)
+            self.assertEqual(session.save["role_state"]["coin"], before_coin + 5000000000)
             # 验证招募令到账
             props_1200 = session.save["world_state"]["1200"]
             token_count = next(protocol.pb_get_varint(v, 2) for n, w, v in protocol.iter_pb_fields(bytes.fromhex(props_1200))
