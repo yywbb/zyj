@@ -10,7 +10,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
+from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, hades_copy, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from . import achievements, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, nightclub, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
@@ -48,7 +48,7 @@ def load_role_config(config_path):
     with zipfile.ZipFile(config_path) as archive:
         sign_tables = tuple(n[2:-5] for n in archive.namelist() if n.startswith("5/sign2_") and n.endswith(".json"))
     return configuration.load_tables(config_path,
-                             ("role_exp", "cheer", "copy", "star_copy", "star_map", "expedition2", "expedition_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
+                             ("role_exp", "cheer", "copy", "star_copy", "star_map", "hades_copy", "hades_map", "expedition2", "expedition_map", "protagonist_grow", "map", "props", "general_fragment", "recruit_basic",
                              "begin7day", "begin7day_task", "liveness", "liveness_reward", "week_liveness_reward", "equip", "rollname",
                              "mid_autumn_exchange", "activity_time", "treasure_discount_1", "consumegift_reward_1",
                              "sanjie_answer", "sanjie_subject_config", "sanjie_subject_text", "sanjie_answer_reward", "sanjie_reward", "span_sanjie_reward",
@@ -842,6 +842,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body, costs, reward = arena.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
+    elif opcode in hades_copy.OPCODES:
+        body, reward = hades_copy.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         if reward:
             apply_reward(save, reward, role_config, now)
     elif opcode == 1350:

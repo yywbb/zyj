@@ -1307,15 +1307,21 @@ class LanBuildTests(unittest.TestCase):
             GameScene:cacheresetrequest('cachereset')
             assert(requests[#requests].type==3650)
             GameScene.layers.copy_chapter.show=true
-            for _,kind in ipairs({'normal','star'}) do
+            for _,kind in ipairs({'normal','star','hades'}) do
                 GameScene.layers.copy_chapter.module.selectpage=kind
                 requests={}
                 GameScene:cacheresetrequest('cachereset')
-                local found=false
-                for _,request in ipairs(requests) do if request.type==1350 then found=true end end
-                assert(found==(kind=='star'))
+                local found={}
+                for _,request in ipairs(requests) do found[request.type]=true;assert(request.type~=1371 and request.type~=1372) end
+                assert((found[1350] or false)==(kind=='star'))
+                assert((found[1370] or false)==(kind=='hades'))
             end
             GameScene.layers.copy_chapter.show=false
+            requests={};GameScene.layers.hadescopy_map.show=true
+            GameScene:cacheresetrequest('cachereset')
+            local count=0
+            for _,request in ipairs(requests) do if request.type==1370 then count=count+1 end end
+            assert(count==1);GameScene.layers.hadescopy_map.show=false
         ''')
         lua.execute((Path(__file__).parent / "scripts_clean/UICacheReset.lua").read_text())
         lua.execute('''

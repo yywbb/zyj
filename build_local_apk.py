@@ -643,6 +643,112 @@ def patch_arena_scripts():
     return patched
 
 
+def patch_hades_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, filename in (("GameCopyStar", "hades_network.lua"), ("UICopyStar", "hades_ui.lua")):
+        code = load(name)
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            extension = stream.read()
+        if name == "UICopyStar":
+            start = code.index("--hades\n")
+            prefix, code = extension + "\n" + code[:start], code[start:]
+            for callback in ("UIHadesCopyQuery", "UIHadesCopyAttack", "UIHadesCopyGetBox"):
+                marker = f"function {callback}(t)\n"
+                assert code.count(marker) == 1
+                code = code.replace(marker, marker + "    if t.localHadesIgnored or not LocalHadesActive(t.hadesView) then return end\n")
+            marker = "    local cb = function()\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + "        if not LocalHadesActive(t.hadesView) then return end\n")
+            marker = '''            GameScene.layers["copy_chapter"].module:hadesCopyBattleCallback(t)
+        end'''
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker[:-3] + 'else\n            UIRequest({type=1370})\n        end')
+            marker = '''            showRewardPopupWindow(t.reward,nil,cb)
+        end'''
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker[:-3] + 'else\n            cb()\n        end')
+            code = code.replace('        UIRequest({type = 1001})\n', '')
+            code = code.replace('    UIRequest({type = 1001})\n', '')
+            code = code.replace('        UIRequest({type = 1370})\n', '')
+            marker = "function UIHadesCopyGetBox(t)\n    if t.localHadesIgnored or not LocalHadesActive(t.hadesView) then return end\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + '    UIRequest({type=1370})\n')
+            code = prefix + code
+        else:
+            code += "\n" + extension
+        put(name, code)
+    for name, prefix, methods in (("Layer_copy_chapter", "copyChapter", ("init", "clear", "shiftPage")),
+                                   ("Layer_copy_hades_map", "hadescopymap", ("init", "clear")),
+                                   ("window_copy_hadesInfo", "copyhadesInfo", ("open", "close")),
+                                   ("window_hades_all_reward", "hadesAllReward", ("open", "close"))):
+        code = load(name)
+        for method in methods:
+            marker = f"function {prefix}.{method}("
+            assert code.count(marker) == 1
+            pos = code.index("\n", code.index(marker)) + 1
+            code = code[:pos] + "    self.localHadesGeneration=(self.localHadesGeneration or 0)+1\n" + code[pos:]
+        if name != "Layer_copy_chapter":
+            markers = list(re.finditer(rf"function {prefix}\.\w+\([^\n]*\)\n", code))
+            for index in range(len(markers) - 1, -1, -1):
+                start = markers[index].end()
+                end = markers[index+1].start() if index+1 < len(markers) else code.rindex("return ")
+                block = code[start:end]
+                marker = "addHandleOfControlEvent(function()"
+                if marker not in block:
+                    continue
+                block = block.replace(marker, marker + "\n        if not self.rootNode or generation~=self.localHadesGeneration then return end\n")
+                if block.startswith("    self.localHadesGeneration="):
+                    at = block.index("\n") + 1
+                    block = block[:at] + "    local generation=self.localHadesGeneration\n" + block[at:]
+                else:
+                    block = "    local generation=self.localHadesGeneration\n" + block
+                code = code[:start] + block + code[end:]
+            if name == "window_copy_hadesInfo":
+                marker = "function copyhadesInfo.closedelay(self)\n"
+                assert code.count(marker) == 1
+                code = code.replace(marker, marker + "    local generation=self.localHadesGeneration\n")
+                marker = "CCCallFunc:create(function()\n"
+                assert code.count(marker) == 1
+                code = code.replace(marker, marker + "        if not self.rootNode or generation~=self.localHadesGeneration then return end\n")
+        else:
+            start = code.index("function copyChapter.hadesCopyBattleCallback(")
+            end = code.index("function copyChapter.hadesCopyAwardCallback(", start)
+            block = code[start:end]
+            marker = "self.bgAnimationManager:setAnimationCompletedCallback(function()"
+            assert block.count(marker) == 1
+            block = block.replace(marker, marker + "\n            if not LocalHadesActive(t.hadesView) then return end\n")
+            code = code[:start] + block + code[end:]
+        put(name, code)
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    put("GameErrorMessage", code.replace(marker, marker + "    if LocalHadesError and fd.ser~=0 then LocalHadesError(error.ids[1]) end\n"), "common_lua")
+    code = load("battleSkillModules")
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "hades_revival.lua"), encoding="utf-8") as stream:
+        put("battleSkillModules", code + "\n" + stream.read())
+    code = load("battleScene")
+    marker = "jiusi = jianzairenzai,"
+    assert code.count(marker) == 1
+    put("battleScene", code.replace(marker, "jiusi = jiusi,"))
+    code = load("battlegeneral")
+    start = code.index("function general.reborn(")
+    end = code.index("function general.death(", start)
+    block = code[start:end]
+    marker = "        self.SkeletonNode:setVisible(true)\n"
+    assert block.count(marker) == 1
+    block = block.replace(marker, marker + "        if self.coverccb then self.coverccb:setVisible(true) end\n")
+    put("battlegeneral", code[:start] + block + code[end:])
+
+
 def patch_cornucopia_scripts():
     code = read_script("GameActivityCornucopia").decode("utf-8").replace("\r\n", "\n")
     marker = '    local reward, used, ext = gamedata:SomethingProcess(SomeThings,"cornucopia")\n'
@@ -3943,7 +4049,7 @@ end
         UIRequest({type = 1370})
     end'''
     assert code.count(marker) == 1
-    code = code.replace(marker, "    -- shortcut: 地狱副本未接通，接入1370后再恢复所需刷新。")
+    code = code.replace(marker, "")
     marker = "function UICopyAttack2(t)\n"
     assert code.count(marker) == 1
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_patches", "auto_copy.lua"), encoding="utf-8") as source:
@@ -4086,12 +4192,13 @@ end''' + code[end:]
     end
     if self.layers.gang_xianchi and self.layers.gang_xianchi.show then query(2230) end
     for name,opcode in pairs({bloodbattle=3620, zhuxiantaiShop=3627, watchstar=2062,
-                              starcopy_map=1350, gang_shangxiang=2250, gang_main=2230,
+                              starcopy_map=1350, hadescopy_map=1370, gang_shangxiang=2250, gang_main=2230,
                               gang_xianchi=2256, shopList=4890, singleboss=3700}) do
         if self.layers[name] and self.layers[name].show then query(opcode) end
     end
     local chapter = self.layers.copy_chapter
     if chapter.show and chapter.module.selectpage == "star" then query(1350) end
+    if chapter.show and chapter.module.selectpage == "hades" then query(1370) end
     local layer = self.layers.activity
     if layer and layer.show then
         local activity = layer.module
@@ -4225,6 +4332,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_game_helper_scripts(patched)
     patch_artifact_scripts(patched)
     patch_champion_scripts(patched)
+    patch_hades_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")

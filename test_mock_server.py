@@ -6506,9 +6506,11 @@ class ReplayRoutingTests(unittest.TestCase):
             if not ap:
                 self.assertEqual(sum(d["m"]["m"] for d in incoming), 101)
             self.assert_battle_report(report)
-        with self.assertRaisesRegex(ValueError, "9000401"):
-            battle.simulate({2: self.combat_unit(10201, advance=1)}, {2: self.combat_unit(10201, iid=1)},
-                            self.passive_config(10201, 9000401), 7, max_rounds=1)
+        report = battle.simulate({2: self.combat_unit(10201, advance=1, initial_ap=0)},
+                                 {2: self.combat_unit(10201, iid=1), 8: self.combat_unit(10608, iid=8)},
+                                 self.passive_config(10201, 9000401), 7, max_rounds=1)
+        self.assertEqual([d["p"] for d in report["b"]["a"][0]["e"] if isinstance(d.get("m"), dict)], [2])
+        self.assert_battle_report(report)
 
     def test_shared_damage_only_target_counters_and_queen_heals_each_living_recipient(self):
         config = self.passive_config(10598, 9000336)

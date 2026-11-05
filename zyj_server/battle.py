@@ -13,6 +13,15 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
 QUEENS = (10595, 10817)
 MAX_ROUNDS = 30
+HADES_EFFECTS = {9000022, 9000034, 9000306, 9000307, 9000309, 9000314, 9000315, 9000316, 9000318,
+                 9000322, 9000323, 9000403, 9000414, 9000415, 9000416, *range(9000418, 9000429),
+                 *range(9000431, 9000436), *range(9000437, 9000445),
+                 9000466, 9000468, 9000469, 9000470, 9000471, 9000472, 9000476,
+                 *range(9000479, 9000489), *range(9000490, 9000496), 9000497, 9000498, 9000499, 9000500,
+                 9000504, 9000505, 9000584, 9000585, 9000586, 9000606, 9000675, 9000676, 9000677,
+                 9000687, 9000759, 9000760, 9000761, 9000762, 9000769, 9000770, 9000771, 9000775,
+                 9000776, 9000777, 9000778, 9000783, 9000784, 9000785, 9000792, 9000793, 9000795,
+                 9000796, 9000804, 9000805, 9000806, 9000807, 9999991}
 MULTI_COMBOS = (12601, 12602, 12604, *range(12622, 12639), 12836, 12841, 12943,
                 12988, 12989, 12990, 13017, 13018, 13073, 13075, 13076, 13077,
                 13078, 13079, 13122, 13124, 13125)
@@ -261,7 +270,7 @@ def _prepare_teams(teams, config):
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
                9000037, 9000038, 9000039, 9000040, 9000062, 9000400, 9000401, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
                9000496, 9000501, 9000502, 9000506, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
-               9000324, 9000327, 9000328, 9000329}
+                9000324, 9000327, 9000328, 9000329} | HADES_EFFECTS
     flat_defense = {9000047, 9000049, 9000072, 9000078, 9000082}
     stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
     lead_basis = {}
@@ -304,9 +313,11 @@ def _prepare_teams(teams, config):
             unit.update(pos=pos, direct=direct, ap=initial_ap, dizzy=False, dot=None, firing=None, buffs={}, states={},
                         emergency=False, strikes=0, guard=0, effects={}, passive_rows=rows,
                         flat_out=unit.get("flat_out", 0), flat_in=unit.get("flat_in", 0), cover_d=unit.get("cover_d", 0))
+            unit.update(passive_buffs={}, trigger_counts={}, received_hits=0, casts=0, fire_seeds=0,
+                        hidden=False, heal_shield=0, ap_self_guard=0, ap_received_guard=0)
             unit["cover_d2"] = unit["cover_d"]
             added, reduced = unit.get("adddmgpct", 0), unit.get("subdmgpct", 0)
-            if min(added, reduced, unit["cover_d"]) < 0 or not 0 <= unit.get("cover_p", 0) <= 100:
+            if added <= -1 or min(reduced, unit["cover_d"]) < 0 or not 0 <= unit.get("cover_p", 0) <= 100:
                 raise ValueError("增减伤或魔罩属性无效")
             unit.update(out_multiplier=1 + Fraction(str(added)), in_multiplier=1 / (1 + Fraction(str(reduced))))
             unit["artifact_effects"] = artifact.combat_effects(unit.get("artifact"), config)
@@ -319,8 +330,10 @@ def _prepare_teams(teams, config):
                 # 主角的种类号与别行ID重号，按本行识别，不能套用被引用行的效果。
                 if 9100001 <= row["id"] <= 9100007:
                     code = row["id"]
+                if code == 9999991 and (row["id"], row["type"], attr, row["target"], row["value"], row["method"], row["kind"]) != (9999991, 2, "hp", "1", 100000, "value", "0"):
+                    raise ValueError("尚不支持该突破被动 9999991")
                 if row["type"] == 0 and code not in range(9100001, 9100005):
-                    if attr not in (*stats, "ap", "dmg", "fdmg") or row["target"] not in ("1", "2", "3", "4", "5"):
+                    if attr not in (*stats, "ap", "dmg", "fdmg") or row["target"] not in ("1", "2", "3", "4", "5", "7"):
                         raise ValueError("尚不支持该突破属性")
                 elif code not in dynamic:
                     raise ValueError(f"尚不支持该突破被动 {row['id']}")
@@ -363,16 +376,17 @@ def _prepare_teams(teams, config):
                 value = Fraction(str(row["value"]))
                 if code in range(9100001, 9100008):
                     continue
-                if row["type"] == 0 or code == 9000001:
+                if row["type"] == 0 or row["type"] == 2 and code in HADES_EFFECTS or code == 9000001:
                     if row["attr"] == "fdmg" or row["method"] == "value" and row["attr"] == "dmg":
                         continue
                     scope = row["target"]
                     targets = ([provider] if scope == "3" else list(teams[not direct].values()) if scope in ("2", "4", "5") else list(team.values()))
                     for target in targets:
-                        if (scope == "4" and target["pos"] > 7 or scope == "5" and target["pos"] < 8
+                        if (scope == "4" and target["pos"] > 7 or scope in ("5", "7") and target["pos"] < 8
                                 or not matches(target, row["region"], row["sex"])):
                             continue
-                        key = (direct, row["id"], target["direct"], target["pos"])
+                        group = ("ap", scope, row["region"], row["sex"], row["kind"], value) if row["attr"] == "ap" else row["id"]
+                        key = (direct, group, target["direct"], target["pos"])
                         if key in applied:
                             continue
                         applied.add(key)
@@ -382,7 +396,38 @@ def _prepare_teams(teams, config):
                         if attr == "dmg" and row["kind"] == "1":
                             attr = "reduction"
                         add(target, attr, -value if row["kind"] == "1" and attr != "reduction" else value, row["method"])
-                elif code in (9000400, 9000791, 9000583):
+                if code in HADES_EFFECTS:
+                    if code == 9000490:
+                        add(provider, "dmg", Fraction(str(row["value2"])))
+                    aura = ("atk" if code in (9000419, 9000420, 9000421, 9000422, 9000431, 9000444, 9000480, 9000490, 9000491, 9000677, 9000498, 9000807)
+                            else "hp" if code in (9000423, 9000424, 9000425, 9000432, 9000433, 9000434, 9000435, 9000437, 9000486, 9000505, 9000778)
+                            else "def" if code in (9000426, 9000427, 9000428, 9000438, 9000439, 9000442, 9000482, 9000495, 9000762, 9000785, 9000796) else None)
+                    if aura and row["value2"] >= 1000 and (direct, code) not in applied:
+                        applied.add((direct, code))
+                        for target in team.values():
+                            if config["general"][str(target["cid"])]["quality"] >= 6:
+                                add(target, aura, Fraction(str(row["value2"])))
+                    if code in (9000415, 9000416, 9000487, 9000494) and (direct, code) not in applied:
+                        applied.add((direct, code))
+                        humans = [u for u in teams[not direct].values() if config["general"][str(u["cid"])]["region"] in ("7", "8")]
+                        if code in (9000415, 9000416):
+                            for target in humans:
+                                add(target, "def" if code == 9000415 else "atk", -Fraction(3, 10) if code == 9000415 else -Fraction(1, 5), "percent")
+                        else:
+                            for target in team.values():
+                                add(target, "atk" if code == 9000487 else "def", len(humans) * (Fraction(1, 25) if code == 9000487 else Fraction(str(row["value2"]))), "percent")
+                    if code in (9000792, 9000793):
+                        members = [u for u in team.values() if matches(u, "14", "all")]
+                        if (direct, code) not in applied:
+                            applied.add((direct, code))
+                            for target in members:
+                                # type2 的开场部分已按本行处理；此处只补足阵营限定。
+                                if row["type"] != 2:
+                                    add(target, "hp" if code == 9000792 else "def", value, "percent")
+                        if len(members) <= 2:
+                            add(provider, "hp" if code == 9000792 else "def", Fraction(str(row["value2"])), "percent")
+                    continue
+                if code in (9000400, 9000791, 9000583):
                     region = "13" if code == 9000400 else "14" if code == 9000791 else "7"
                     members = [u for u in team.values() if matches(u, region, "all")]
                     if (direct, code) not in applied:
@@ -406,11 +451,13 @@ def _prepare_teams(teams, config):
                 elif code == 9000028 and provider.get("npc"):
                     add(provider, "parry", value)
                 elif code == 9000489:
-                    add(provider, "dmg", value)
+                    if 9000490 not in provider["effects"]:
+                        add(provider, "dmg", value)
     for direct, team in teams.items():
         reduction = max((Fraction(str(u["effects"][9100006]["value"])) for u in team.values() if 9100006 in u["effects"]), default=0)
+        tower = max((Fraction(str(u["effects"][9000761]["value"])) for u in team.values() if 9000761 in u["effects"]), default=0)
         for unit in team.values():
-            unit["in_multiplier"] *= 1 - reduction
+            unit["in_multiplier"] *= (1 - reduction) * (1 - tower)
             for code, name in ((9100005, "hp"), (9100006, "def"), (9100007, "atk")):
                 unit[name] += max((int(lead_basis[direct, pos][name]) // 20 for pos, provider in team.items()
                                    if provider is not unit and code in provider["effects"]), default=0)
@@ -436,9 +483,12 @@ def _prepare_teams(teams, config):
 
 
 def targets(actor, enemies, skill, rng):
-    living = [u for _, u in sorted(enemies.items()) if u["hp"] > 0]
+    living = [u for _, u in sorted(enemies.items()) if u["hp"] > 0 and not u.get("hidden")]
     scope = skill["range"] if skill else "single"
     if scope == "single":
+        taunters = [u for u in living if not skill and 9000476 in u.get("effects", {}) and u.get("taunt_active")]
+        if taunters:
+            living = taunters
         return sorted(living, key=lambda u: (u["pos"] > 7, u["pos"]))[:1]
     if scope == "all":
         return living
@@ -473,6 +523,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
               "dead_log": {"true": {}, "false": {}}, "rules": "zyj-v2", "seed": seed}
     actions = report["b"]["a"]
     pending_deaths = []
+    pending_hits = []
+    round_actions = 0
+    pvp = not any(u.get("npc") for team in teams.values() for u in team.values())
     combat_pets = {True: copy.deepcopy(attack_pet), False: copy.deepcopy(defense_pet)}
     for direct, team in teams.items():
         side = "attack" if direct else "defense"
@@ -511,17 +564,75 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
     def effect(unit, code, field="value"):
         return Fraction(str(unit["effects"].get(code, {}).get(field, 0)))
 
+    def region(unit):
+        return config["general"][str(unit["cid"])]["region"]
+
     def event(destinations, source=None):
         actions.append({"t": "b", "s": source or {}, "e": destinations})
         if len(actions) > 2000:
             raise ValueError("战斗事件超出上限，未结算")
 
-    def change_hp(unit, amount, status="N", hits=0, *, shield=True, healing=False, unsealed=False, bypass_barrier=False):
-        if amount < 0 and healing and not unsealed and unit["states"].get("close", 0) > round_number:
-            amount = 0
+    def trigger(unit, code, limit=1):
+        key = (code, round_number)
+        count = unit["trigger_counts"].get(key, 0)
+        if count >= limit:
+            return False
+        unit["trigger_counts"][key] = count + 1
+        return True
+
+    def immune(unit):
+        return (unit["states"].get("statusproof", 0) > round_number
+                or 9000499 in unit["effects"] and unit["ap"] >= 4)
+
+    def passive_event(unit, code, changes):
+        row = unit["effects"].get(code)
+        if changes:
+            # 原包缺元始之气资源；保命不需要复活模型，使用已有无敌状态显示。
+            event(changes, {"r": unit["direct"], "p": [unit["pos"]], "t": "break", "S": row["id"]}
+                  if row and row["animationid"] and code != 9000444 else None)
+
+    def passive_buff(unit, provider, code, attr, amount, duration):
+        unit["passive_buffs"][provider["iid"], code, attr] = (amount, round_number + duration)
+        return dest(unit, B={"R": attr, "u": "promote" if amount >= 0 else "weaken", "w": True})
+
+    def change_hp(unit, amount, status="N", hits=0, *, shield=True, healing=False, healer=None, unsealed=False, bypass_barrier=False, kind="other", revival=False, attacker=None, reaction=False):
+        unit["last_heal_absorbed"] = 0
+        blocked_heal = (healing and unit["states"].get("close", 0) > round_number and not unsealed
+                        or 9000315 in unit["effects"] and unit["hp"] < unit["maxhp"] * effect(unit, 9000315)
+                        or unit.get("last_stand_until", 0) > round_number)
+        if amount < 0 and healing and healer:
+            multiplier = 1 + effect(healer, 9000425) * ((unit["maxhp"] - unit["hp"]) * 10 // unit["maxhp"])
+            if 9999991 in healer["effects"]:
+                multiplier *= Fraction(6, 5)
+            amount = -int(-amount * multiplier)
         if amount < 0:
             amount = -int(-amount * (1 + unit.get("soul_effects", {}).get("heal", 0)))
-        if amount > 0 and unit["states"].get("invincible", 0) > round_number:
+        excess = max(0, -amount - (unit["maxhp"] - unit["hp"]))
+        if amount < 0 and blocked_heal and not revival:
+            excess, amount = -amount, 0
+        if healing and healer and effect(healer, 9000776) and excess:
+            gained = int(excess * effect(healer, 9000776))
+            if gained:
+                unit["heal_shield"] += gained
+                event([state_event(unit, "shield", True)])
+        if amount > 0:
+            missing = (unit["maxhp"] - unit["hp"]) * 10 // unit["maxhp"]
+            multiplier = max(0, 1 - effect(unit, 9000022) * missing)
+            if kind == "basic":
+                multiplier *= max(0, 1 - min(1 if pvp else Fraction(2, 5), effect(unit, 9000504) * missing))
+            if amount * 10 > unit["maxhp"] * 3:
+                multiplier *= 1 - effect(unit, 9000469)
+            multiplier *= max(0, 1 - effect(unit, 9000778) * round_actions)
+            multiplier *= max(0, 1 - unit["ap_self_guard"]) * max(0, 1 - unit["ap_received_guard"])
+            multiplier *= 1 - unit["fire_seeds"] * Fraction(2, 25)
+            if unit["states"].get("qianlong", 0) > round_number:
+                multiplier *= 1 - effect(unit, 9000795, "value2")
+            if unit["heal_shield"] and any(9000776 in u["effects"] for u in teams[unit["direct"]].values()):
+                multiplier *= 1 - max(effect(u, 9000776, "value2") for u in teams[unit["direct"]].values())
+            amount = max(0, int(amount * multiplier))
+        if amount > 0 and (unit["states"].get("invincible", 0) > round_number or unit.get("last_stand_until", 0) > round_number
+                           or kind == "skill" and 9000315 in unit["effects"] and unit["hp"] < unit["maxhp"] * effect(unit, 9000315)
+                           or kind == "basic" and 9000316 in unit["effects"] and unit["hp"] < unit["maxhp"] * effect(unit, 9000316, "value2")):
             amount, status = 0, "proof"
         barrier_end = False
         if amount > 0 and unit.get("artifact_barrier", 0) and round_number < 2 and not bypass_barrier:
@@ -530,12 +641,30 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             barrier_end = unit["artifact_barrier"] == 0
         if amount > 0 and unit.get("absorbing"):
             amount, status = -min(amount, unit["maxhp"] - unit["hp"]), "N"
+        if amount > 0 and unit["heal_shield"] and shield:
+            absorbed = min(amount, unit["heal_shield"])
+            unit["last_heal_absorbed"] = absorbed
+            unit["heal_shield"] -= absorbed
+            amount -= absorbed
+            if not amount:
+                status = "proof"
+            if not unit["heal_shield"]:
+                event([state_event(unit, "shield", False)])
         absorbed = min(unit["cover_d"], int(max(0, amount) * Fraction(unit.get("cover_p", 0), 100))) if shield else 0
         unit["cover_d"] -= absorbed
         amount -= absorbed
         amount = max(- (unit["maxhp"] - unit["hp"]), min(unit["hp"], amount))
+        if (amount == unit["hp"] and amount > 0 and 9000444 in unit["effects"] and not unit.get("last_stand")):
+            unit["last_stand"] = True
+            unit["last_stand_until"] = round_number + 1
+            amount = unit["hp"] - 1
+            # 先发本次扣血，再在伤害后发布保命状态和绝对怒气。
+            unit["last_stand_pending"] = True
         previous = unit["hp"]
         unit["hp"] -= amount
+        if attacker is not None and amount + absorbed + unit["last_heal_absorbed"] > 0:
+            unit["received_hits"] += 1
+            pending_hits.append((unit, attacker, kind, reaction))
         if unit.get("absorbing") and unit["hp"] == unit["maxhp"]:
             unit["absorbing"] = False
         if unit["hp"] == 0:
@@ -547,7 +676,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     **({"u": {"u": "invincible", "w": False}} if barrier_end else {}))
 
     def damage_hp(unit):
-        return unit["maxhp"] if unit.get("absorbing") else unit["hp"] + unit["cover_d"]
+        return unit["maxhp"] if unit.get("absorbing") else unit["hp"] + unit["cover_d"] + unit["heal_shield"]
 
     def finished():
         return any(not any(u["hp"] > 0 for u in team.values()) for team in teams.values())
@@ -560,9 +689,21 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         for (kind, attr), (amount, until) in unit["buffs"].items():
             if attr == name and until > round_number:
                 value += (unit.get(name, 0) if name in ("atk", "def", "speed") else 100) * amount * (1 if kind == "promote" else -1)
+        value += sum(amount for (_, _, attr), (amount, until) in unit["passive_buffs"].items() if attr == name and until > round_number)
+        allies, enemies = teams[unit["direct"]], teams[not unit["direct"]]
+        alive = living(allies) + living(enemies)
+        if name == "atk":
+            extra = effect(unit, 9000403) * sum(u["hp"] <= 0 for t in teams.values() for u in t.values())
+            extra += effect(unit, 9000486) * len(alive)
+            extra += effect(unit, 9000771) * len(alive) + effect(unit, 9000771, "value2") * sum(region(u) == "14" for u in living(allies))
+            extra += max((effect(u, 9000498) for u in living(allies) if region(unit) == "9"), default=0)
+            value += unit["atk"] * extra
+        if name in ("critical", "criticaldmg"):
+            value += max((effect(u, 9000584) if name == "critical" else effect(u, 9000584, "value2") * 100 for u in living(allies)), default=0)
         if name in ("def", "resilience") and any(9000413 in u["effects"] and u["hp"] > 0 for u in teams[unit["direct"]].values()):
             value += unit["def"] * Fraction(1, 5) if name == "def" else 10
-        return max(0, int(value) + unit.get("pet_rates", {}).get(name, 0))
+        result = int(value) + unit.get("pet_rates", {}).get(name, 0)
+        return result if name in ("hit", "criticaldmg") else max(0, result)
 
     def buff(unit, skill):
         attr, amount = skill["effect-param"].split(";")
@@ -576,16 +717,21 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
 
     def stun(unit, duration=1):
         duration -= int(effect(unit, 9000789))
-        if duration <= unit["dizzy"] or unit["states"].get("xiyin", 0) > round_number:
+        if duration <= unit["dizzy"] or unit["states"].get("xiyin", 0) > round_number or immune(unit):
             return False
         unit["dizzy"] = duration
         return True
 
-    def status_damage(unit, kind, amount, duration):
+    def status_damage(unit, kind, amount, duration, provider=None):
         duration -= int(effect(unit, 9000789))
         if duration <= 0:
             return None
         unit[kind] = [max(1, amount), duration]
+        if kind == "firing" and provider and provider["hp"] > 0 and effect(provider, 9000806):
+            key = (provider["iid"], 9000806, "atk")
+            previous = unit["passive_buffs"].get(key, (0, 0))[0]
+            value = max(-unit["atk"] * effect(provider, 9000806, "value2"), previous - unit["atk"] * effect(provider, 9000806))
+            event([passive_buff(unit, provider, 9000806, "atk", value, MAX_ROUNDS + 1)])
         return dest(unit, m=[], u={"u": kind, "w": True})
 
     def cleanse(unit):
@@ -602,6 +748,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if kind == "weaken":
                 del unit["buffs"][kind, attr]
                 changes.append(dest(unit, B={"R": attr, "u": kind, "w": False}))
+        for key, (amount, _) in list(unit["passive_buffs"].items()):
+            if amount < 0:
+                del unit["passive_buffs"][key]
+                changes.append(dest(unit, B={"R": key[2], "u": "weaken", "w": False}))
         return changes
 
     def kill_recovery(actor, killed):
@@ -624,7 +774,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if target["ap"] <= 2:
             multiplier *= 1 + effect(actor, 9000036)
         if target["firing"]:
-            multiplier *= 1 + effect(actor, 9000489)
+            multiplier *= 1 + (effect(actor, 9000490, "value2") if 9000490 in actor["effects"] else effect(actor, 9000489))
         if actor["hp"] < target["hp"]:
             multiplier *= 1 - effect(target, 9000023)
         if actor["hp"] > target["hp"]:
@@ -635,6 +785,34 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 multiplier *= 1 - effect(target, 9000015)
             if not 10101 <= actor["cid"] <= 10115:
                 multiplier *= 1 - effect(target, 9000496)
+        if target["hp"] * 2 > target["maxhp"]:
+            multiplier *= 1 + effect(actor, 9000314)
+            if 9000470 in actor["effects"]:
+                multiplier *= Fraction(3, 2)
+        elif target["hp"] * 2 < target["maxhp"] and 9000470 in actor["effects"]:
+            multiplier *= Fraction(5, 2)
+        multiplier *= 1 + effect(actor, 9000318) * (target["hp"] * 20 // target["maxhp"])
+        multiplier *= 1 + min(Fraction(3, 2), effect(actor, 9000471) * ((target["maxhp"] - target["hp"]) * 20 // target["maxhp"]))
+        multiplier *= 1 + effect(actor, 9000468) * len(living(teams[actor["direct"]]))
+        multiplier *= 1 + effect(actor, 9000472, "value2") * len(living(teams[not actor["direct"]]))
+        multiplier *= 1 + effect(actor, 9000479) * sum(region(u) == "13" for u in living(teams[actor["direct"]]))
+        multiplier *= 1 + min(effect(actor, 9000484, "value2"), effect(actor, 9000484) * sum(region(u) == "9" for u in teams[actor["direct"]].values()))
+        multiplier *= 1 + effect(actor, 9000485, "value2") * sum(region(u) in ("6", "7", "8", "9") and config["general"][str(u["cid"])]["sex"] == "nan" and not 10101 <= u["cid"] <= 10115 for u in teams[not actor["direct"]].values())
+        if config["general"][str(target["cid"])]["sex"] == "nan" and region(target) in ("6", "7", "8", "9"):
+            multiplier *= 1 + effect(actor, 9000497)
+        dead = sum(u["hp"] <= 0 for team in teams.values() for u in team.values())
+        multiplier *= 1 + (effect(actor, 9000431) + effect(actor, 9000488)) * dead
+        multiplier *= 1 + actor.get("ramp_damage", 0) + actor.get("cast_damage", 0) + actor.get("kill_damage", 0)
+        multiplier *= 1 + actor["fire_seeds"] * Fraction(2, 25)
+        providers = list(teams[actor["direct"]].values())
+        multiplier *= 1 + max((u.get("living_damage", 0) for u in providers if u["hp"] > 0), default=0)
+        multiplier *= 1 + max((u.get("team_ramp", 0) for u in providers if u["hp"] > 0), default=0)
+        multiplier *= 1 + max((u.get("ancient_damage", 0) * (1 if u["hp"] > 0 else Fraction(1, 2)) for u in providers), default=0)
+        multiplier *= 1 + actor.get("tower_damage", 0)
+        if target["dizzy"] or target["dot"] or target["firing"] or any(target["states"].get(k, 0) > round_number for k in ("skilllock", "close", "fire")):
+            multiplier *= 1 + effect(actor, 9000480)
+        if target["cover_d"] > 0:
+            multiplier *= 1 + effect(actor, 9000421)
         return multiplier
 
     def guard(target):
@@ -647,40 +825,151 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         multiplier = modifiers(actor, target) * guard(target)
         flat = actor["flat_out"] - target["flat_in"]
         final = max(0, 1 - target.get("soul_effects", {}).get("antiblew", 0)) if explosion else 1
-        amount = damage({**actor, "atk": stat(actor, "atk")},
+        amount = damage({**actor, "atk": max(1, stat(actor, "atk"))},
                         {**target, "def": stat(target, "def"), "hp": damage_hp(target)}, config,
-                        multiplier=coefficient * multiplier, flat=flat, final_multiplier=final) if coefficient else int(max(0, int(fixed * multiplier) + flat) * final)
-        return change_hp(target, amount, bypass_barrier=True)
+                        multiplier=coefficient * multiplier, flat=flat, final_multiplier=final, clip=False) if coefficient else int(max(0, int(fixed * multiplier) + flat) * final)
+        return change_hp(target, amount, bypass_barrier=True, attacker=actor)
+
+    def last_stands():
+        for team in teams.values():
+            for unit in team.values():
+                if unit.pop("last_stand_pending", False):
+                    passive_event(unit, 9000444, [change_ap(unit, int(effect(unit, 9000444)) - unit["ap"]), *set_state(unit, "invincible")])
+
+    def hurt_reactions():
+        while pending_hits:
+            target, attacker, kind, reaction = pending_hits.pop(0)
+            if target["hp"] <= 0:
+                continue
+            if 9000439 in target["effects"]:
+                value = min(Fraction(7, 20), effect(target, 9000439) * target["received_hits"])
+                event([passive_buff(target, target, 9000439, "def", target["def"] * value, MAX_ROUNDS + 1)])
+            if kind == "basic" and not reaction and 9000426 in target["effects"]:
+                event([change_ap(attacker, -rng.choices((2, 4), weights=(60, 40))[0])])
+            if 9000606 in target["effects"]:
+                ally = min(living(teams[target["direct"]]), key=lambda u: (u["ap"], u["pos"]))
+                passive_event(target, 9000606, [change_ap(ally, int(effect(target, 9000606, "value2")), provider=target)])
+            if target["states"].get("qianlong", 0) > round_number:
+                target["hidden"] = True
+                passive_event(target, 9000795, [*cleanse(target), *set_state(target, "hide")])
 
     def deaths():
-        while pending_deaths:
+        last_stands()
+        while pending_deaths or pending_hits:
+            hurt_reactions()
+            last_stands()
+            if not pending_deaths:
+                break
             unit = pending_deaths.pop(0)
+            if unit["hp"] > 0:
+                continue
+            if unit["heal_shield"]:
+                unit["heal_shield"] = 0
+                event([state_event(unit, "shield", False)])
+            if 9000441 in unit["effects"] and not unit.get("self_revived"):
+                unit["self_revived"] = True
+                revive(unit, unit, 9000441, 1, ap=int(effect(unit, 9000441)))
+                continue
             if (9000328 in unit["effects"] and unit.get("revives", 0) < 2
                     and any(u is not unit and u["hp"] > 0 for u in teams[unit["direct"]].values())):
                 unit["revives"] = unit.get("revives", 0) + 1
                 unit["def"] //= 2
-                event([change_hp(unit, -max(1, unit["maxhp"] // 2)), dest(unit, B={"R": "def", "u": "weaken", "w": True})],
+                event([change_hp(unit, -max(1, unit["maxhp"] // 2), revival=True), dest(unit, B={"R": "def", "u": "weaken", "w": True})],
                       {"r": unit["direct"], "p": [unit["pos"]], "t": "break", "S": 9000328})
                 continue
+            friends = teams[unit["direct"]]
+            for other in [u for team in teams.values() for u in team.values()]:
+                for key in list(other["passive_buffs"]):
+                    if key[1] == 9000806 and (key[0] == unit["iid"] or other is unit):
+                        del other["passive_buffs"][key]
+                        event([dest(other, B={"R": "atk", "u": "weaken", "w": False})])
+            if unit["fire_seeds"]:
+                candidates = living(friends)
+                if candidates:
+                    target = min(candidates, key=lambda u: (u["fire_seeds"], u["pos"]))
+                    target["fire_seeds"] = min(7, target["fire_seeds"] + unit["fire_seeds"])
+                    event([dest(target, B={"R": "atk", "u": "promote", "w": True})])
+                unit["fire_seeds"] = 0
+            for code in (9000586, 9000762):
+                if code not in unit["effects"] or unit.get(("death_used", code)):
+                    continue
+                unit["death_used", code] = True
+                if code == 9000762:
+                    event([change for ally in living(friends) for change in cleanse(ally)])
+                corpses = [u for _, u in sorted(friends.items()) if u is not unit and u["hp"] <= 0 and (code != 9000586 or region(u) == "7")]
+                if code == 9000762:
+                    corpses = sorted(rng.sample(corpses, min(len(corpses), int(effect(unit, code)))), key=lambda u: u["pos"])
+                for target in corpses:
+                    revive(unit, target, code, effect(unit, code) if code == 9000586 else 1, ap=4 if code == 9000762 else None)
+            if 9000306 in unit["effects"]:
+                passive_event(unit, 9000306, [passive_buff(u, unit, 9000306, "atk", u["atk"] * effect(unit, 9000306), 1) for u in living(friends)])
+            if 9000034 in unit["effects"]:
+                multiplier = 1 + (Fraction(3, 10) + unit["received_hits"] * Fraction(3, 20) if 9000323 in unit["effects"] else 0)
+                passive_event(unit, 9000034, [extra_hit(unit, u, effect(unit, 9000034) * multiplier, explosion=True) for u in living(teams[not unit["direct"]])])
+            if 9000493 in unit["effects"]:
+                event([change for u in living(teams[not unit["direct"]]) if (change := ignite(unit, u))])
+            for code in (9000414, 9000432, 9000438, 9000495):
+                if code not in unit["effects"]:
+                    continue
+                allies = living(friends)
+                if code == 9000414:
+                    allies = [u for u in allies if region(u) == "8"]
+                    allies = sorted(rng.sample(allies, min(2, len(allies))), key=lambda u: u["pos"])
+                elif code == 9000438:
+                    allies = sorted(allies, key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))[:1]
+                elif code == 9000495:
+                    allies = [u for u in allies if region(u) == "9"]
+                changes = []
+                for target in allies:
+                    fraction = Fraction(1, 2) if code == 9000414 else Fraction(3, 10) if code == 9000495 or code == 9000432 and region(target) != "8" else 1
+                    changes.append(change_hp(target, -int(target["maxhp"] * fraction), healing=True, healer=unit))
+                    if code != 9000432:
+                        changes.append(change_ap(target, (4 - target["ap"]) if code == 9000414 else 2, provider=unit))
+                passive_event(unit, code, changes)
+            for team in teams.values():
+                for provider in living(team):
+                    if provider is not unit and 9000482 in provider["effects"] and trigger(provider, 9000482, 2):
+                        target = min(living(team), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
+                        changes = cleanse(target)
+                        changes.extend((change_hp(target, -target["maxhp"], healing=True, healer=provider), change_ap(target, 4 - target["ap"], provider=provider)))
+                        passive_event(provider, 9000482, changes)
             for provider in teams[unit["direct"]].values():
                 if provider["hp"] > 0 and 9100003 in provider["effects"]:
                     event([dest(provider, B={"R": "atk", "u": "promote", "w": True})])
             if effect(unit, 9000027):
                 friends = sorted((u for u in teams[unit["direct"]].values() if u["hp"] > 0), key=lambda u: (u["hp"], u["pos"]))
                 if friends:
-                    event([change_hp(friends[0], -int(stat(unit, "atk") * effect(unit, 9000027)), healing=True)])
+                    event([change_hp(friends[0], -int(stat(unit, "atk") * effect(unit, 9000027)), healing=True, healer=unit)])
             if effect(unit, 9000040):
                 selected = targets(unit, teams[not unit["direct"]], None, rng)
                 if selected:
                     target = selected[0]
                     event([extra_hit(unit, target, effect(unit, 9000040), explosion=True)])
+        last_stands()
 
     def living(team):
         return [u for _, u in sorted(team.items()) if u["hp"] > 0]
 
+    def revive(provider, unit, code, fraction, ap=None, hidden=False):
+        changes = cleanse(unit)
+        changes.append(change_hp(unit, -max(1, int(unit["maxhp"] * fraction)), revival=True))
+        if ap is not None:
+            changes.append(change_ap(unit, ap - unit["ap"]))
+        unit["hidden"] = hidden
+        if hidden:
+            unit["states"]["hide"] = round_number + 1
+            changes.append(state_event(unit, "hide", True))
+        unit["living_damage"] = effect(unit, 9000442)
+        unit["team_ramp"] = 0
+        passive_event(provider, code, changes)
+
+    def ignite(provider, unit):
+        amount = damage({**provider, "atk": max(1, stat(provider, "atk"))}, {**unit, "def": stat(unit, "def"), "hp": (1 << 63) - 1}, config) // 10
+        return status_damage(unit, "firing", amount, 2, provider)
+
     def queen_recovery(target):
         provider = next((u for _, u in sorted(teams[target["direct"]].items()) if u["cid"] in QUEENS and u["hp"] > 0), None)
-        return (stat(provider, "atk") * 12 + provider["maxhp"] * 4) // 100 if provider else 0
+        return ((stat(provider, "atk") * 12 + provider["maxhp"] * 4) // 100 if provider else 0), provider
 
     def state_event(unit, kind, enabled):
         if kind in ("xiyin", "fire"):
@@ -689,14 +978,32 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
 
     def set_state(unit, kind, duration=1):
         if kind in ("skilllock", "close"):
+            if kind == "skilllock" and immune(unit):
+                return []
             duration -= int(effect(unit, 9000789))
         if duration <= 0:
             return []
         unit["states"][kind] = max(unit["states"].get(kind, 0), round_number + duration)
         return [state_event(unit, kind, True)]
 
-    def change_ap(unit, amount):
+    def change_ap(unit, amount, provider=None, *, pet=False):
+        if amount < 0 and immune(unit) and not pet:
+            amount = 0
+        previous = unit["ap"]
         unit["ap"] = max(0, min(10, unit["ap"] + amount))
+        gained = unit["ap"] - previous
+        if gained > 0 and provider and provider is not unit and 9000785 in provider["effects"]:
+            provider["ap_self_guard"] = min(Fraction(4, 5), provider["ap_self_guard"] + effect(provider, 9000785) * gained)
+            unit["ap_received_guard"] = min(Fraction(9, 20), unit["ap_received_guard"] + Fraction(3, 20) * gained)
+        if unit["ap"] >= 4 and 9000499 in unit["effects"]:
+            changes = []
+            if unit["dizzy"]:
+                unit["dizzy"] = False
+                changes.append(dest(unit, m=[], u={"u": "dizzy", "w": False}))
+            if unit["states"].pop("skilllock", None):
+                changes.append(state_event(unit, "skilllock", False))
+            if changes:
+                event(changes)
         return dest(unit, ap=unit["ap"], E=True)
 
     def artifact_trigger(unit, name, *, certain=False):
@@ -767,12 +1074,15 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             row = artifact_trigger(actor, name) if name else None
             if row:
                 # 额外普攻不借当前怒气改成技能，不再衍生反击或连锁追击。
-                target = targets(actor, enemies, None, rng)[0]
-                act(actor, target, reaction=True)
+                selected = targets(actor, enemies, None, rng)
+                if selected:
+                    act(actor, selected[0], reaction=True)
             if killed and name != "残暴":
                 row = artifact_trigger(actor, "残暴")
                 if row and not finished():
-                    act(actor, targets(actor, enemies, None, rng)[0], reaction=True)
+                    selected = targets(actor, enemies, None, rng)
+                    if selected:
+                        act(actor, selected[0], reaction=True)
 
     def choose_combo(actor, friends, enemies):
         general = config["general"][str(actor["cid"])]
@@ -781,7 +1091,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             return None
         if skill["id"] not in MULTI_COMBOS:
             raise ValueError(f"尚不支持该合体技能 {skill['id']}")
-        if actor["ap"] < skill["ap"]:
+        free_combo = actor.get("free_combo", False)
+        if actor["ap"] < skill["ap"] and not free_combo:
             return None
         members = [skill[f"cid{i}"] for i in (1, 2, 3) if skill[f"cid{i}"]]
         identity = general["init_cid"] or actor["cid"]
@@ -792,18 +1103,131 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if cid == identity:
                 continue
             partner = next((u for u in living(friends) if (config["general"][str(u["cid"])]["init_cid"] or u["cid"]) == cid
-                            and not u["dizzy"] and u["states"].get("skilllock", 0) <= round_number), None)
+                            and not u["hidden"] and not u["dizzy"] and u["states"].get("skilllock", 0) <= round_number), None)
             if partner is None:
                 if (cid in cheer_ids[actor["direct"]]
                         and not any((config["general"][str(u["cid"])]["init_cid"] or u["cid"]) == cid for u in friends.values())):
                     continue
                 return None
             participants.append(partner["pos"])
-        candidates = living(friends if skill["kind"] == "gain" else enemies)
+        candidates = [u for u in living(friends if skill["kind"] == "gain" else enemies) if not u["hidden"]]
         if skill["range"] == "second":
             candidates = [u for u in candidates if u["pos"] > 7]
         chance = config["combskillprobability"][str(skill["id"])][f"bout{min(10, round_number)}"]
+        if free_combo:
+            chance = effect(actor, 9000424)
+        elif 9000422 in actor["effects"]:
+            chance = 1 if actor.pop("certain_combo", False) else max(chance, effect(actor, 9000422))
         return (skill, participants) if candidates and roll(chance) else None
+
+    def passive_after(actor, skill, combined, hits, slain, reaction, base_skill):
+        friends, enemies = teams[actor["direct"]], teams[not actor["direct"]]
+        killed = sum(u["hp"] <= 0 for u in slain)
+        if killed:
+            actor["kill_damage"] = actor.get("kill_damage", 0) + effect(actor, 9000420) * killed
+            if 9000440 in actor["effects"]:
+                for _ in range(killed):
+                    if trigger(actor, 9000440, 2) and actor["hp"] > 0:
+                        event([change_hp(actor, -int(actor["maxhp"] * effect(actor, 9000440)), healing=True, healer=actor), change_ap(actor, 2)])
+            if region(actor) == "7":
+                for provider in living(friends):
+                    if 9000585 in provider["effects"] and trigger(provider, 9000585):
+                        passive_event(provider, 9000585, [change_hp(provider, -int(provider["maxhp"] * effect(provider, 9000585)), healing=True, healer=provider),
+                                                       change_ap(provider, int(effect(provider, 9000585, "value2")))])
+        if actor["hp"] <= 0:
+            return []
+        if skill:
+            actor["casts"] += 1
+            actor["cast_damage"] = min(Fraction(12, 5), effect(actor, 9000443) * actor["casts"])
+            if killed and 9000422 in actor["effects"]:
+                actor["certain_combo"] = True
+            if 9000437 in actor["effects"]:
+                event([change_ap(actor, rng.choice((2, 4)))])
+            if 9000423 in actor["effects"]:
+                allies = sorted((u for u in living(friends) if u is not actor), key=lambda u: (u["ap"], u["pos"]))[:2]
+                event([change_ap(u, max(0, 4 - u["ap"]), provider=actor) for u in allies])
+            if 9000322 in actor["effects"]:
+                count = 1 + (rng.choice((1, 2)) if 9000427 in actor["effects"] else 0)
+                changes = []
+                for target in [actor, *enemies.values()]:
+                    for key, (amount, _) in list(target["passive_buffs"].items()):
+                        if key[1] == 9000322 and (target is actor and amount > 0 or target is not actor and key[0] == actor["iid"]):
+                            del target["passive_buffs"][key]
+                            changes.append(dest(target, B={"R": "atk", "u": "promote" if amount > 0 else "weaken", "w": False}))
+                remaining = actor["atk"] * Fraction(1, 5)
+                for target in sorted((u for u in living(enemies) if not u["hidden"]), key=lambda u: (-stat(u, "atk"), u["pos"]))[:count]:
+                    changes.append(change_ap(target, -4))
+                    stolen = min(stat(target, "atk") * effect(actor, 9000322), remaining)
+                    remaining -= stolen
+                    changes.extend((passive_buff(target, actor, 9000322, "atk", -stolen, 2), passive_buff(actor, target, 9000322, "atk", stolen, 2)))
+                passive_event(actor, 9000427 if 9000427 in actor["effects"] else 9000322, changes)
+            if 9000481 in actor["effects"] and not combined:
+                corpses = [u for _, u in sorted(friends.items()) if u["hp"] <= 0]
+                if corpses:
+                    revive(actor, rng.choice(corpses), 9000481, effect(actor, 9000481), hidden=True)
+            if 9000761 in actor["effects"]:
+                for unit in friends.values():
+                    if unit is not actor:
+                        unit["tower_damage"] = unit.get("tower_damage", 0) + effect(actor, 9000761, "value2")
+            if 9000804 in actor["effects"]:
+                changes = []
+                allies = living(friends)
+                for target in sorted(rng.sample(allies, min(3, len(allies))), key=lambda u: u["pos"]):
+                    current = target["buffs"].get(("promote", "critical"), (0, 0))
+                    amount = effect(actor, 9000804, "value2") if current[0] and current[1] > round_number else effect(actor, 9000804)
+                    target["buffs"]["promote", "critical"] = (amount, round_number + 2)
+                    changes.append(dest(target, B={"R": "critical", "u": "promote", "w": True}))
+                passive_event(actor, 9000804, changes)
+            tongtian = not combined and (config["general"][str(actor["cid"])]["init_cid"] or actor["cid"]) == 10839
+            if tongtian:
+                actor["tongtian_casts"] = actor.get("tongtian_casts", 0) + 1
+                for provider in friends.values():
+                    if 9000759 in provider["effects"] and roll(effect(provider, 9000759)):
+                        candidates = [u for u in hits if u["hp"] > 0 and not u["dizzy"]]
+                        if candidates:
+                            target = rng.choice(candidates)
+                            if stun(target):
+                                event([dest(target, m=[], u={"u": "dizzy", "w": True})])
+                    if provider["hp"] > 0 and 9000775 in provider["effects"] and trigger(provider, 9000775):
+                        candidates = [u for u in hits if u["hp"] > 0]
+                        selected = sorted(rng.sample(candidates, min(2, len(candidates))), key=lambda u: u["pos"])
+                        passive_event(provider, 9000775, [*(change_ap(u, -int(effect(provider, 9000775, "value2"))) for u in selected),
+                                                            change_ap(provider, int(effect(provider, 9000775)))])
+                    if killed and 9000783 in provider["effects"] and roll(effect(provider, 9000783)):
+                        corpses = [u for _, u in sorted(friends.items()) if u["hp"] <= 0 and region(u) == "14"]
+                        if corpses:
+                            revive(provider, rng.choice(corpses), 9000783, 1, hidden=True)
+        elif not reaction:
+            if 9000760 in actor["effects"]:
+                candidates = [u for u in living(enemies) if not u["hidden"]]
+                if candidates:
+                    target = min(candidates, key=lambda u: (-u["ap"], u["pos"]))
+                    passive_event(actor, 9000760, [change_ap(target, -int(effect(actor, 9000760)))])
+        if not reaction and round_number <= effect(actor, 9000795) and not actor["hidden"]:
+            passive_event(actor, 9000795, set_state(actor, "qianlong"))
+        reactions = []
+        if reaction or not base_skill or actor["dizzy"] or actor["hidden"] or actor["states"].get("skilllock", 0) > round_number:
+            return reactions
+        repeats = []
+        for code, limit, eligible in (
+                (9000418, 1, 9000418 in actor["effects"] and bool(skill) and (killed > 0 or roll(Fraction(1, 2)))),
+                (9000419, 2, bool(skill) and killed > 0),
+                (9000466, 1, killed > 0),
+                (9000491, 1, bool(skill) and roll(effect(actor, 9000491) * sum(u["hp"] <= 0 and bool(u["firing"]) for u in slain))),
+                (9000769, 1, bool(skill) and roll(effect(actor, 9000769))),
+                (9000777, 1, bool(skill))):
+            if code in actor["effects"] and eligible:
+                for _ in range(min(killed, 2) if code == 9000419 else 1):
+                    if trigger(actor, code, limit):
+                        repeats.append(code)
+        dead = sum(u["hp"] <= 0 for u in enemies.values())
+        if (skill and not combined and dead and 9000487 in actor["effects"] and trigger(actor, 9000487)
+                and roll(effect(actor, 9000487) + effect(actor, 9000487, "value2") * (dead - 1))):
+            repeats.extend([9000487] * rng.randint(1, 2))
+        for code in repeats:
+            if not finished() and actor["hp"] > 0 and not actor["hidden"] and not actor["dizzy"]:
+                reactions += act(actor, followup=(base_skill, [actor["pos"]], base_skill["ap"]))
+        return reactions
 
     def combo_effects(actor, skill, hits, killed):
         sid = skill["id"]
@@ -841,7 +1265,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if sid in (12624, 12631):
             allies = sorted(living(friends), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
             if sid == 12624:
-                changes.extend(change_hp(u, -stat(actor, "atk"), healing=True) for u in allies)
+                changes.extend(change_hp(u, -stat(actor, "atk"), healing=True, healer=actor) for u in allies)
             elif allies:
                 changes.extend(set_state(allies[0], "invincible"))
         if sid in (12626, 12628, 12630, 12634, 12637):
@@ -871,7 +1295,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     # shortcut: 合体灼烧未给比例，沿用本地普攻10%/跳，拿到实战参数后替换。
                     amount = damage({**actor, "atk": stat(actor, "atk")},
                                     {**target, "def": stat(target, "def"), "hp": target["maxhp"]}, config) // 10
-                    change = status_damage(target, "firing", amount, 3 if sid == 12633 else 2)
+                    change = status_damage(target, "firing", amount, 3 if sid == 12633 else 2, actor)
                     if change:
                         changes.append(change)
         if sid == 13078:
@@ -891,7 +1315,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         actor["boss_turn"] = index + 1
         sid = cycle[index % len(cycle)]
         skill = config["combskill"][str(sid)]
-        enemies = living(teams[not actor["direct"]])
+        enemies = [u for u in living(teams[not actor["direct"]]) if not u["hidden"]]
         source = {"r": actor["direct"], "p": [actor["pos"]], "t": "x", "S": sid}
         if sid == 12646:
             actor["def"] += actor["base"]["def"] // 5
@@ -918,12 +1342,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 amount = damage({**actor, "atk": stat(actor, "atk")},
                                 {**target, "def": stat(target, "def"), "hp": damage_hp(target)},
                                 config, sid, multiplier=modifiers(actor, target) * guard(target),
-                                flat=actor["flat_out"] - target["flat_in"], combo=True)
-            change = change_hp(target, amount, hits=skill["count"], shield=sid not in (12640, 12647), bypass_barrier=sid in (12640, 12647))
+                                flat=actor["flat_out"] - target["flat_in"], combo=True, clip=False)
+            change = change_hp(target, amount, hits=skill["count"], shield=sid not in (12640, 12647), bypass_barrier=sid in (12640, 12647), kind="skill", attacker=actor)
             if target["hp"] > 0:
                 if sid == 12641:
-                    target["ap"] = max(0, target["ap"] - skill["ap_reduce"])
-                    change.update(ap=target["ap"], E=True)
+                    change.update(change_ap(target, -skill["ap_reduce"]))
                 if sid == 12645 and stun(target, 2):
                     change["u"] = {"u": "dizzy", "w": True}
             killed += int(target["hp"] == 0)
@@ -931,9 +1354,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         event(destinations, source)
         if sid != 12644:
             for target in selected:
-                amount = queen_recovery(target)
+                amount, healer = queen_recovery(target)
                 if target["hp"] > 0 and amount:
-                    event([change_hp(target, -amount, healing=True)])
+                    event([change_hp(target, -amount, healing=True, healer=healer)])
         if sid == 12641:
             event([change_hp(actor, actor["maxhp"] // 100, shield=False)])
         actor["strikes"] += 1
@@ -990,8 +1413,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 else:
                     amount = damage({**actor, "atk": stat(actor, "atk")}, {**target, "def": stat(target, "def"), "hp": damage_hp(target)},
                         config, sid, combo=True, multiplier=modifiers(actor, target) * guard(target), flat=actor["flat_out"] - target["flat_in"],
-                        final_multiplier=max(0, 1 - target.get("soul_effects", {}).get("antiblew", 0)))
-                changes.append(change_hp(target, amount, shield=sid != 12986, bypass_barrier=True))
+                        final_multiplier=max(0, 1 - target.get("soul_effects", {}).get("antiblew", 0)), clip=False)
+                changes.append(change_hp(target, amount, shield=sid != 12986, bypass_barrier=True, kind="skill", attacker=actor))
             actor["ap"] = skill["ap_give"]
             if sid == 12987:
                 amount, actor["hp"] = actor["hp"], 0
@@ -1005,6 +1428,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         return False
 
     def act(actor, forced_target=None, reaction=False, followup=None, chain=0):
+        nonlocal round_actions
+        if actor["hidden"]:
+            return []
         if reaction and (actor.get("absorbing") or 9000329 in actor["effects"] or actor.get("npc") and actor["cid"] == 10823):
             return []
         if not reaction and not followup and dragon_act(actor):
@@ -1023,12 +1449,13 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         elif not reaction and actor["states"].get("skilllock", 0) <= round_number:
             if base_skill and actor["ap"] >= base_skill["ap"]:
                 skill = config["combskill"]["12618"] if actor["cid"] == 10112 else base_skill
+            actor["free_combo"] = skill is None and 9000424 in actor["effects"]
             combination = choose_combo(actor, friends, enemies)
             if combination:
                 skill, participants = combination
         combined = skill is not None and skill is config["combskill"].get(str(skill["id"]))
         if skill and skill["kind"] == "gain":
-            selected = sorted((u for u in friends.values() if u["hp"] > 0), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
+            selected = sorted((u for u in friends.values() if u["hp"] > 0 and not u["hidden"]), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]))
             if skill["range"] in ("first", "second"):
                 selected = [u for u in selected if (u["pos"] < 8) == (skill["range"] == "first")]
             else:
@@ -1038,25 +1465,36 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if reaction and forced_target and 9000028 in actor["effects"]:
                 selected = targets(actor, enemies, {"range": "three"}, rng)
             elif not skill and not forced_target and 9000501 in actor["effects"]:
-                selected = sorted((u for u in enemies.values() if u["hp"] > 0), key=lambda u: (-stat(u, "atk"), u["pos"]))[:1]
+                selected = sorted((u for u in enemies.values() if u["hp"] > 0 and not u["hidden"]), key=lambda u: (-stat(u, "atk"), u["pos"]))[:1]
+            if not skill and not forced_target and any(u.get("taunt_active") and 9000476 in u["effects"] for u in living(enemies)):
+                selected = targets(actor, enemies, None, rng)
         if skill and not combined and effect(actor, 9000528):
             candidates = friends if skill["kind"] == "gain" else enemies
-            extra = sorted((u for u in candidates.values() if u["hp"] > 0 and u not in selected),
+            extra = sorted((u for u in candidates.values() if u["hp"] > 0 and not u["hidden"] and u not in selected),
                            key=lambda u: (Fraction(u["hp"], u["maxhp"]) if skill["kind"] == "gain" else 0, u["pos"]))
             selected += extra[:int(effect(actor, 9000528))]
         if not selected:
             return []
+        round_actions += 1
+        if 9000307 in actor["effects"] and actor["hp"] * 10 > actor["maxhp"] and trigger(actor, 9000307):
+            event([change_hp(actor, max(1, actor["maxhp"] // 10), shield=False)])
+            amount = actor.get("ramp_damage", 0) + effect(actor, 9000307)
+            actor["ramp_damage"] = min(Fraction(8, 5), amount) if pvp else amount
         skill_id = skill["id"] if skill else None
         combo_id = skill_id if combined else None
         source = {"r": actor["direct"], "p": participants, "t": "x" if combined else "k" if skill else "N"}
         if skill:
             source["S"] = skill_id
         old_ap = followup[2] if followup else actor["ap"]
+        free_combo = combined and actor.pop("free_combo", False) and not followup
         if not followup:
-            actor["ap"] = 0 if skill else min(10, old_ap + 2)
+            actor["ap"] = old_ap if free_combo else 0 if skill else min(10, old_ap + 2)
         destinations, reactions, dealt, recovered = [], [], 0, []
         killed, hit_targets, burned = 0, [], False
         critical_targets = set()
+        tongtian = bool(skill) and not combined and (config["general"][str(actor["cid"])]["init_cid"] or actor["cid"]) == 10839
+        lowest = min((u for u in living(enemies) if not u["hidden"]), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]), default=None)
+        slain = []
         if combo_id == 13077:
             critical_targets = {u["pos"] for u in rng.sample(selected, min(4, len(selected)))}
         male_count = sum(config["general"][str(u["cid"])]["sex"] == "nan" and config["general"][str(u["cid"])]["name"] != "主角"
@@ -1071,7 +1509,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 coefficient, growth = map(Fraction, skill["atk-param"].split(";")[:2])
                 multiplier = 1 + max(0, old_ap - skill["ap"]) * Fraction(str(skill["ap_up"]))
                 amount = int(stat(actor, "atk") * (coefficient + (0 if combined else growth * max(0, actor.get("skilllevel", 0) - 1))) * multiplier)
-                destinations.append(change_hp(target, -amount, healing=True))
+                destinations.append(change_hp(target, -amount, healing=True, healer=actor))
+                if 9000500 in actor["effects"] and target["ap"] < effect(actor, 9000500) and roll(effect(actor, 9000500, "value2")):
+                    destinations.append(change_ap(target, 2, provider=actor))
                 if skill.get("effect") == "promote" and roll(skill["effect-trigger"]):
                     change = buff(target, skill)
                     if change:
@@ -1087,6 +1527,21 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                         or roll(max(0, min(.75, critical_chance))))
             parry = roll(max(0, min(.5, (stat(target, "parry") - stat(actor, "arp")) / 100)))
             multiplier = modifiers(actor, target)
+            if skill:
+                if target["hp"] * 2 < target["maxhp"]:
+                    multiplier *= 1 + effect(actor, 9000433)
+                if 9999991 in actor["effects"]:
+                    multiplier *= Fraction(6, 5)
+            elif target["hp"] * 2 < target["maxhp"]:
+                multiplier *= 1 + effect(actor, 9000434)
+            if tongtian:
+                multiplier *= 1 + min(effect(actor, 9000676, "value2"), effect(actor, 9000676) * actor.get("tongtian_casts", 0))
+                multiplier *= 1 + effect(actor, 9000677) * sum(u["hp"] <= 0 for u in enemies.values())
+                for provider in friends.values():
+                    if target is lowest:
+                        multiplier *= 1 + effect(provider, 9000675)
+                    if provider["hp"] > 0 and target["pos"] == provider["pos"]:
+                        multiplier *= 1 + effect(provider, 9000770)
             if skill:
                 multiplier *= 1 + max(0, old_ap - skill["ap"]) * Fraction(str(skill["ap_up"]))
                 coefficient, growth = map(Fraction, skill["atk-param"].split(";")[:2])
@@ -1110,21 +1565,26 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 shared = [u for u in living(enemies) if u is target or config["general"][str(u["cid"])]["region"] == "13"]
             amount = damage(attacker, defender, config, skill_id, critical, multiplier=multiplier, combo=combined,
                             flat=actor["flat_out"] - target["flat_in"],
-                             critical_multiplier=Fraction(3, 2) + Fraction(actor.get("criticaldmg", 0) + actor.get("pet_rates", {}).get("criticaldmg", 0), 100)
-                            + (Fraction(1, 10) if combo_id == 12627 else 0), clip=len(shared) == 1)
+                             critical_multiplier=Fraction(3, 2) + Fraction(stat(actor, "criticaldmg"), 100)
+                             + (Fraction(1, 10) if combo_id == 12627 else 0), clip=False)
             portion, remainder = divmod(amount, len(shared))
+            if not skill and effect(target, 9000428):
+                reflected = int(amount * effect(target, 9000428))
+                destinations.append(change_hp(actor, reflected))
+                portion, remainder = divmod(max(0, amount - reflected), len(shared))
             hits = [(u, change_hp(u, portion + int(i < remainder), "parry" if parry else "C" if critical else "N",
-                                  skill["count"] if critical and skill else int(critical))) for i, u in enumerate(shared)]
+                                  skill["count"] if critical and skill else int(critical), kind="skill" if skill else "basic", attacker=actor, reaction=reaction)) for i, u in enumerate(shared)]
             hit = next(change for u, change in hits if u is target)
             for recipient, change in hits:
                 if recipient is not target:
                     destinations.append(change)
-                    recovery = queen_recovery(recipient)
+                    recovery, healer = queen_recovery(recipient)
                     if recipient["hp"] > 0 and change["m"]["m"] + change["m"].get("M", 0) > 0 and recovery:
-                        recovered.append((recipient, recovery))
+                        recovered.append((recipient, recovery, healer))
             dealt += sum(max(0, change["m"]["m"]) for _, change in hits)
             killed += sum(u["hp"] == 0 for u, _ in hits)
-            amount = hit["m"]["m"] + hit["m"].get("M", 0)
+            slain.extend(u for u, _ in hits if u["hp"] == 0)
+            amount = hit["m"]["m"] + hit["m"].get("M", 0) + target.get("last_heal_absorbed", 0)
             if skill and amount > 0 and target["states"].pop("fire", None):
                 destinations.append(state_event(target, "fire", False))
             if amount > 0:
@@ -1137,6 +1597,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                          or skill and skill.get("effect") == "dizzy" and roll(skill["effect-trigger"])
                          or not skill and 9100002 in actor["effects"] and roll(.3))
                 dizzy = dizzy or target["firing"] and roll(effect(actor, 9000483))
+                dizzy = dizzy or not skill and (roll(effect(actor, 9000687)) or target["firing"] and roll(effect(actor, 9000805)))
                 if dizzy and stun(target):
                     hit["u"] = {"u": "dizzy", "w": True}
                 poison = skill and skill.get("effect") == "dot" and roll(skill["effect-trigger"])
@@ -1147,11 +1608,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                         destinations.append(change)
                 if skill and skill.get("effect") == "firing" and roll(skill["effect-trigger"]):
                     tick = damage(attacker, {**defender, "hp": target["maxhp"]}, config)
-                    change = status_damage(target, "firing", int(tick * Fraction(skill["effect-param"])), skill["effect-round"])
+                    change = status_damage(target, "firing", int(tick * Fraction(skill["effect-param"])), skill["effect-round"], actor)
                     if change:
                         destinations.append(change)
                 if skill and effect(actor, 9000803) and roll(effect(actor, 9000803, "value2")):
-                    change = status_damage(target, "firing", min(actor["maxhp"], int(target["maxhp"] * effect(actor, 9000803))), 2)
+                    change = status_damage(target, "firing", min(actor["maxhp"], int(target["maxhp"] * effect(actor, 9000803))), 2, actor)
                     if change:
                         destinations.append(change)
                         burned = True
@@ -1159,17 +1620,27 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     change = buff(target, skill)
                     if change:
                         destinations.append(change)
+                if 9000492 in actor["effects"]:
+                    change = ignite(actor, target)
+                    if change:
+                        destinations.append(change)
                 reduction = (skill["ap_reduce"] if skill else 0) + (int(effect(actor, 9000020)) if target["dot"] else 0)
+                if not reaction:
+                    reduction += int(effect(actor, 9000435))
                 if not skill:
                     reduction += sum(int(row["value"]) for row in actor["passive_rows"]
                                      if row["type"] == 1 and (row["type_param"] or row["id"]) == 9000502
                                      and target["ap"] >= row["value2"])
                 if reduction:
-                    target["ap"] = max(0, target["ap"] - reduction)
-                    destinations.append(dest(target, ap=target["ap"], E=True))
-                amount = queen_recovery(target)
+                    destinations.append(change_ap(target, -reduction))
+                if not skill and not reaction and 9000505 in actor["effects"]:
+                    if target["ap"] >= effect(actor, 9000505):
+                        destinations.append(change_ap(target, -int(effect(actor, 9000505))))
+                    elif stun(target):
+                        destinations.append(dest(target, m=[], u={"u": "dizzy", "w": True}))
+                amount, healer = queen_recovery(target)
                 if amount:
-                    recovered.append((target, amount))
+                    recovered.append((target, amount, healer))
                 if not reaction and not target["dizzy"]:
                     if parry:
                         reactions.append((target, actor))
@@ -1182,20 +1653,19 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if skill and effect(actor, 9000803) and not burned:
             target = next((u for u in hit_targets if u["hp"] > 0), None)
             if target:
-                change = status_damage(target, "firing", min(actor["maxhp"], int(target["maxhp"] * effect(actor, 9000803))), 2)
+                change = status_damage(target, "firing", min(actor["maxhp"], int(target["maxhp"] * effect(actor, 9000803))), 2, actor)
                 if change:
                     destinations.append(change)
         destinations.append(dest(actor, ap=actor["ap"], E=False))
-        if skill and skill["ap_give"] and (not followup or not combined):
-            actor["ap"] = min(10, actor["ap"] + skill["ap_give"])
-            destinations.append(dest(actor, ap=actor["ap"], E=True))
+        if skill and not free_combo and skill["ap_give"] and (not followup or not combined):
+            destinations.append(change_ap(actor, skill["ap_give"]))
         event(destinations, source)
         if combo_id in MULTI_COMBOS:
             combo_effects(actor, skill, hit_targets, killed)
         if skill and not followup and effect(actor, 9000062):
             allies = sorted((u for u in living(friends) if u is not actor), key=lambda u: (u["ap"], u["pos"]))
             if allies:
-                event([change_ap(allies[0], int(effect(actor, 9000062)))])
+                event([change_ap(allies[0], int(effect(actor, 9000062)), provider=actor)])
         if skill and skill.get("effect") == "suck" and dealt and actor["hp"] > 0:
             amount = min(actor["maxhp"] - actor["hp"], int(dealt * Fraction(skill["effect-param"])))
             if amount:
@@ -1204,6 +1674,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             event([change_hp(actor, -int(dealt * effect(actor, 9000031)))])
         kill_recovery(actor, killed)
         deaths()
+        reactions += passive_after(actor, skill, combined, hit_targets, slain, reaction, base_skill)
         if not reaction and actor["hp"] > 0:
             extra_kills = 0
             for _, target in sorted(enemies.items()):
@@ -1220,9 +1691,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             change = buff(actor, skill)
             if change and actor["hp"] > 0:
                 event([change])
-        for target, amount in recovered:
+        for target, amount, healer in recovered:
             if target["hp"] > 0:
-                event([change_hp(target, -amount, healing=True)])
+                event([change_hp(target, -amount, healing=True, healer=healer)])
         if actor["hp"] > 0 and not actor["dizzy"] and actor["states"].get("skilllock", 0) <= round_number and not finished():
             if combo_id in (12604, 12943) and all(friends[p]["hp"] > 0 and not friends[p]["dizzy"]
                 and friends[p]["states"].get("skilllock", 0) <= round_number for p in participants):
@@ -1240,8 +1711,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         skill = config["combskill"][str(pet["skill"])]
         if not roll(Fraction(str(skill["trigger"]))):
             return
-        friends = [u for _, u in sorted(teams[direct].items()) if u["hp"] > 0]
-        enemies = [u for _, u in sorted(teams[not direct].items()) if u["hp"] > 0]
+        friends = [u for _, u in sorted(teams[direct].items()) if u["hp"] > 0 and not u["hidden"]]
+        enemies = [u for _, u in sorted(teams[not direct].items()) if u["hp"] > 0 and not u["hidden"]]
+        if not friends or not enemies:
+            return
         cid, sid = pet["cid"], pet["skill"]
         coefficient = Fraction(skill["atk-param"].split(";")[0].strip())
         destinations = []
@@ -1256,11 +1729,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 average = sum(stat(u, "atk") for u in friends) // len(friends)
                 for target in selected:
                     amount = damage({"atk": max(1, average)}, {**target, "def": stat(target, "def"), "hp": damage_hp(target)},
-                                    config, sid, multiplier=target["in_multiplier"] * guard(target))
-                    destinations.append(change_hp(target, amount))
+                                    config, sid, multiplier=target["in_multiplier"] * guard(target), clip=False)
+                    destinations.append(change_hp(target, amount, kind="pet", attacker=pet))
                     if target["hp"] > 0 and sid != 12996:
-                        target["ap"] = max(0, target["ap"] - 2)
-                        destinations.append(dest(target, ap=target["ap"], E=True))
+                        destinations.append(change_ap(target, -2, pet=True))
                 candidates = friends
             front = cid in (90002, 90003)
             preferred = [u for u in candidates if (u["pos"] < 8) == front]
@@ -1288,14 +1760,23 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                         14021: 4, 14025: 2, 14026: 3, 14027: 4, 14028: 4, 14029: 4, 14030: 4,
                         14023: 1, 14024: 2, 12996: 1, 12997: 2, 12998: 3, 14031: 4, 14032: 4, 14033: 4}.get(sid, 0)
             for target in sorted(rng.sample(selected, min(len(selected), ap_count)), key=lambda u: u["pos"]):
-                target["ap"] = max(0, min(10, target["ap"] + (-2 if kind == "weaken" else 2)))
-                destinations.append(dest(target, ap=target["ap"], E=True))
+                destinations.append(change_ap(target, -2 if kind == "weaken" else 2, pet=True))
         event(destinations, {"r": direct, "p": [0], "t": "x", "S": sid})
         deaths()
 
     round_number = 0
     for team in teams.values():
+        seeds = any(9000807 in u["effects"] for u in team.values())
         for unit in team.values():
+            if seeds:
+                unit["fire_seeds"] = 1
+                event([dest(unit, B={"R": "atk", "u": "promote", "w": True})])
+            if 9000784 in unit["effects"]:
+                adjacent = [u for u in living(team) if u["pos"] > 7 and abs(u["pos"] - unit["pos"]) == 2 and region(u) == "14"]
+                changes = [change for u in adjacent for change in set_state(u, "statusproof", int(effect(unit, 9000784)) + 1)]
+                if not adjacent:
+                    changes = set_state(unit, "invincible", int(effect(unit, 9000784, "value2")) + 1)
+                passive_event(unit, 9000784, changes)
             for kind, attr in unit["buffs"]:
                 event([dest(unit, B={"R": attr, "u": kind, "w": True})])
             if unit["cid"] in QUEENS:
@@ -1306,12 +1787,24 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 unit["artifact_barrier"] = 2
                 artifact_event(unit, row, [state_event(unit, "invincible", True)])
     for round_number in range(1, max_rounds + 1):
+        round_actions = 0
         if round_number > 1:
             event([])
         if finished():
             break
         for team in teams.values():
             for unit in living(team):
+                unit["taunt_active"] = round_number <= 2
+                if 9000309 in unit["effects"]:
+                    row = unit["effects"][9000309]
+                    amount = Fraction(str(row["value2"]))
+                    key = "team_ramp" if row["type"] == 2 else "ramp_damage"
+                    amount += unit.get(key, 0)
+                    unit[key] = min(Fraction(8, 5), amount) if pvp else amount
+                if 9000442 in unit["effects"]:
+                    unit["living_damage"] = min(Fraction(1, 2), unit.get("living_damage", 0) + effect(unit, 9000442))
+                if 9000796 in unit["effects"]:
+                    unit["ancient_damage"] = min(Fraction(1, 2), unit.get("ancient_damage", 0) + effect(unit, 9000796))
                 if round_number == 2 and unit.get("artifact_barrier", 0):
                     unit["artifact_barrier"] = 0
                     event([state_event(unit, "invincible", False)])
@@ -1328,7 +1821,13 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 for kind, until in list(unit["states"].items()):
                     if until <= round_number:
                         del unit["states"][kind]
+                        if kind == "hide":
+                            unit["hidden"] = False
                         event([state_event(unit, kind, False)])
+                for key, (amount, until) in list(unit["passive_buffs"].items()):
+                    if until <= round_number:
+                        del unit["passive_buffs"][key]
+                        event([dest(unit, B={"R": key[2], "u": "promote" if amount >= 0 else "weaken", "w": False})])
         for direct, pet in combat_pets.items():
             if pet is not None and not finished():
                 pet_action(direct, pet)
@@ -1337,7 +1836,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         for actor in order:
             if finished():
                 break
-            if actor["hp"] <= 0:
+            if actor["hp"] <= 0 or actor["hidden"]:
                 continue
             for (kind, attr), (_, until) in list(actor["buffs"].items()):
                 if until <= round_number:
@@ -1361,10 +1860,15 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             for reactor, target in act(actor):
                 if finished():
                     break
-                if reactor["hp"] > 0 and not reactor["dizzy"] and (target is None or target["hp"] > 0):
+                if reactor["hp"] > 0 and not reactor["hidden"] and not reactor["dizzy"] and (target is None or target["hp"] > 0 and not target["hidden"]):
                     act(reactor, target, reaction=True)
         if finished():
             break
+        for team in teams.values():
+            if any(9000807 in u["effects"] for u in living(team)):
+                for unit in sorted(living(team), key=lambda u: (u["fire_seeds"], u["pos"]))[:2]:
+                    unit["fire_seeds"] = min(7, unit["fire_seeds"] + 1)
+                    event([dest(unit, B={"R": "atk", "u": "promote", "w": True})])
         if round_number == 5:
             for team in teams.values():
                 for unit in living(team):
