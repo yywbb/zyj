@@ -252,12 +252,12 @@ class GameHelperTests(unittest.TestCase):
         self.assertEqual(self.save["last_single_boss_battle"]["target"], target)
 
     def test_one_failed_item_does_not_erase_another_success_or_fake_completion(self):
-        groups, _, _ = self.execute([(3, 2, 0, 0, 0, 0, 0), (3, 5, 1, 1, 0, 0, 0), (4, 1, 0, 0, 0, 0, 0)])
+        groups, _, _ = self.execute([(3, 2, 0, 0, 0, 0, 0), (3, 6, 1, 1, 0, 0, 0), (4, 1, 0, 0, 0, 0, 0)])
         self.assertIn(302010, groups)
-        self.assertIn(3050171, groups)
+        self.assertIn(3060171, groups)
         self.assertIn(4010171, groups)
-        self.assertIn("后续批次", self.reasons(groups)[3050171])
-        self.assertNotIn("champion_state", self.save)
+        self.assertIn("后续批次", self.reasons(groups)[3060171])
+        self.assertEqual(self.save["champion_state"]["day"], 0)
         self.assertGreater(self.save["watchstar_state"]["stars"], 0)
         self.assertFalse((self.root/"guilds.json").exists())
 
@@ -337,7 +337,8 @@ class GameHelperTests(unittest.TestCase):
             result = lua.globals().NetGameHelperQueryCallback(fd(raw))
             self.assertEqual(result[b"helperView"][b"generation"], generation)
             self.assertTrue(result[b"data"][b"localHelperSupported"][b"2:1"])
-            self.assertIsNone(result[b"data"][b"localHelperSupported"][b"3:5"])
+            self.assertTrue(result[b"data"][b"localHelperSupported"][b"3:5"])
+            self.assertIsNone(result[b"data"][b"localHelperSupported"][b"3:6"])
             self.assertEqual(result[b"data"][b"activity"][10][b"challengeTimes"], 3)
         self.assertTrue(lua.globals().NetGameHelperQueryCallback(fd(raw))[b"localHelperIgnored"])
         self.assertIsNone(lua.globals().gameConfig)
@@ -394,7 +395,7 @@ class GameHelperTests(unittest.TestCase):
         self.tower()
         self.save["friend_copy_state"]["cleared"] = 43001
         lua = self.network_lua()
-        rows = [(3, 1, 19, 0, 0, 0, 0), (3, 10, 2, 43001, 0, 0, 0), (3, 5, 1, 1, 0, 0, 0)]
+        rows = [(3, 1, 19, 0, 0, 0, 0), (3, 10, 2, 43001, 0, 0, 0), (3, 6, 1, 1, 0, 0, 0)]
         mode, mid, raw = lua.globals().UIGameHelperExeCallback(self.native_request(lua, rows))
         fd = lambda body: self.native(lua, {"rbuf": body, "ser": 1})
         quote = lua.globals().NetGameHelperExeCallback(fd(self.success(1, mid, raw=raw)))
@@ -488,6 +489,9 @@ class GameHelperTests(unittest.TestCase):
 
     def test_actual_four_page_initialization_only_uses_existing_ccbi_members_and_clamps_saved_settings(self):
         lua = self.ui_lua()
+        code = builder.read_script("functions", "common_lua").decode()
+        start = code.index("function string.split(")
+        lua.execute(code[start:code.index("function string.trim(", start)])
         with zipfile.ZipFile(builder.SRC_APK) as archive:
             resources = {name: archive.read("assets/UI/youxizhushou/"+name+".ccbi")
                          for name in ("youxizhushou", "cell_kaiguan", "container_task", "container_challenge", "container_activity", "container_guild")}
@@ -532,11 +536,12 @@ class GameHelperTests(unittest.TestCase):
         lua.execute('''helper:makeInitData();helper:makeSettingData()
             helper.rootNode={};helper.rootItems=nativeItems("youxizhushou");helper.viewH=1000
             helper.showParams[3][3][1]=99;helper.showParams[3][10][1]=99;helper.showParams[3][12][1]=99
+            helper.showParams[3][5][1]=99;helper.showParams[3][5][2]=99
         ''')
         challenge = {str(i): {"open": 1, "challengeTimes": 0, "maxLevel": 1} for i in range(1, 8)}
         activity = {str(i): {} for i in range(1, 16)}
         activity.update({"1": {"reset": 0, "maxlevel": 5, "endtime": 0, "curlevel": 1}, "2": {"freetimes": 10},
-                         "3": {"reset": 0}, "9": {"canChallengeTimes": 5}, "10": {"openlevel": 43001, "challengeTimes": 3},
+                         "3": {"reset": 0}, "5": {"reset": 0}, "9": {"canChallengeTimes": 5}, "10": {"openlevel": 43001, "challengeTimes": 3},
                          "12": {"openlevel": 33001, "challengeTimes": 1}})
         data = {"challenge": challenge, "activity": activity, "task": {}, "guild": {},
                 "localHelperSupported": {f"{p}:{i}": True for p, i in game_helper.SUPPORTED}}
@@ -546,10 +551,11 @@ class GameHelperTests(unittest.TestCase):
                 helper.params[3][3][1]..","..helper.params[3][10][1]..","..helper.params[3][12][1])
             assert(helper.containers.task.items.s_bt.enabled==false)
             assert(helper.containers.guild.items.s_bt.enabled==false)
-            assert(helper.containers.activity.items.s_bt_4.enabled==false)
+            assert(helper.containers.activity.items.s_bt_4.enabled==true)
+            assert(helper.params[3][5][1]==5 and helper.params[3][5][2]==0)
             assert(helper.containers.activity.items.s_bt_8.enabled==true)
             local rows=helper:makeHelperParams("activity")
-            for _,row in ipairs(rows) do assert(row.id~=5 and row.id~=6 and row.id~=8) end
+            for _,row in ipairs(rows) do assert(row.id~=6 and row.id~=8) end
             helper.selectPage="activity";helper:executeHelper(false)
             assert(requests[#requests].type==6212 and requests[#requests].helperToken==nil)
         ''')

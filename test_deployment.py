@@ -305,7 +305,7 @@ class DeploymentTests(unittest.TestCase):
         self.success(1, 2411, values=[135]); self.refresh()
         self.assertEqual(self.props(20293), original+2)
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 6517))[0], points+2)
-        self.assertEqual(sum(self.config["liveness"][str(t)]["point"] for t in activities.LIVENESS_TASKS), 85)
+        self.assertEqual(sum(self.config["liveness"][str(t)]["point"] for t in activities.LIVENESS_TASKS), 90)
         self.reconnect(); self.refresh()
         self.assert_rejected(2411, values=[135])
         self.clock.return_value += 86400

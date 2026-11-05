@@ -10,7 +10,7 @@ local function helperFailure(msg,req)
 end
 
 function UIGameHelperQueryCallback(req)
-    if gamedata.ext.localHelperBusy then return helperFailure("助手正在结算；结果未知请重进游戏") end
+    if gamedata.ext.localHelperBusy or gamedata.ext.localChampionBusy then return helperFailure("助手/试炼正在结算；结果未知请重进游戏") end
     local queue=gamedata.ext.localHelperQueries or {}
     table.insert(queue,{view=req.helperView,action=req.helperAction})
     gamedata.ext.localHelperQueries=queue
@@ -39,7 +39,7 @@ function NetGameHelperQueryCallback(fd)
 end
 
 function UIGameHelperExeCallback(req)
-    if gamedata.ext.localHelperBusy or #(gamedata.ext.localHelperQueries or {})>0 then
+    if gamedata.ext.localHelperBusy or gamedata.ext.localChampionBusy or #(gamedata.ext.localHelperQueries or {})>0 then
         return helperFailure("助手请求正在等待回复；结果未知请重进游戏",req)
     end
     req.ext=req.ext or {}

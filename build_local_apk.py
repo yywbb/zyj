@@ -2659,6 +2659,120 @@ def patch_cover_scripts(patched):
     put("GameErrorMessage", code, "common_lua")
 
 
+def patch_champion_scripts(patched):
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    def replace(code, old, new):
+        assert code.count(old) == 1, old
+        return code.replace(old, new)
+
+    for name, filename in (("GameChampion", "champion_network.lua"), ("UIChampion", "champion_ui.lua")):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        if name == "GameChampion":
+            marker = "        else\n            local params = params_pb.ParamS()"
+            assert code.count(marker) == 3
+            code = code.replace(marker, "        elseif v.id >= 1 and v.id <= 9 then\n            local params = params_pb.ParamS()")
+        else:
+            code = re.sub(r"(?m)^\s*UIRequest\(\{type = 1001\}\)\s*$", "", code)
+            code = replace(code, '        UIRequest({type = 2710,update = true})',
+                           '        if LocalChampionCurrent(t) then UIRequest({type = 2710,update = true}) end')
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, code+"\n"+stream.read())
+    for name, prefix, methods in (("Layer_champion", "champion", ("init", "clear")),
+            ("window_championBox", "championbox", ("open", "close", "reload")),
+            ("window_championSetting", "championSetting", ("open", "close")),
+            ("Layer_activity_championshop", "activity_championshop", ("init", "clear"))):
+        code = read_script(name).decode("utf-8").replace("\r\n", "\n")
+        for method in methods:
+            pos = code.index("\n", code.index(f"function {prefix}.{method}(self"))+1
+            code = code[:pos]+"    self.localChampionGeneration=(self.localChampionGeneration or 0)+1\n"+code[pos:]
+        if prefix == "champion":
+            code = replace(code, 'gameWindows:openWindow("championRule",nil,nil)',
+                'gameWindows:openWindow("guildmsg",{msg="本地试炼：2关共6战，配置NPC。\\n相邻据点推进，每战满血，失败耗1次。\\n首箱免费，后4箱10/20/40/60元宝。\\nUTC+8每日恢复；重置需确认。"},nil)')
+            code = replace(code, "    self.data = data or self.data", "    self.data = data or self.data\n    self.championconfig=gamedata.config.champion_produce[tostring(self.data.localLevel or GameScene.roleinfo.level)] or {}")
+            for marker in ("function champion.reload(self,data)", "function champion.setPoint(self, data, index)"):
+                pos = code.index("\n", code.index(marker))+1
+                code = code[:pos]+"    local serial=(data and data.localSerial) or (self.data and self.data.localSerial)\n"+code[pos:]
+            code = replace(code, "UIRequest({type = 2703, xgold = xgold or 0,})", "UIRequest({type = 2703, xgold = xgold or 0,championSerial=serial})")
+            code = replace(code, "UIRequest({type = 2701, id = index, isauto = self.isauto})", "UIRequest({type = 2701, id = index, isauto = self.isauto,championSerial=serial})")
+            marker = """            for i=1, times do
+                price = price + gamedata.config.buycount_price[tostring(i)].championbox_cost
+            end"""
+            code = replace(code, marker, """            for i=(self.data.status.boxopen or 0)+1,times do
+                price=price+gamedata.config.buycount_price[tostring(i)].championbox_cost
+            end
+            if self.data.status.pass==1 then for i=1,times do
+                price=price+gamedata.config.buycount_price[tostring(i)].championbox_cost
+            end end""")
+        elif prefix == "championbox":
+            code = replace(code, "c_config[tostring(GameScene.roleinfo.level)]", "c_config[tostring(self.data.localLevel or GameScene.roleinfo.level)]")
+        elif prefix == "championSetting":
+            code = replace(code, "    self:shiftSelect()", "    self.path=math.max(1,math.min(3,tonumber(self.path) or 1))\n    self.buynum=math.max(1,math.min(5,tonumber(self.buynum) or 1))\n    self:shiftSelect()")
+            code = replace(code, "\tself.buySpend = price", """    local page=GameScene.layers.champion.module
+    local status=page and page.data and page.data.status or {pass=1,boxopen=0}
+    self.buySpend=0
+    for i=(status.boxopen or 0)+1,self.buynum do self.buySpend=self.buySpend+gamedata.config.buycount_price[tostring(i)].championbox_cost end
+    if status.pass==1 then self.buySpend=self.buySpend+price end
+    self.rootItems.kaiqijiagenum:setString(tostring(self.buySpend))""")
+        else:
+            marker = "    local configdata = gamedata.config.champion_goods[tostring(self.data.itemsdata[tostring(id)].id)]"
+            code = replace(code, marker, "    local shelf=self.data.localShelfSerial\n    local goodid=self.data.itemsdata[tostring(id)].id\n"+marker)
+            marker = "goodid = self.data.itemsdata[tostring(id)].id,num"
+            assert code.count(marker) == 2
+            code = code.replace(marker, "goodid = goodid,championShelf=shelf,num")
+            code = replace(code, "    local costid,costnum = ui.getIDandNUM(gamedata.config.global_kv.champion_refreshgold.value)", "    local shelf=self.data.localShelfSerial\n    local costid,costnum = ui.getIDandNUM(gamedata.config.global_kv.champion_refreshgold.value)")
+            code = replace(code, "UIRequest({type = 2712, xgold = 0})", "UIRequest({type = 2712, xgold = 0,championShelf=shelf})")
+            start = code.index("function activity_championshop.updatetimeFunc(")
+            end = code.index("\nfunction ", start+1)
+            code = code[:start]+'''function activity_championshop.updatetimeFunc(self)
+    local generation=self.localChampionGeneration
+    local now=gamedata:time()
+    local deadline=(math.floor((now+28800)/43200)+1)*43200-28800
+    gameTimer:rigistTime("championshop_reset",deadline-now)
+    gameTimer:rigistTimeFunc("championshop_reset",function()
+        if not self.show or generation~=self.localChampionGeneration then return end
+        local remaining=math.max(0,deadline-gamedata:time())
+        gameTimer.times.championshop_reset=remaining
+        self.coveritems.updatetime:setString(ui.makeTimeText(remaining,"hour"))
+        if remaining==0 then
+            gameTimer:UnrigistTimeFunc("championshop_reset")
+            UIRequest({type=2710,update=true})
+        end
+    end)
+end
+'''+code[end:]
+            start = code.index("function activity_championshop.refreshJudge(")
+            end = code.index("\nend", start)+len("\nend")
+            code = code[:start]+'''function activity_championshop.refreshJudge(self)
+    return (gamedata:time()+28800)%43200<43200-180
+end'''+code[end:]
+        matches = list(re.finditer(rf"^function {prefix}\.[^(]+\(self[^\n]*\n", code, re.M))
+        for index in range(len(matches)-1, -1, -1):
+            start = matches[index].start()
+            end = matches[index+1].start() if index+1 < len(matches) else code.rindex("return ")
+            block = code[start:end]
+            pattern = r"(?m)^([^\n]*?)(addHandleOfControlEvent\(function\([^\n]*?\)|local (?:function \w+|\w+ = function)\([^\n]*?\)|function shopExchangeRequest\(num\))"
+            block = re.sub(pattern, lambda m: m.group(0) if m.group(1).lstrip().startswith("--") else m.group(0)
+                + "\n        if not (self.rootNode or self.coverccb) or generation~=self.localChampionGeneration then return end\n", block)
+            marker = "CCCallFunc:create(function()"
+            if marker in block:
+                block = block.replace(marker, marker+"\n        if not self.rootNode or generation~=self.localChampionGeneration then return end\n")
+            if block != code[start:end]:
+                at = block.index("\n")+1
+                if re.match(rf"function {prefix}\.(?:init|open|reload)\(", block) and block[at:].startswith("    self.localChampionGeneration="):
+                    at = block.index("\n", at)+1
+                block = block[:at]+"    local generation=self.localChampionGeneration\n"+block[at:]
+                code = code[:start]+block+code[end:]
+        put(name, code)
+    key = "assets/common_lua/GameErrorMessage.so"
+    raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+    code = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    code = replace(code, marker, marker+"    if LocalChampionError and fd.ser~=0 then LocalChampionError(error.ids[1]) end\n")
+    put("GameErrorMessage", code, "common_lua")
+
+
 def patch_game_helper_scripts(patched):
     def load(name, folder="scripts"):
         raw = patched.get(f"assets/{folder}/{name}.so")
@@ -3952,6 +4066,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_nightclub_scripts(patched)
     patch_dragon_wishing_scripts(patched)
     patch_game_helper_scripts(patched)
+    patch_champion_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")

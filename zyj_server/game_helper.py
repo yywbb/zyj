@@ -4,12 +4,12 @@ import copy
 import hashlib
 import random
 
-from . import activity_copy, arena, friend_copy, mieshendian, nightclub, online_rewards, penglai, recharge, single_boss, watchstar, welfare
+from . import activity_copy, arena, champion, friend_copy, mieshendian, nightclub, online_rewards, penglai, recharge, single_boss, watchstar, welfare
 from .penglai import comb
 from .protocol import encode_pb_field, iter_pb_fields, pack_frame, pb_get_varint
 
 
-SUPPORTED = {(2, aid) for aid in activity_copy.COPIES} | {(3, aid) for aid in (1, 2, 3, 9, 10, 12)}
+SUPPORTED = {(2, aid) for aid in activity_copy.COPIES} | {(3, aid) for aid in (1, 2, 3, 5, 9, 10, 12)}
 
 
 def require_open(save, config):
@@ -60,7 +60,7 @@ def parse(body, config):
             raise ValueError("助手项目重复或不存在")
         seen.add(key)
         if key in SUPPORTED:
-            used = 2 if key in ((3, 10), (3, 12)) else 1
+            used = 2 if key in ((3, 5), (3, 10), (3, 12)) else 1
             if any(params[used:]) or params[0] > 1000:
                 raise ValueError("助手项目含多余参数或执行次数过大")
     extras = messages[2]
@@ -93,6 +93,8 @@ def query(save, config, now):
     activity_rows[2][1] = max(0, vip["c_watchstar_change"]-save["watchstar_state"]["changes"])
     penglai.prepare(2120, save, b"", config, now, 0)
     activity_rows[3][1] = save["penglai_state"]["count"]
+    state = champion.settle(save, config, now)
+    activity_rows[5][1:3] = [state["boxes"], state["resets"]]
     state = nightclub.get_state(save, config)
     statuses, partners = [], []
     for floor in range(1, 11):
@@ -153,6 +155,12 @@ def estimate(rows, save, config, now):
                 raise ValueError("竞技场今日购买次数不足，请修改助手设置")
             prices = config["buycount_price"]
             gold += sum(prices[str(min(i, max(map(int, prices))))]["athletics"] for i in range(state["bought"]+1, state["bought"]+p1+1))
+        elif (page, item) == (3, 5):
+            state = champion.settle(save, config, now)
+            if not 1 <= p1 <= 5 or not 0 <= p2 <= vip["champion_times"]-state["resets"]:
+                raise ValueError("冠军试炼宝箱/重置设置超过剩余上限")
+            gold += champion.auto_cost(state, p1, config) + p2*2*champion.box_cost(0, p1, config)
+            gold += sum(config["buycount_price"][str(i)]["champion_cost"] for i in range(state["resets"]+1, state["resets"]+p2+1))
     if gold >= (1 << 31):
         raise ValueError("游戏助手报价超出范围")
     return gold, active
@@ -192,8 +200,8 @@ def execute_item(row, save, config, now, step_counts):
         data = player.prepare_recorded_response(opcode, b"", save, recharge.ids(values), step_counts, config, now)
         if opcode in (*activity_copy.BATTLES, 1611):
             prize = next((v for n, w, v in iter_pb_fields(data) if (n, w) == (4, 2)), b"")
-        elif opcode == 2128:
-            prize = next(v for n, w, raw in iter_pb_fields(data) if (n, w) == (1, 2) and pb_get_varint(raw, 1) == 3
+        elif opcode in (2128, 2705):
+            prize = next(v for n, w, raw in iter_pb_fields(data) if (n, w) == (1, 2) and pb_get_varint(raw, 1) == (1 if opcode == 2705 else 3)
                          for n, w, v in iter_pb_fields(raw) if (n, w) == (2, 2))
         elif opcode in (1325, 3705, 2066, 3624, 2122):
             prize = data
@@ -256,6 +264,23 @@ def execute_item(row, save, config, now, step_counts):
             raise ValueError("本批蓬莱助手只用免费骰和免费翻牌，请将重置次数设为0")
         run(2128, [0])
         message = "只用剩余免费骰、免费翻牌；遇败停止，不重置、不领四星箱"
+    elif item == 5:
+        state = champion.settle(save, config, now)
+        attempts, wins, boxes, resets = 0, 0, 0, 0
+        for index in range(p2+1):
+            if index:
+                price = config["buycount_price"][str(state["resets"]+1)]["champion_cost"]
+                run(2703, [state["serial"], price])
+                resets += 1
+            data = run(2705, [state["serial"], 1, p1, champion.auto_cost(state, p1, config)])
+            values = ids(next(v for n, w, raw in iter_pb_fields(data) if (n, w) == (1, 2) and pb_get_varint(raw, 1) == 0
+                              for n, w, v in iter_pb_fields(raw) if (n, w) == (2, 2)))
+            attempts += values[0]
+            wins += values[1]
+            boxes += values[4]
+            if values[2]:
+                break
+        message = f"配置NPC真实挑战{attempts}次、胜利{wins}次、开箱{boxes}次；明确重置{resets}次，遇败停止"
     elif item == 9:
         reward = arena.daily_reward(save, config, now)
         if reward:
@@ -315,11 +340,17 @@ def execute(rows, save, config, now, step_counts):
     return comb([(100, recharge.ids(totals)), *logs, (200, comb(messages))]), spent
 
 
-def snapshots(save, now):
+def snapshots(save, now, config):
     from . import player
 
-    return [pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])) for mid in (1002, 1012, 1200)] + [
+    snapshots = [pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])) for mid in (1002, 1012, 1200)] + [
         pack_frame(1001, 0, player.apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now))]
+    state = save.get("champion_state", {})
+    if state.get("level"):
+        snapshots.append(pack_frame(2700, 0, champion.board(save, state, config)))
+    if state.get("slots"):
+        snapshots.append(pack_frame(2710, 0, champion.shop_query(state)))
+    return snapshots
 
 
 def handle(session, opcode, seq, body):
@@ -346,7 +377,7 @@ def handle(session, opcode, seq, body):
                 "活动副本不买次数，战斗遇败停止。未接通项目只记原因、不扣费。确认60秒内有效，状态变化须重新报价。")
         return [pack_frame(opcode, seq, comb([(101, recharge.ids([token, gold, active, len(rows)-active])), (102, info.encode("utf-8"))]))]
     if previous and previous == {"token": token, "request": request}:
-        return [pack_frame(opcode, seq, comb([(103, recharge.ids([1]))]))]+snapshots(session.save, now)
+        return [pack_frame(opcode, seq, comb([(103, recharge.ids([1]))]))]+snapshots(session.save, now, config)
     quote = getattr(session, "helper_quote", None)
     if (not quote or quote["token"] != token or quote["request"] != request or quote["before"] != session.save
             or not quote["now"] <= now < quote["now"]+60 or (now+28800)//86400 != (quote["now"]+28800)//86400):
@@ -363,7 +394,7 @@ def handle(session, opcode, seq, body):
     if not 0 <= spent <= quote["gold"]:
         raise ValueError("助手实际费用超出确认上限，整笔未保存、未扣费")
     working["game_helper_receipt"] = {"token": token, "request": request}
-    packets = player.save_response_group([pack_frame(opcode, seq, reply)]+snapshots(working, now), working, session.save,
+    packets = player.save_response_group([pack_frame(opcode, seq, reply)]+snapshots(working, now, config), working, session.save,
                                          session.save_path, session.step_counts, config, now)
     session.save = working
     session.helper_quote = None

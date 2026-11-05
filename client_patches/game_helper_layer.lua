@@ -20,6 +20,7 @@ function helper.refreshActivity(self)
     self:reloadMieshen(items)
     self:reloadGuanxing(items)
     self:reloadPenglai(items)
+    self:reloadChampion(items)
     self:reloadJingjichang(items)
     self:reloadFriendCopy(items)
     self:reloadKingman(items)
@@ -37,6 +38,25 @@ function helper.reloadGuanxing(self,items)
     items.p2:setString("0")
 end
 
+function helper.reloadChampion(self,items)
+    local data=self.data.activity["5"]
+    local vip=gamedata.config.vip[tostring(GameScene.vip.vip)]
+    local limit=math.max(0,vip.champion_times-(data.reset or 0))
+    local function price()
+        local boxes,resets=self.params[3][5][1] or 1,self.params[3][5][2] or 0
+        local perRound,resetPrice=0,0
+        for i=1,boxes do perRound=perRound+gamedata.config.buycount_price[tostring(i)].championbox_cost end
+        for i=(data.reset or 0)+1,(data.reset or 0)+resets do resetPrice=resetPrice+gamedata.config.buycount_price[tostring(i)].champion_cost end
+        items.p5_1:setString(perRound*2*(resets+1));items.p5_2:setString(resetPrice)
+        self.cost[3][5]={[1001]=perRound*2*(resets+1)+resetPrice}
+    end
+    local function boxes(num) self.params[3][5][1]=num;price() end
+    local function resets(num) self.params[3][5][2]=num;price() end
+    items.resetlb5_1:setString("每关最多5箱")
+    boxes(self:initNumModel(3,"5_1",self.showParams[3][5][1],1,5,boxes,gamedata.config.game_helper["3"]["5"].level,"冠军试炼"))
+    resets(self:initNumModel(3,"5_2",self.showParams[3][5][2],0,limit,resets,gamedata.config.game_helper["3"]["5"].level,"冠军试炼重置"))
+end
+
 function helper.makeHelperParams(self,page)
     local rows={}
     local function selected(group,id)
@@ -51,10 +71,12 @@ function helper.makeHelperParams(self,page)
             end
         end
     elseif page=="activity" then
-        for _,id in ipairs({1,2,3,9,10,12}) do
+        for _,id in ipairs({1,2,3,5,9,10,12}) do
             if selected(3,id) then
                 local value=self.params[3][id][1]
-                if id==10 or id==12 then
+                if id==5 then
+                    table.insert(rows,self.helperParams(3,id,value,self.params[3][id][2]))
+                elseif id==10 or id==12 then
                     if value>0 then table.insert(rows,self.helperParams(3,id,value,self.data.activity[tostring(id)].openlevel)) end
                 elseif self.setting[3][id][2]==1 then table.insert(rows,self.helperParams(3,id,value)) end
             end
