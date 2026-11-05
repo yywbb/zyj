@@ -2221,6 +2221,96 @@ end
     put("UIProps", code)
 
 
+def patch_deployment_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, filename in (("GameSlots", "deployment_network.lua"), ("UISlots", "deployment_ui.lua"),
+                           ("GameCopyActivity", "activity_copy_network.lua"), ("UICopyActivity", "activity_copy_ui.lua")):
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, load(name) + "\n" + stream.read())
+
+    for name, prefix, methods in (("Layer_deployment", "deployment", ("init", "clear")),
+                                  ("window_deploymentLevelUp", "deploymentLevelUp", ("open", "close"))):
+        code = load(name)
+        for method in methods:
+            marker = f"function {prefix}.{method}("
+            assert code.count(marker) == 1
+            pos = code.index("\n", code.index(marker))+1
+            code = code[:pos] + "    self.localDeploymentGeneration=(self.localDeploymentGeneration or 0)+1\n" + code[pos:]
+        if name == "Layer_deployment":
+            marker = '    local touchedGeneral = nil\n'
+            assert code.count(marker) == 1
+            code = code.replace(marker, '    local generation=self.localDeploymentGeneration\n' + marker)
+            marker = '            self.rootNode:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(0.5),CCCallFunc:create(function()\n'
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + '                if not self.rootNode or self.localDeploymentGeneration~=generation then return end\n')
+        else:
+            marker = 'function deploymentLevelUp.setSlotSpiritShow(self)\n'
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + '    local view=LocalDeploymentContext()\n')
+            marker = '        self.rootItems.upButton:addHandleOfControlEvent(function()\n'
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + '            if not LocalDeploymentActive(view,true) then return end\n')
+            marker = 'UIRequest{type = 4202, id = self.showindex, props = props }'
+            assert code.count(marker) == 1
+            code = code.replace(marker, 'UIRequest{type = 4202, id = self.showindex, props = props, deploymentView=view }')
+        put(name, code)
+    code = load("UIProps")
+    marker = '    elseif t.order == 42021 then\n'
+    assert code.count(marker) == 1
+    put("UIProps", code.replace(marker, marker + '        if not LocalDeploymentActive(t.deploymentView,true) then return end\n'))
+    code = load("GameErrorMessage", "common_lua")
+    marker = '    local error = initPb(ids_pb, fd)\n'
+    assert code.count(marker) == 1
+    put("GameErrorMessage", code.replace(marker, marker + '''    if gamedata and gamedata.ext then
+        if LocalDeploymentError then LocalDeploymentError(error.ids[1]) end
+        if gamedata.ext.localActivityCopyBusy==error.ids[1] then
+            gamedata.ext.localActivityCopyBusy=nil;gamedata.ext.localActivityCopyView=nil
+        end
+        if error.ids[1]==1340 then table.remove(gamedata.ext.localActivityCopyQueries or {},1) end
+    end
+'''), "common_lua")
+    code = load("UICopyActivity")
+    marker = "function UIActivityCopy(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if not LocalActivityCopyActive(t.activityCopyView) then return end\n")
+    for name in ("Coin", "ExpDan", "ForgeStone", "EquipStar", "Zhenfu", "Forging"):
+        marker = f"function UIActivity{name}Copy(t)\n"
+        assert code.count(marker) == 1
+        code = code.replace(marker, marker + "    if t.localActivityCopyIgnored or not LocalActivityCopyActive(t.activityCopyView,true) then return end\n")
+    marker = '    local callBackFunc = function()\n'
+    assert code.count(marker) == 6
+    code = code.replace(marker, marker + "        if not LocalActivityCopyActive(t.activityCopyView) then return end\n")
+    marker = r'if gameWindows.windows\["copyacivity"\]\.show\s*then'
+    assert len(re.findall(marker, code)) == 6
+    code = re.sub(marker, "if LocalActivityCopyWindow(t.activityCopyView) then", code)
+    marker = '    if window.show then\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '    if LocalActivityCopyWindow(t.activityCopyView) then\n')
+    put("UICopyActivity", code)
+    for name, prefix, methods in (("Layer_copy_chapter", "copyChapter", ("init", "clear", "shiftPage")),
+                                  ("window_copy_activity", "activity", ("open", "close"))):
+        code = load(name)
+        for method in methods:
+            marker = f"function {prefix}.{method}("
+            assert code.count(marker) == 1
+            pos = code.index("\n", code.index(marker))+1
+            code = code[:pos]+"    self.localActivityCopyGeneration=(self.localActivityCopyGeneration or 0)+1\n"+code[pos:]
+        if name == "window_copy_activity":
+            marker = '    self:createActivityList()\n'
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + '    UIRequest({type=1340})\n')
+        put(name, code)
+
+
 def patch_exchange_scripts(patched):
     for name, filename in (("GameActivityMultipleRebate", "exchange_network.lua"), ("UIActivityMultipleRebate", "exchange_ui.lua"),
                            ("GameGeneralCompound", "general_compound_network.lua"), ("UIGenerals", "general_compound_ui.lua")):
@@ -3771,6 +3861,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_wing_scripts(patched)
     patch_protagonist_growth_scripts(patched)
     patch_cover_scripts(patched)
+    patch_deployment_scripts(patched)
     patch_exchange_scripts(patched)
     patch_examination_scripts(patched)
     patch_nightclub_scripts(patched)

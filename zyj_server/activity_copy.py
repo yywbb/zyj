@@ -149,6 +149,8 @@ def prepare(opcode, save, body, config, now, seed):
                                      "won": report["result"], "rounds": report["round"], "damage_percent": percent}
     if aid == 3:
         magic.record_count(save, "stone_copy", 1, config)
+    if aid == 5:
+        activities.record_liveness(save, 35, 1, config, now)
     response = (encode_pb_field(1, 0, int(report["result"])) + encode_pb_field(2, 0, report["star"])
                 + encode_pb_field(4, 2, prize)
                 + encode_pb_field(5, 2, json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))

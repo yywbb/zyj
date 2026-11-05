@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, collection, cover, cup, dragon_wishing, equip_evolve, examination, exchange, gamestar, nightclub, soul, wing
+from . import achievements, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, nightclub, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -61,6 +61,7 @@ def load_role_config(config_path):
                              "equip_forgingConsume", "equip_foringlv",
                               "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
                               "hoshimiya_break", "hoshimiya_jihuo", "protagonist_awaken",
+                               "lingzhentu_zhenfa", "lingzhentu_cond", "lingzhentu_lv", "lingzhentu_jihuo", "lingzhentu_add",
                               "mozhao_evolve", "mozhao_soaring", "mozhao_liandan", "mozhao_shop", "mozhao_shoptype",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
                              "growplan_x1", "growplan_global_x1", "chengzhangplan_money", "general_awake",
@@ -684,6 +685,10 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
         apply_reward(save, reward, role_config, now)
+    elif opcode in deployment.OPCODES:
+        body, costs = deployment.prepare(opcode, save, request_body, role_config, now)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
     elif opcode in cover.OPCODES:
         body, costs, reward, update, delta = cover.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
@@ -1253,6 +1258,31 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
 
 
 def save_response_group(packets, save, before, save_path, step_counts, role_config, now):
+    # 全队条件可被换将、成长及GM改变；统一结算差值，不把灵阵加成当作基础成长。
+    update, delta = deployment.differences(save, before, role_config)
+    if update:
+        apply_sigil_update(save, update, delta, role_config)
+        previous, state = get_role_state(before, role_config), save["role_state"]
+        packets = [p for p in packets if int.from_bytes(p[8:12], "big") != 205]
+        power = b"".join(encode_pb_field(1, 0, v & ((1 << 64)-1)) for v in
+                         (state["power"]-previous["power"], state["power"], state["g_power"]-previous["g_power"],
+                          state["g_power"], state["power_all"]-previous["power_all"], state["power_all"]))
+        packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
+        if any(state[k] != previous[k] for k in ("power", "g_power", "power_all")):
+            packets.append(pack_frame(205, 0, power))
+        packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
+    if "deployment_state" in save:
+        current = deployment.query(save, role_config)
+        for i, packet in enumerate(packets):
+            mid = int.from_bytes(packet[8:12], "big")
+            if mid in (4200, 4201, 4202):
+                packets[i] = pack_frame(mid, int.from_bytes(packet[12:16], "big"), current)
+        if current != deployment.query(before, role_config):
+            packets.append(pack_frame(4203, 0, current))
+    if packets and int.from_bytes(packets[0][8:12], "big") == 4202:
+        packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
+        if not update:
+            packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     collection.observe(save, role_config, before)
     achievements.observe(save, role_config, before)
     activities.settle_liveness(save, role_config, now)
