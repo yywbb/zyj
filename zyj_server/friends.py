@@ -7,7 +7,7 @@ import random
 import re
 import secrets
 
-from . import activities, battle, cheer, formation, guild, pets, storage
+from . import activities, artifact, battle, cheer, formation, guild, pets, storage
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
@@ -253,6 +253,7 @@ def public_slots(save):
     generals = {pb_get_varint(v, 2) for v in slots}
     equips = {pb_get_varint(v, k) for v in slots for k in range(4, 10)}
     souls = {pb_get_varint(v, k) for v in slots for k in range(10, 18)}
+    artifacts = {pb_get_varint(v, 26) for v in slots}
     gems = {v for n, w, data in fields if w == 2 and 8 <= n <= 15 for fn, wt, v in iter_pb_fields(data) if (fn, wt) == (1, 0)}
     output = bytearray()
     for n, w, value in fields:
@@ -260,7 +261,8 @@ def public_slots(save):
             continue
         if (n in (4, 5) and value in slots or n == 6 or 8 <= n <= 15
                 or n == 1 and pb_get_varint(value, 2) in generals
-                or n in (2, 3, 7) and pb_get_varint(value, 1) in {2: equips, 3: souls, 7: gems}[n]):
+                or n in (2, 3, 7) and pb_get_varint(value, 1) in {2: equips, 3: souls, 7: gems}[n]
+                or n == 16 and artifact.iid(value) in artifacts):
             output.extend(encode_pb_field(n, w, value))
     if not generals or not any(n == 6 for n, w, v in fields):
         raise ValueError("对方公开阵容尚未初始化")

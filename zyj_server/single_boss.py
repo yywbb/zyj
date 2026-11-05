@@ -7,7 +7,7 @@ from fractions import Fraction
 import json
 import random
 
-from . import activities, battle, cheer, deployment, development, formation, pets, recharge
+from . import activities, artifact, battle, cheer, deployment, development, formation, pets, recharge
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_varint
 
 QUERIES = (3700, 3702)
@@ -109,14 +109,16 @@ def project_team(save, team, config):
         + b"".join(encode_pb_field(1, 2, v) for _, v in sorted(generals.items()))
         + b"".join(encode_pb_field(4, 2, v) for _, v in sorted(slots.items()))
         + b"".join(encode_pb_field(5, 2, v) for _, v in sorted(cheers.items()))).hex()
-    update, delta = deployment.differences(temporary, save, config)
-    if not 0 <= power + delta < (1 << 31):
-        raise ValueError("专用阵容灵阵战力超出范围")
-    if update:
-        changed = formation.records(update, 1, 2)
-        temporary["world_state"]["1002"] = b"".join(encode_pb_field(n, w, changed.get(pb_get_varint(v, 2), v) if (n, w) == (1, 2) else v)
-            for n, w, v in iter_pb_fields(bytes.fromhex(temporary["world_state"]["1002"]))).hex()
-    return temporary, power + delta
+    for module in (artifact, deployment):
+        update, delta = module.differences(temporary, save, config)
+        power += delta
+        if not 0 <= power < (1 << 31):
+            raise ValueError("专用阵容神器/灵阵战力超出范围")
+        if update:
+            changed = formation.records(update, 1, 2)
+            temporary["world_state"]["1002"] = b"".join(encode_pb_field(n, w, changed.get(pb_get_varint(v, 2), v) if (n, w) == (1, 2) else v)
+                for n, w, v in iter_pb_fields(bytes.fromhex(temporary["world_state"]["1002"]))).hex()
+    return temporary, power
 
 
 def rosters(save, team, row, config):

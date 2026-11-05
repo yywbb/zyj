@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import cover, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
+from . import artifact, cover, equip_baptize, equip_evolve, godstone, magic, pets, sigil, soul, treasure_refine, wing
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 
@@ -89,6 +89,7 @@ def rosters(save, point, config):
     souls, _ = soul.read_world(save, config)
     wings = wing.get_state(save, config)
     covers, _ = cover.bonuses(save, config)
+    artifacts, _ = artifact.read_world(save, config)
     protagonist_raw = bytes.fromhex(save.get("protagonist_snapshot", "")) or next((v for n, w, v in fields if (n, w) == (6, 2)), b"")
     protagonist = pb_get_varint(protagonist_raw, 1)
     for n, w, slot in fields:
@@ -111,6 +112,10 @@ def rosters(save, point, config):
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
             raise ValueError("阵位或上阵武将重复")
         unit["skill"] = config["general"][str(unit["cid"])]["skillid"]
+        worn = pb_get_varint(slot, 26) or 0
+        if worn:
+            data = artifact.values(artifacts[worn])
+            unit["artifact"] = {"cid": data[1], "level": data[13], "skills": [sid for sid in data[6:9] if sid]}
         mask = covers[index]
         if mask["level"]:
             unit.update(cover_l=mask["level"], cover_d=mask["value"], cover_p=mask["percent"], skill_resilience=mask["skill_resilience"])
@@ -304,6 +309,10 @@ def _prepare_teams(teams, config):
             if min(added, reduced, unit["cover_d"]) < 0 or not 0 <= unit.get("cover_p", 0) <= 100:
                 raise ValueError("增减伤或魔罩属性无效")
             unit.update(out_multiplier=1 + Fraction(str(added)), in_multiplier=1 / (1 + Fraction(str(reduced))))
+            unit["artifact_effects"] = artifact.combat_effects(unit.get("artifact"), config)
+            unit["artifact_used"] = {}
+            if "神降" in unit["artifact_effects"]:
+                unit["out_multiplier"] *= 1 + Fraction(str(unit["artifact_effects"]["神降"]["value"]))
             unit["base"] = {name: unit.get(name, 0) for name in stats}
             for row in rows:
                 attr, code = row["attr"], row["type_param"] or row["id"]
@@ -471,6 +480,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                                       **({key: unit[key] for key in ("cover_d", "cover_d2", "cover_p", "cover_l")} if unit["cover_d"] else {})}
             if unit.get("w_l"):
                 meta[str(unit["iid"])].update(w_l=unit["w_l"], w_c=unit.get("w_c", 0))
+            if unit.get("artifact"):
+                meta[str(unit["iid"])].update(a_cid=unit["artifact"]["cid"], a_level=unit["artifact"]["level"])
         report["meta"][side] = {"n": "本地玩家" if direct else next(iter(team.values())).get("name", "守关队伍"),
                                 "g": meta, "pet": {}, "cheer": cheers[direct]}
         report["b"]["init"][side] = initial
@@ -499,13 +510,18 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if len(actions) > 2000:
             raise ValueError("战斗事件超出上限，未结算")
 
-    def change_hp(unit, amount, status="N", hits=0, *, shield=True, healing=False):
-        if amount < 0 and healing and unit["states"].get("close", 0) > round_number:
+    def change_hp(unit, amount, status="N", hits=0, *, shield=True, healing=False, unsealed=False, bypass_barrier=False):
+        if amount < 0 and healing and not unsealed and unit["states"].get("close", 0) > round_number:
             amount = 0
         if amount < 0:
             amount = -int(-amount * (1 + unit.get("soul_effects", {}).get("heal", 0)))
         if amount > 0 and unit["states"].get("invincible", 0) > round_number:
             amount, status = 0, "proof"
+        barrier_end = False
+        if amount > 0 and unit.get("artifact_barrier", 0) and round_number < 2 and not bypass_barrier:
+            amount, status = 0, "proof"
+            unit["artifact_barrier"] -= 1
+            barrier_end = unit["artifact_barrier"] == 0
         if amount > 0 and unit.get("absorbing"):
             amount, status = -min(amount, unit["maxhp"] - unit["hp"]), "N"
         absorbed = min(unit["cover_d"], int(max(0, amount) * Fraction(unit.get("cover_p", 0), 100))) if shield else 0
@@ -521,7 +537,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             report["dead_log"][str(unit["direct"]).lower()][str(unit["cid"])] = round_number
             if previous:
                 pending_deaths.append(unit)
-        return dest(unit, m={"m": amount, "f": 0, "u": status, "U": hits, **({"M": absorbed} if absorbed else {})})
+        return dest(unit, m={"m": amount, "f": 0, "u": status, "U": hits, **({"M": absorbed} if absorbed else {})},
+                    **({"u": {"u": "invincible", "w": False}} if barrier_end else {}))
 
     def damage_hp(unit):
         return unit["maxhp"] if unit.get("absorbing") else unit["hp"] + unit["cover_d"]
@@ -593,6 +610,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             multiplier *= 1 + effect(actor, 9000032)
         if target["hp"] > actor["hp"]:
             multiplier *= 1 + effect(actor, 9000037)
+        for name, eligible in (("蔑视", stat(actor, "atk") > stat(target, "atk")), ("无畏", stat(actor, "atk") < stat(target, "atk"))):
+            if eligible and name in actor["artifact_effects"]:
+                multiplier *= 1 + Fraction(str(actor["artifact_effects"][name]["value"]))
         multiplier *= 1 + effect(actor, 9000429) * (target["hp"] * 10 // target["maxhp"])
         multiplier *= 1 + effect(actor, 9000430) * ((target["maxhp"] - target["hp"]) * 10 // target["maxhp"])
         if target["ap"] <= 2:
@@ -624,7 +644,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         amount = damage({**actor, "atk": stat(actor, "atk")},
                         {**target, "def": stat(target, "def"), "hp": damage_hp(target)}, config,
                         multiplier=coefficient * multiplier, flat=flat, final_multiplier=final) if coefficient else int(max(0, int(fixed * multiplier) + flat) * final)
-        return change_hp(target, amount)
+        return change_hp(target, amount, bypass_barrier=True)
 
     def deaths():
         while pending_deaths:
@@ -672,6 +692,81 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
     def change_ap(unit, amount):
         unit["ap"] = max(0, min(10, unit["ap"] + amount))
         return dest(unit, ap=unit["ap"], E=True)
+
+    def artifact_trigger(unit, name, *, certain=False):
+        row = unit["artifact_effects"].get(name)
+        if (unit["hp"] <= 0 or not row or unit["artifact_used"].get(name) == round_number
+                or not certain and not roll(Fraction(str(row["value"])) )):
+            return None
+        unit["artifact_used"][name] = round_number
+        return row
+
+    def artifact_event(unit, row, changes):
+        if changes:
+            event(changes, None if unit["dizzy"] or not row["animationid"] else
+                  {"r": unit["direct"], "p": [unit["pos"]], "t": "break", "S": row["id"]})
+
+    def artifact_after(actor, skill, hits, killed, reaction, followup):
+        enemies = teams[not actor["direct"]]
+        survivors = [u for u in hits if u["hp"] > 0]
+        if not skill and hits:
+            row = artifact_trigger(actor, "贪婪")
+            if row:
+                artifact_event(actor, row, [change_ap(actor, 2)])
+            if survivors:
+                row = artifact_trigger(actor, "怒损")
+                if row:
+                    artifact_event(actor, row, [change_ap(survivors[0], -2)])
+            for target in survivors:
+                for name in ("狂躁", "鼓舞"):
+                    row = artifact_trigger(target, name)
+                    if row:
+                        ally = target if name == "狂躁" else min(living(enemies), key=lambda u: (u["ap"], u["pos"]))
+                        artifact_event(target, row, [change_ap(ally, 2)])
+        if skill and not reaction and not followup:
+            for name in ("狂怒", "怒蚀", "扼制", "侵蚀", "腐蚀", "滋养", "救赎"):
+                candidates = living(enemies) if name in ("怒蚀", "扼制") else survivors
+                if name in ("侵蚀", "腐蚀") and (skill["kind"] != "attack" or not candidates):
+                    continue
+                if name in ("怒蚀", "扼制") and not candidates:
+                    continue
+                row = artifact_trigger(actor, name, certain=name in ("滋养", "救赎"))
+                if not row:
+                    continue
+                changes = []
+                if name == "狂怒":
+                    changes = [change_ap(actor, 2)]
+                elif name == "怒蚀":
+                    changes = [change_ap(min(candidates, key=lambda u: (-stat(u, "atk"), u["pos"])), -2)]
+                elif name == "扼制":
+                    for target in sorted(rng.sample(candidates, min(len(candidates), rng.randint(1, 2))), key=lambda u: u["pos"]):
+                        changes.extend(set_state(target, "skilllock"))
+                elif name in ("侵蚀", "腐蚀"):
+                    for target in candidates:
+                        change = buff(target, {"effect": "weaken", "effect-param": "atk;0.25" if name == "侵蚀" else "def;0.5", "effect-round": 2})
+                        if change:
+                            changes.append(change)
+                elif name in ("滋养", "救赎"):
+                    amount = int((stat(actor, "atk") if name == "滋养" else actor["maxhp"]) * Fraction(str(row["value"])))
+                    changes = [change_hp(actor, -amount, healing=True, unsealed=True)]
+                    if name == "滋养":
+                        actor["artifact_regen"] = (int(stat(actor, "atk") * Fraction(str(row["value2"]))), round_number, row)
+                artifact_event(actor, row, changes)
+        if killed:
+            row = artifact_trigger(actor, "嗜战")
+            if row:
+                artifact_event(actor, row, [change_ap(actor, 2)])
+        if not reaction and actor["hp"] > 0 and not actor["dizzy"] and not finished():
+            name = "连击" if not skill and hits else "残暴" if killed else None
+            row = artifact_trigger(actor, name) if name else None
+            if row:
+                # 额外普攻不借当前怒气改成技能，不再衍生反击或连锁追击。
+                target = targets(actor, enemies, None, rng)[0]
+                act(actor, target, reaction=True)
+            if killed and name != "残暴":
+                row = artifact_trigger(actor, "残暴")
+                if row and not finished():
+                    act(actor, targets(actor, enemies, None, rng)[0], reaction=True)
 
     def choose_combo(actor, friends, enemies):
         general = config["general"][str(actor["cid"])]
@@ -818,7 +913,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                                 {**target, "def": stat(target, "def"), "hp": damage_hp(target)},
                                 config, sid, multiplier=modifiers(actor, target) * guard(target),
                                 flat=actor["flat_out"] - target["flat_in"], combo=True)
-            change = change_hp(target, amount, hits=skill["count"], shield=sid not in (12640, 12647))
+            change = change_hp(target, amount, hits=skill["count"], shield=sid not in (12640, 12647), bypass_barrier=sid in (12640, 12647))
             if target["hp"] > 0:
                 if sid == 12641:
                     target["ap"] = max(0, target["ap"] - skill["ap_reduce"])
@@ -890,7 +985,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     amount = damage({**actor, "atk": stat(actor, "atk")}, {**target, "def": stat(target, "def"), "hp": damage_hp(target)},
                         config, sid, combo=True, multiplier=modifiers(actor, target) * guard(target), flat=actor["flat_out"] - target["flat_in"],
                         final_multiplier=max(0, 1 - target.get("soul_effects", {}).get("antiblew", 0)))
-                changes.append(change_hp(target, amount, shield=sid != 12986))
+                changes.append(change_hp(target, amount, shield=sid != 12986, bypass_barrier=True))
             actor["ap"] = skill["ap_give"]
             if sid == 12987:
                 amount, actor["hp"] = actor["hp"], 0
@@ -1114,6 +1209,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                         extra_kills += int(target["hp"] == 0)
             kill_recovery(actor, extra_kills)
             deaths()
+            killed += extra_kills
         if skill and skill["kind"] == "attack" and skill.get("effect") == "promote" and roll(skill["effect-trigger"]):
             change = buff(actor, skill)
             if change and actor["hp"] > 0:
@@ -1131,6 +1227,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     reactions += act(actor, target, followup=(skill, participants, old_ap), chain=chain + 1)
             elif combo_id == 13017 and base_skill and roll(Fraction(male_count, 10)):
                 reactions += act(actor, followup=(base_skill, [actor["pos"]], base_skill["ap"]))
+        artifact_after(actor, skill, hit_targets, killed, reaction, followup)
         return reactions
 
     def pet_action(direct, pet):
@@ -1198,6 +1295,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if unit["cid"] in QUEENS:
                 event([dest(u, m={"m": 0, "f": 0, "u": "N", "U": 0}) for _, u in sorted(team.items())],
                       {"r": unit["direct"], "p": [unit["pos"]], "t": "x", "S": 12859})
+            row = unit["artifact_effects"].get("屏障")
+            if row and roll(Fraction(str(row["value2"]))):
+                unit["artifact_barrier"] = 2
+                artifact_event(unit, row, [state_event(unit, "invincible", True)])
     for round_number in range(1, max_rounds + 1):
         if round_number > 1:
             event([])
@@ -1205,6 +1306,12 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             break
         for team in teams.values():
             for unit in living(team):
+                if round_number == 2 and unit.get("artifact_barrier", 0):
+                    unit["artifact_barrier"] = 0
+                    event([state_event(unit, "invincible", False)])
+                regen = unit.get("artifact_regen")
+                if regen and regen[1] < round_number <= regen[1] + 2:
+                    artifact_event(unit, regen[2], [change_hp(unit, -regen[0], healing=True, unsealed=True)])
                 if round_number == 4 and unit.get("absorbing"):
                     unit["absorbing"] = False
                 if unit.get("boss_passive") == 12648:

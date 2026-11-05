@@ -10,7 +10,7 @@ GIFTS = {PET_GIFT: ("pet_gift_state", 59), 130013: ("stone_gift_state", 104), 13
           130009: ("equip_star_gift_state", 93), 130006: ("wing_gift_state", 86),
           130019: ("equip_injection_gift_state", 79),
           130005: ("cover_gift_state", 97), 130017: ("cover_advance_gift_state", 78), 130026: ("cover_soaring_gift_state", 102),
-          130018: ("gamestar_gift_state", None), 130008: ("deployment_gift_state", 90)}
+          130018: ("gamestar_gift_state", None), 130008: ("deployment_gift_state", 90), 130011: ("artifact_gift_state", 80)}
 QUERIES = (2880,)
 MUTATIONS = (2881, 2882)
 OPCODES = QUERIES + MUTATIONS

@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, nightclub, soul, wing
+from . import achievements, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, nightclub, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -21,7 +21,7 @@ from .protocol import (
 print_flush = functools.partial(print, flush=True)
 
 WORLD_QUERY_IDS = (1002, 1012, 1107, 1200, 1300)
-SLOT_RECORD_KEYS = {1: 2, 2: 1, 3: 1, 4: 1, 5: 1, 7: 1, 17: 1}
+SLOT_RECORD_KEYS = {1: 2, 2: 1, 3: 1, 4: 1, 5: 1, 7: 1, 16: 1, 17: 1}
 STAMINA_INTERVAL = 360  # 多份 Role 抓包的全部/下次恢复倒计时之差可交叉验证。
 
 # role_pb.Role 的字段号。
@@ -68,7 +68,7 @@ def load_role_config(config_path):
                              "month_welfare", "month_growup", "week_growup_1", "week_growup_2_1",
                              "week_growup_money_1", "week_growup_money_2_1", "recharge_gift_1",
                              "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
-                             "trump", "trump_gem", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
+                             "trump", "trump_gem", "trump_config", "trump_autweight", "trump_timeweight", "trump_skillRnd", "trump_rank", "trump_numskill", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
                              "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "pet3_illustrated", "trigger_gift2", "boss2", "boss2_rewards1", "boss2_rewards2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
@@ -369,7 +369,7 @@ def merge_pb_records(base, update, keys):
         if wire != 2:
             raise ValueError("重复记录必须是嵌套消息")
         list(iter_pb_fields(value))
-        iid = pb_get_varint(value, keys[field])
+        iid = artifact.iid(value) if field == 16 else pb_get_varint(value, keys[field])
         if iid is None or not 0 < iid < (1 << 31):
             raise ValueError("重复记录缺少有效标识")
         return field, iid
@@ -690,6 +690,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body, costs = deployment.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
+    elif opcode in artifact.OPCODES:
+        body, costs, update = artifact.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if update:
+            record_slot_update(save, update)
     elif opcode in cover.OPCODES:
         body, costs, reward, update, delta = cover.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
@@ -1243,12 +1249,12 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     soul_change = responses and (responses[0]["opcode"] in soul.OPCODES or responses[0]["opcode"] == 1007 and parse_ids_pb(request_body)[1:2] == [2])
     if soul_change and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1002, 0, bytes.fromhex(save["world_state"]["1002"])))
-    if responses and responses[0]["opcode"] in (1058, *champion.MUTATIONS, *gamestar.MUTATIONS, *dragon_wishing.MUTATIONS, *nightclub.MUTATIONS, *exchange.MUTATIONS, *penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
+    if responses and responses[0]["opcode"] in (1058, *artifact.MUTATIONS, *champion.MUTATIONS, *gamestar.MUTATIONS, *dragon_wishing.MUTATIONS, *nightclub.MUTATIONS, *exchange.MUTATIONS, *penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
         packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
     if responses and responses[0]["opcode"] in (1120, 1365, *equip_evolve.OPCODES, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     baptize_cost = responses and responses[0]["opcode"] in equip_baptize.OPCODES and save["world_state"]["1002"] != before["world_state"]["1002"]
-    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 1058, 1305, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *champion.MUTATIONS, *gamestar.MUTATIONS, *dragon_wishing.MUTATIONS, *nightclub.MUTATIONS, *exchange.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES, *wing.MUTATIONS, *cover.MUTATIONS):
+    if automatic_reward or baptize_cost or responses and responses[0]["opcode"] in (301, 1058, 1305, 3624, 3626, 3628, 1046, 1061, 1062, 1065, 3674, 3675, *artifact.MUTATIONS, *champion.MUTATIONS, *gamestar.MUTATIONS, *dragon_wishing.MUTATIONS, *nightclub.MUTATIONS, *exchange.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES, *wing.MUTATIONS, *cover.MUTATIONS):
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     pet_update = save.get("pet_state") != before.get("pet_state") and save["world_state"]["1002"] != before["world_state"]["1002"]
     if pet_update or self_update:
@@ -1267,10 +1273,14 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
 
 
 def save_response_group(packets, save, before, save_path, step_counts, role_config, now):
-    # 全队条件可被换将、成长及GM改变；统一结算差值，不把灵阵加成当作基础成长。
-    update, delta = deployment.differences(save, before, role_config)
+    # 神器和全队条件随换将/成长变化；统一结算差值，不能再次当作基础成长。
+    update = b""
+    for module in (artifact, deployment):
+        changed, delta = module.differences(save, before, role_config)
+        if changed:
+            apply_sigil_update(save, changed, delta, role_config)
+            update += changed
     if update:
-        apply_sigil_update(save, update, delta, role_config)
         previous, state = get_role_state(before, role_config), save["role_state"]
         packets = [p for p in packets if int.from_bytes(p[8:12], "big") != 205]
         power = b"".join(encode_pb_field(1, 0, v & ((1 << 64)-1)) for v in
@@ -1280,6 +1290,11 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
         if any(state[k] != previous[k] for k in ("power", "g_power", "power_all")):
             packets.append(pack_frame(205, 0, power))
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
+    if packets and int.from_bytes(packets[0][8:12], "big") in artifact.MUTATIONS:
+        if not update:
+            packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
+        if int.from_bytes(packets[0][8:12], "big") == 5503:
+            packets[0] = pack_frame(5503, int.from_bytes(packets[0][12:16], "big"), general_foster.comb(((1, bytes.fromhex(save["world_state"]["1002"])),)))
     if "deployment_state" in save:
         current = deployment.query(save, role_config)
         for i, packet in enumerate(packets):

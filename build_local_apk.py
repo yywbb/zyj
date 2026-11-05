@@ -2866,6 +2866,150 @@ def patch_game_helper_scripts(patched):
     put("UIErrorMessage", replace(code, marker, marker+'    if LocalHelperUIError and LocalHelperUIError(t) then return end\n'))
 
 
+def patch_artifact_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    def block(code, prefix, method, transform):
+        matches = list(re.finditer(rf"^function\s+{prefix}[.]{method}\(", code, re.MULTILINE))
+        assert len(matches) == 1, (prefix, method)
+        start = matches[0].start()
+        end = code.find("\nfunction ", start+1)
+        if end == -1:
+            end = code.index(f"\nreturn {prefix}", start)
+        return code[:start] + transform(code[start:end]) + code[end:]
+
+    def generation(part):
+        line = part.index("\n")+1
+        return part[:line] + "    self.localArtifactGeneration=(self.localArtifactGeneration or 0)+1\n" + part[line:]
+
+    def guarded(part, *, animation=False, root="rootNode", condition=""):
+        line = part.index("\n")+1
+        if part[line:].startswith("    self.localArtifactGeneration="):
+            line = part.index("\n", line)+1
+        capture = "    local generation=self.localArtifactGeneration\n"
+        check = f"not self.{root} or self.localArtifactGeneration~=generation"
+        if animation:
+            capture += "    self.localArtifactAnimation=(self.localArtifactAnimation or 0)+1\n    local animation=self.localArtifactAnimation\n"
+            check += " or self.localArtifactAnimation~=animation"
+        if "target" in condition:
+            capture += "    local target=self.artifactSelect and self.artifactSelect.iid\n"
+        check += condition
+        part = part[:line]+capture+part[line:]
+        return re.sub(r"(function\s*\([^)]*\)\s*\n)", r"\1        if "+check+r" then return end\n", part)
+
+    for name, filename in (("GameArtifact", "artifact_network.lua"), ("UIArtifact", "artifact_ui.lua")):
+        code = load(name)
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, code+"\n"+stream.read())
+    code = load("GameArtifact")
+    marker = "function getAllArtifacts()\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker+"    for _,v in pairs(gamedata.cache.artifacts) do v.sid=nil;v.generalcid=nil end\n")
+    marker = "        if iid and iid ~= 0 and artifacts[iid] then\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "        if v.general and v.general>0 and iid and iid ~= 0 and artifacts[iid] then\n")
+    put("GameArtifact", code)
+    code = load("GameSlots")
+    start = code.index("function NetSlotsAllInfoCallBack(fd)\n")
+    end = code.index("\nfunction ", start+1)
+    marker = "    gamedata:SlotInfoProcess(info)\n"
+    assert code[start:end].count(marker) == 1
+    part = code[start:end].replace(marker, "    gamedata.cache.artifacts={}\n"+marker)
+    put("GameSlots", code[:start]+part+code[end:])
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    put("GameErrorMessage", code.replace(marker, marker+"    if LocalArtifactError then LocalArtifactError(error.ids[1]) end\n"), "common_lua")
+
+    for name, prefix, methods in (
+        ("Layer_artifactCreate", "artifactCreate", ("init", "clear")),
+        ("Layer_artifactCheck", "artifactCheck", ("init", "clear")),
+        ("Layer_artifactList", "artifactList", ("init", "clear")),
+        ("Layer_slotsInfo", "slotsInfo", ("init", "clear")),
+        ("window_onceCreateArtifact", "onceCreateArtifact", ("open", "close")),
+        ("window_onceCheckup", "onceCheckup", ("open", "close")),
+        ("window_onceCheckedPanel", "onceCheckedPanel", ("shiftType", "close")),
+        ("window_artifactInfo", "artifactInfo", ("reload", "close")),
+        ("window_artifactSelect", "artifactSelect", ("open", "close")),
+        ("window_checkTimeList", "checkTimeList", ("open", "close")),
+    ):
+        code = load(name)
+        for method in methods:
+            code = block(code, prefix, method, generation)
+        if prefix == "artifactCreate":
+            code = block(code, prefix, "castSuccess", lambda p: guarded(p, animation=True, condition=' or self.selectpage~="cast"'))
+            code = block(code, prefix, "setBtnFuncs", guarded)
+            marker = "    self.rootItems.startbutton:addHandleOfControlEvent(function()\n"
+            assert code.count(marker) == 1
+            start = code.index(marker)
+            end = code.index("    self.rootItems.startbutton:setSwallowsTouch", start)
+            part = code[start:end].replace(marker, marker+'        if self.selectpage~="cast" then return end\n        local mode=self.propUse\n')
+            assert part.count("isUse = self.propUse") == 4
+            part = part.replace("isUse = self.propUse", "isUse = mode")
+            part = part.replace("if isContinue then", 'if isContinue and self.propUse==mode and self.selectpage=="cast" then')
+            code = code[:start]+part+code[end:]
+        elif prefix == "artifactCheck":
+            code = block(code, prefix, "checkSuccess", lambda p: guarded(p, animation=True, condition=' or (self.artifactSelect and self.artifactSelect.iid)~=target'))
+            code = block(code, prefix, "setBtnFuncs", guarded)
+            code = block(code, prefix, "setTime", lambda p: 'function artifactCheck.setTime(self,t)\n    return LocalArtifactTime(self,t,"artifactCheck")\nend\n')
+        elif prefix == "onceCheckedPanel":
+            for method in ("loadOneOfTen", "reloadten", "repeataction"):
+                code = block(code, prefix, method, lambda p: guarded(p, root="root"))
+        elif prefix == "checkTimeList":
+            code = block(code, prefix, "setTime", lambda p: 'function checkTimeList.setTime(self,t)\n    return LocalArtifactTime(self,t,"checkTimeList")\nend\n')
+        elif prefix == "artifactInfo":
+            code = block(code, prefix, "reload", guarded)
+        elif prefix == "artifactSelect":
+            for method in ("setNormal", "setDetail", "createList"):
+                code = block(code, prefix, method, guarded)
+        elif prefix in ("onceCreateArtifact", "onceCheckup"):
+            code = block(code, prefix, "open", guarded)
+        if prefix == "slotsInfo":
+            marker = '                    gameWindows:openWindow("artifactSelect",{showType = "checked"},function(artifact)\n'
+            assert code.count(marker) == 1
+            code = code.replace(marker, '                    local artifactView=LocalArtifactContext()\n'+marker+'                        if not LocalArtifactMatch(artifactView,"slotsInfo") then return end\n')
+        put(name, code)
+    code = load("UIProps")
+    for order, names in ((33009, ("artifactCreate",)), (33013, ("onceCheckup", "artifactCheck"))):
+        marker = f"    elseif t.order == {order} then\n"
+        assert code.count(marker) == 1
+        check = " or ".join(f'LocalArtifactMatch(t.artifactView,"{name}")' for name in names)
+        code = code.replace(marker, marker+f"        if not LocalArtifactFresh(t) or not ({check}) then return end\n")
+    start = code.index("    elseif t.order == 33013 then\n")
+    end = code.index("    elseif t.order == 10261 then\n", start)
+    code = code[:start]+'''    elseif t.order == 33013 then
+        if not LocalArtifactFresh(t) then return end
+        local name=t.artifactView and t.artifactView.property
+        local page=LocalArtifactMatch(t.artifactView,name or "artifactCheck")
+        if page then
+            if name=="onceCheckup" or page.artifactSelect then page:checkPropNums(t.nums)
+            else page.propNeed=t.nums end
+        end
+'''+code[end:]
+    put("UIProps", code)
+    code = load("battleReportConvert")
+    marker = '    print(skillanimation.name .. ".json","makebreakSkill")\n'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    -- 原包缺滋养特效；保留真实治疗/状态，不读取不存在的JSON。
+    if skill.id>=9000487 and skill.id<=9000492 and not CCFileUtils:sharedFileUtils():isFileExist(skillanimation.name.."/"..skillanimation.name..".json") then
+        animation.type2="destonly"
+        animation.screenAnimation.actiontime=0.7
+        animation.screenAnimation.destdelay=0
+        makeDestEffect(animation,action,atkSlotInfo,defSlotInfo)
+        return
+    end
+'''+marker)
+    put("battleReportConvert", code)
+
+
 def get_patched_lua_scripts():
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
@@ -4079,6 +4223,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_nightclub_scripts(patched)
     patch_dragon_wishing_scripts(patched)
     patch_game_helper_scripts(patched)
+    patch_artifact_scripts(patched)
     patch_champion_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")

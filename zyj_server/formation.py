@@ -224,6 +224,9 @@ def strengthen_stones(save, body, config):
 
 
 def apply_slots(save, slots, config, *, cheers=None, souls=None):
+    # 撤下伙伴时释放神器，不能留在不可操作的空阵位。
+    slots = {sid: pb_set_varint(slot, 26, 0) if not pb_get_varint(slot, 2) and pb_get_varint(slot, 26) else slot
+             for sid, slot in slots.items()}
     world = bytes.fromhex(save["world_state"]["1002"])
     generals, old, equips = records(world, 1, 2), records(world, 4, 1), records(world, 2, 1)
     before = {pb_get_varint(v, 2): v for v in old.values() if pb_get_varint(v, 2)}
