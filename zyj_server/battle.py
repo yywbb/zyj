@@ -255,7 +255,7 @@ def _prepare_teams(teams, config):
     dynamic = {*range(9100001, 9100008), 9000001, 9000008, 9000015, 9000020, 9000021, 9000023, 9000024, 9000025,
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
                9000037, 9000038, 9000039, 9000040, 9000062, 9000400, 9000401, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
-               9000496, 9000501, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
+               9000496, 9000501, 9000502, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
                9000324, 9000327, 9000328, 9000329}
     flat_defense = {9000047, 9000049, 9000072, 9000078, 9000082}
     stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
@@ -1059,6 +1059,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     if change:
                         destinations.append(change)
                 reduction = (skill["ap_reduce"] if skill else 0) + (int(effect(actor, 9000020)) if target["dot"] else 0)
+                if not skill:
+                    reduction += sum(int(row["value"]) for row in actor["passive_rows"]
+                                     if row["type"] == 1 and (row["type_param"] or row["id"]) == 9000502
+                                     and target["ap"] >= row["value2"])
                 if reduction:
                     target["ap"] = max(0, target["ap"] - reduction)
                     destinations.append(dest(target, ap=target["ap"], E=True))

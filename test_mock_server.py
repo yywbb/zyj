@@ -6158,6 +6158,110 @@ class ReplayRoutingTests(unittest.TestCase):
         row.update({f"break{i}": pid for i, pid in enumerate(ids, 1)})
         return {**self.role_config, "general": {**self.role_config["general"], str(cid): row}}
 
+    def test_guangchengzi_pingyuan_actual_breakthrough_and_ap_threshold_on_both_sides(self):
+        for cid in (10608, 10830):
+            for advance in (7, 8):
+                for direct in (True, False):
+                    for ap in (3, 4, 10):
+                        with self.subTest(cid=cid, advance=advance, direct=direct, ap=ap):
+                            teams = {direct: {2: self.combat_unit(cid, advance=advance, initial_ap=0, speed=300)},
+                                     not direct: {2: self.combat_unit(10201, iid=1, initial_ap=ap)}}
+                            before = copy.deepcopy(teams)
+                            report = battle.simulate(teams[True], teams[False], self.role_config, 7, max_rounds=1)
+                            first = next(a for a in report["b"]["a"] if a["s"].get("r") is direct)
+                            drains = [d["ap"] for d in first["e"] if d["r"] is not direct and d.get("E")]
+                            self.assertEqual(drains, [ap - 2] if advance == 8 and ap >= 4 else [])
+                            if ap == 4:
+                                enemy = next(a for a in report["b"]["a"] if a["s"].get("r") is not direct and a["s"])
+                                self.assertEqual(enemy["s"]["t"], "N" if advance == 8 else "k")
+                            self.assert_battle_report(report)
+                            self.assertEqual(teams, before)
+                            self.assertEqual(report, battle.simulate(teams[True], teams[False], self.role_config, 7, max_rounds=1))
+
+    def test_pingyuan_requires_a_living_positive_basic_hit_but_shield_damage_counts(self):
+        config = self.passive_config(10201, 9000540)
+        for kind in ("basic", "skill", "dodge", "zero", "lethal", "shield", "proof"):
+            actor = self.combat_unit(10201, advance=1, speed=300, initial_ap=4 if kind == "skill" else 0)
+            target = self.combat_unit(10201, iid=1, initial_ap=4)
+            if kind == "dodge":
+                target["dodge"] = 100
+            elif kind == "zero":
+                actor["atk"], target["def"] = 1, 1000000
+            elif kind == "lethal":
+                target["hp"] = 1
+            elif kind == "shield":
+                target.update(cover_d=1000, cover_p=100, cover_l=1)
+            prepare = battle._prepare_teams
+            def protect(teams, role_config):
+                prepare(teams, role_config)
+                if kind == "proof":
+                    teams[False][2]["states"]["invincible"] = 2
+            with self.subTest(kind=kind), patch.object(battle, "_prepare_teams", side_effect=protect), patch.object(battle.random.Random, "random", return_value=0):
+                report = battle.simulate({2: actor}, {2: target}, config, 7, max_rounds=1)
+            first = next(a for a in report["b"]["a"] if a["s"].get("r"))
+            drains = [d["ap"] for d in first["e"] if not d["r"] and d.get("E")]
+            self.assertEqual(drains, [2] if kind in ("basic", "shield") else [])
+            self.assert_battle_report(report)
+
+    def test_pingyuan_stacks_matching_rows_once_at_the_original_threshold_not_barrier_id(self):
+        config = self.passive_config(10201, 9000540, 9999540, 9999541)
+        row = self.role_config["breakskill"]["9000540"]
+        config["breakskill"] = {**config["breakskill"], **{str(pid): {**row, "id": pid} for pid in (9999540, 9999541)}}
+        for ap in (3, 4, 10):
+            report = battle.simulate({2: self.combat_unit(10201, advance=3, speed=300, initial_ap=0)},
+                                     {2: self.combat_unit(10201, iid=1, initial_ap=ap)}, config, 7, max_rounds=1)
+            drains = [d["ap"] for d in report["b"]["a"][0]["e"] if not d["r"] and d.get("E")]
+            self.assertEqual(drains, [max(0, ap - 6)] if ap >= 4 else [])
+            self.assert_battle_report(report)
+        with self.assertRaisesRegex(ValueError, "9000502"):
+            battle.simulate({2: self.combat_unit(10201, advance=1)}, {2: self.combat_unit(10201, iid=1)},
+                            self.passive_config(10201, 9000502), 7, max_rounds=1)
+
+    def test_pingyuan_basic_counter_reduces_ap_without_another_skill_or_reaction_chain(self):
+        config = self.passive_config(10201, 9000540)
+        with patch.object(battle.random.Random, "random", return_value=0):
+            report = battle.simulate({2: self.combat_unit(10201, advance=1, parry=100, speed=1, initial_ap=0)},
+                                     {2: self.combat_unit(10201, iid=1, speed=300, initial_ap=2)}, config, 7, max_rounds=1)
+        drains = [d["ap"] for a in report["b"]["a"] if a["s"].get("r") for d in a["e"] if not d["r"] and d.get("E")]
+        self.assertEqual(drains, [2])
+        self.assertEqual([a["s"]["t"] for a in report["b"]["a"] if a["s"]], ["N", "N", "N"])
+        self.assert_battle_report(report)
+
+    def test_guangchengzi_current_challenge_cost_retry_reconnect_and_failed_save_are_atomic(self):
+        original = self.seed_activity_account()
+        for point in range(1, 10):
+            player.record_copy_win(original, recharge.ids([42168, point]), 3, self.role_config)
+        for win in (True, False):
+            saved = copy.deepcopy(original)
+            saved["role_state"]["stamina"] = 100
+            for iid, raw in self.entity_records(bytes.fromhex(saved["world_state"]["1002"]), 1, 2).items():
+                if iid == 7060:
+                    raw = protocol.pb_set_varint(protocol.pb_set_varint(raw, 1, 10608), 4, 8)
+                for field in (6, 7, 8, 9):
+                    raw = protocol.pb_set_varint(raw, field, 100000000 if win else 1)
+                player.record_slot_update(saved, protocol.encode_pb_field(1, 2, raw))
+                player.record_protagonist_general(saved, raw)
+            self.save_path.write_text(json.dumps(saved))
+            with self.subTest(win=win), redirect_stdout(io.StringIO()), patch.object(player.random, "getrandbits", return_value=7):
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                body = recharge.ids([42168, 10])
+                memory, disk = copy.deepcopy(session.save), self.save_path.read_bytes()
+                with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+                    session.handle(1306, 22000, body)
+                self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
+                session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                packets = session.handle(1306, 22000, body)
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1306)
+                self.assertEqual(protocol.pb_get_varint(packets[0][16:], 1), int(win))
+                self.assertEqual(session.save["role_state"]["stamina"], 100 - self.role_config["copy"]["42168"]["10"]["physical"])
+                self.assertEqual(session.save["role_state"]["coin"] > saved["role_state"]["coin"], win)
+                committed = self.save_path.read_bytes()
+                self.assertEqual(session.handle(1306, 22000, body), packets)
+                self.assertEqual(self.save_path.read_bytes(), committed)
+                reconnected = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+                self.assertEqual(reconnected.save["last_battle"], session.save["last_battle"])
+                self.assertEqual(reconnected.save["world_state"], session.save["world_state"])
+
     def test_rulai_actual_breakthrough_restores_lowest_ally_ap_on_both_sides(self):
         for cid in (10614, 10828):
             for advance in (7, 8):
@@ -6887,6 +6991,21 @@ class ReplayRoutingTests(unittest.TestCase):
                     for pos, unit in report["endmeta"][side].items():
                         self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
                         self.assertEqual(ext.endinfo[key][pos].ap, unit["ap"])
+
+            for cid in (10608, 10830):
+                for direct in (True, False):
+                    teams = {direct: {2: self.combat_unit(cid, advance=8, initial_ap=0, speed=300)},
+                             not direct: {2: self.combat_unit(10201, iid=1, initial_ap=4)}}
+                    report = battle.simulate(teams[True], teams[False], self.role_config, 7, max_rounds=3)
+                    self.assertTrue(any(d.get("ap") == 2 and d.get("E") and d["r"] is not direct
+                                        for a in report["b"]["a"] for d in a["e"]))
+                    native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
+                    atk, enemy = lua.globals().getBattleInitSlotInfo(native)
+                    animations, ext = lua.globals().convertBattleReportToAnimationSub(native, atk, enemy)
+                    for side, key in (("attack", "atk"), ("defense", "def")):
+                        for pos, unit in report["endmeta"][side].items():
+                            self.assertEqual(ext.endinfo[key][pos].hp, unit["h"])
+                            self.assertEqual(ext.endinfo[key][pos].ap, unit["ap"])
 
     def test_multicombo_invulnerability_and_seal_expire_without_losing_turns(self):
         attack, defense, config = self.combo_teams(12631)
