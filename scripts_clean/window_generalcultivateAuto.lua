@@ -394,7 +394,7 @@ function generalcultivate.numchange(self,num)
     local donum = self.donum + num
 
     if donum < 0 then return end
-    if donum > 200 then return end
+    if donum > 2000 then return end
 
     local needcostnum = self.costnum1*donum or 0
     local needstonenum = self.peiyangnum*donum or 0

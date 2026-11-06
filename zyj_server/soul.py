@@ -229,11 +229,11 @@ def prepare(opcode, save, body, config, now, seed):
         costs = [(1001, 100)]
         reply = encode_pb_field(1, 0, 1)
     elif opcode == 5345:
-        if len(values) != 2 or values[0] != 20617 or values[1] not in (1, 10, 100):
-            raise ValueError("本地道具购买仅支持猎命灵石1/10/100个")
+        if len(values) != 2 or values[0] not in (20617, 20619) or values[1] not in ((1, 10, 100) if values[0] == 20617 else (1, 10)):
+            raise ValueError("本地道具购买仅支持猎命灵石1/10/100个或高级招募令1/10个")
         from .guild_games import pairs
-        costs = list(pairs(config["gambling_gold"]["20617"][{1: "once1", 10: "tenfold1", 100: "hundredfold1"}[values[1]]]).items())
-        reply = reward = activities.build_reward(save, f"20617,{values[1]}", config)
+        costs = list(pairs(config["gambling_gold"][str(values[0])][{1: "once1", 10: "tenfold1", 100: "hundredfold1"}[values[1]]]).items())
+        reply = reward = activities.build_reward(save, f"{values[0]},{values[1]}", config)
     elif opcode in (1006, 1007):
         if opcode == 1006:
             fields = list(iter_pb_fields(body))

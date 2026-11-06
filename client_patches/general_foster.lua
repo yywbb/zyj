@@ -84,8 +84,8 @@ end
 
 function UIGeneralAutoTrainCallBack(req)
     if gamedata.ext.localFosterBusy then return busy() end
-    if not req.xlnum or req.xlnum < 1 or req.xlnum > 200 or req.xlnum % 1 ~= 0 then
-        return 0,503,{type=503,msg="自动培养次数须为1至200的整数"}
+    if not req.xlnum or req.xlnum < 1 or req.xlnum > 2000 or req.xlnum % 1 ~= 0 then
+        return 0,503,{type=503,msg="自动培养次数须为1至2000的整数"}
     end
     if not gamedata.cache.props[20009] or gamedata.cache.props[20009].num < req.xlnum then
         return 0,503,{type=503,msg="培养丹不足"}
