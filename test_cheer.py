@@ -331,6 +331,15 @@ class CheerTests(unittest.TestCase):
             package.loaded.logError={errorMessage={},errorFunc={}};printf=function() end
             initPb=function(mod,fd) local m=mod.Ids();m:ParseFromString(fd.rbuf);return m end''')
         scripts = self.client_scripts()
+        with zipfile.ZipFile(builder.SRC_APK) as archive:
+            modules = {name.rsplit("/", 1)[-1][:-3]: name for name in archive.namelist()
+                       if name.startswith(("assets/scripts/", "assets/pb/", "assets/common_lua/")) and name.endswith(".so")}
+        def module(name):
+            name = name.decode()
+            path = modules.get(name)
+            return (scripts.get(path) or builder.read_script(name, path.split("/")[1])) if path else None
+        lua.globals().cheer_module = module
+        lua.execute(b'table.insert(package.loaders,2,function(name) local raw=cheer_module(name);if raw then return assert(loadstring(raw,name)) end end)')
         lua.execute(scripts["assets/pb/localcoverupdate_pb.so"])
         lua.globals().cheer_shop = builder.read_script("GameActivitySafeMaskShop")
         lua.execute(b'package.preload.GameActivitySafeMaskShop=assert(loadstring(cheer_shop,"GameActivitySafeMaskShop"))')

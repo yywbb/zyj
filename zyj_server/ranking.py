@@ -106,8 +106,8 @@ def query(body, saves, viewer, config, state=None, opcode=3500):
             generals = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)
             if not generals:
                 continue
-            general = max(generals.values(), key=lambda raw: (pb_get_varint(raw, 20) or 0, -(pb_get_varint(raw, 2) or 0)))
-            score = pb_get_varint(general, 20) or 0
+            general = max(generals.values(), key=lambda raw: ((pb_get_varint(raw, 20) or 0)+(pb_get_varint(raw, 34) or 0), -(pb_get_varint(raw, 2) or 0)))
+            score = (pb_get_varint(general, 20) or 0)+(pb_get_varint(general, 34) or 0)
             params.extend((pb_get_varint(general, 1), pb_get_varint(general, 2), score))
         elif method == 19:
             score = state["g_power"]
@@ -128,7 +128,7 @@ def entry(account, save, config, previous=None):
     state = player.get_role_state(save, config)
     role = bytes.fromhex(save.get("role_snapshot", ""))
     world = bytes.fromhex(save["world_state"]["1002"])
-    general = max(formation.records(world, 1, 2).values(), key=lambda raw: pb_get_varint(raw, 20) or 0, default=b"")
+    general = max(formation.records(world, 1, 2).values(), key=lambda raw: (pb_get_varint(raw, 20) or 0)+(pb_get_varint(raw, 34) or 0), default=b"")
     copies = bytes.fromhex(save["world_state"]["1300"])
     stars = sum(pb_get_varint(point, 3) or 0 for n, w, raw in iter_pb_fields(copies) if (n, w) == (1, 2)
                 for f, t, point in iter_pb_fields(raw) if (f, t) == (7, 2))
@@ -148,7 +148,7 @@ def entry(account, save, config, previous=None):
     growth = max(0, state["power"] - baseline)
     if previous and previous["identity"] == identity:
         growth = max(growth, previous["scores"]["11"])
-    scores = {1: state["level"], 2: state["power"], 5: wing.score(save, config), 6: stars, 7: cover.score(save, config), 18: pb_get_varint(general, 20) or 0,
+    scores = {1: state["level"], 2: state["power"], 5: wing.score(save, config), 6: stars, 7: cover.score(save, config), 18: (pb_get_varint(general, 20) or 0)+(pb_get_varint(general, 34) or 0),
               11: growth, 12: sigils, 13: growth, 14: growth, 15: souls, 16: magic.rank_score(save, config), 17: score}
     if any(type(value) is not int or not 0 <= value < (1 << 31) for value in scores.values()):
         raise ValueError("本地榜单成绩超出范围")

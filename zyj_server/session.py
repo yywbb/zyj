@@ -7,7 +7,7 @@ import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, hades_copy, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from . import cheer, cup, equip_evolve, friends, guild_chat, soul
-from . import achievements, artifact, champion, collection, cover, deployment, dragon_wishing, examination, exchange, game_helper, gamestar, illusion, nightclub, wing
+from . import achievements, artifact, champion, collection, cover, deployment, dragon_wishing, examination, exchange, game_helper, gamestar, illusion, nightclub, partner_growth, wing
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -78,6 +78,7 @@ class Session:
         cover.get_state(self.save, role_config)
         gamestar.get_state(self.save, role_config)
         deployment.get_state(self.save, role_config)
+        partner_growth.state(self.save, role_config)
         collection.get_state(self.save, role_config)
         achievements.get_state(self.save, role_config)
         pets.get_state(self.save, role_config)
@@ -376,7 +377,7 @@ class Session:
                              or self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2))
         if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1016, 1305, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1004, 1005, 1007, 1009, 1130, 2038, *welfare.CLAIMS,
                                   *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS, *activity_copy.BATTLES, *hades_copy.MUTATIONS, *arena.MUTATIONS,
-                                  *watchstar.MUTATIONS, *artifact.MUTATIONS, *champion.MUTATIONS, *nightclub.MUTATIONS, *dragon_wishing.MUTATIONS, *gamestar.MUTATIONS, *deployment.MUTATIONS,
+                                  *watchstar.MUTATIONS, *artifact.MUTATIONS, *champion.MUTATIONS, *nightclub.MUTATIONS, *dragon_wishing.MUTATIONS, *gamestar.MUTATIONS, *deployment.MUTATIONS, *partner_growth.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS, *exchange.MUTATIONS,
                                   *daily_events.CLAIMS, *collection.MUTATIONS, *achievements.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES,
@@ -430,7 +431,7 @@ class Session:
 
         if opcode in (204, 300, *exchange.QUERIES, 1304, 1350, *hades_copy.QUERIES, *collection.QUERIES, *achievements.QUERIES, *soul.QUERIES, *player.WORLD_QUERY_IDS, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *artifact.QUERIES, *champion.QUERIES, *nightclub.QUERIES, *dragon_wishing.QUERIES, *gamestar.QUERIES, *deployment.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
-                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES, *penglai.QUERIES, *single_boss.QUERIES, *sigil.QUERIES, *magic.QUERIES, *wing.QUERIES, *cover.QUERIES, *illusion.QUERIES):
+                      *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES, *penglai.QUERIES, *single_boss.QUERIES, *sigil.QUERIES, *magic.QUERIES, *wing.QUERIES, *cover.QUERIES, *illusion.QUERIES, *partner_growth.QUERIES):
             working = copy.deepcopy(self.save)
             try:
                 baseline = next((data for frame in self.replay.master_comb_packets if frame["opcode"] == 999900

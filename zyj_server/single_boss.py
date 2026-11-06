@@ -34,9 +34,11 @@ def validate_team(save, team, config):
             continue
         raw = generals.get(iid)
         if (index > maximum or not raw
-                or not config["general"][str(pb_get_varint(raw, 1))]["battle"]
-                or any(pb_get_varint(raw, n) for n in range(21, 41))):
+                or not config["general"][str(pb_get_varint(raw, 1))]["battle"]):
             raise ValueError("专用阵位未解锁、伙伴不属于本人或含未实现的高级属性")
+        if any(pb_get_varint(raw, n) for n in range(21, 41)):
+            from . import partner_growth
+            partner_growth.validate(raw, config)
     if team[7] and team[7] not in {p[0] for p in pets.get_state(save, config)["pets"]}:
         raise ValueError("专用阵容魔宠不属于当前账号")
 

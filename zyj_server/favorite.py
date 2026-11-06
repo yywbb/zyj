@@ -144,9 +144,11 @@ def prepare(opcode, save, body, config, seed):
         if not rows and opcode == 3675 and str(cid) in state["generals"]:
             continue
         if (len(rows) != 1 or len(general_ids(rows[0], config)) != 1
-                or any(pb_get_varint(rows[0], n) for n in range(21, 41))
                 or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(rows[0]) if (n, w) == (41, 2))):
             raise ValueError("请选择实际拥有且不重复的普通伙伴")
+        if any(pb_get_varint(rows[0], n) for n in range(21, 41)):
+            from . import partner_growth
+            partner_growth.validate(rows[0], config)
     before = {cid: row[:] for cid, row in state["generals"].items()}
     costs, critical = [], 0
     if opcode == 3672:

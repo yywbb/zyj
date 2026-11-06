@@ -246,10 +246,13 @@ def _manage(save, action, data, config, step_counts, now):
         raise ValueError("武将不存在")
     raw = generals[iid]
     row = config["general"][str(pb_get_varint(raw, 1))]
-    if (not row["battle"] or any(pb_get_varint(raw, n) for n in range(21, 41))
+    if (not row["battle"]
             or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if n == 41 and w == 2)
             or iid in formation.records(world, 5, 2)):
         raise ValueError("暂不支持高级或助阵武将管理")
+    if any(pb_get_varint(raw, n) for n in range(21, 41)):
+        from .. import partner_growth
+        partner_growth.validate(raw, config)
     if action == "formation":
         position = data["position"]
         current = pb_get_varint(slots.get(iid, b""), 1) or 0
@@ -263,6 +266,8 @@ def _manage(save, action, data, config, step_counts, now):
         protagonist = pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
         if iid == protagonist or row["actor"] == "lead" or iid in qiankun.protected(save):
             raise ValueError("只能移除非主角的闲置武将，请先下阵")
+        from .. import partner_growth
+        partner_growth.remove(save, iid)
         save["world_state"]["1002"] = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world)
             if not (n == 1 and w == 2 and pb_get_varint(v, 2) == iid)).hex()
         general_foster.remove(save, iid)

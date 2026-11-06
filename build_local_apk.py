@@ -2425,6 +2425,110 @@ def patch_deployment_scripts(patched):
         put(name, code)
 
 
+def patch_partner_growth_scripts(patched):
+    def load(name, directory="scripts"):
+        key = f"assets/{directory}/{name}.so"
+        if key not in patched:
+            return read_script(name).decode("utf-8").replace("\r\n", "\n")
+        raw = xxtea_decrypt(patched[key], XXTEA_KEY)
+        return raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8")
+
+    def put(name, code, directory="scripts"):
+        patched[f"assets/{directory}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    for name, filename in (("GameGeneralBreak", "partner_growth_network.lua"), ("UIGenerals", "partner_growth_ui.lua")):
+        code = load(name)
+        if name == "UIGenerals":
+            for callback in ("UIGeneralBreak", "UIGeneralAwaken", "UIGeneralXiuLian", "UIPartnerFeiSheng"):
+                start = code.index(f"function {callback}(t)")
+                end = code.index("\nend", start)+len("\nend")
+                block = code[start:end].replace('    UIRequest({type = 10322, param = {"generals"}})', "")
+                block = block.replace("    UIRequest({type = 1001})", "")
+                code = code[:start]+block+code[end:]
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, code+"\n"+stream.read())
+    for name, prefix, methods in (("Layer_generalup", "generalup", ("init", "clear", "shiftPage")),
+                                   ("window_generalup", "generalInfo", ("open", "close", "shiftPage")),
+                                   ("window_generalInfo", "generalInfo", ("open", "close", "showPage"))):
+        code = load(name)
+        if name == "Layer_generalup":
+            marker = "function generalup.freshUI(self)\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker+'''    local hero=self.generalsdata and self.generalsdata[tostring(self.generalindex)]
+    if hero and self.localPartnerTarget~=hero.iid then
+        self.localPartnerTarget=hero.iid
+        self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1
+        self.autoJuexing=false;self.autoXiulian=false
+    end
+''')
+            marker = "    if not self.xiuLianData[self.data.general.iid] then\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    self.xiuLianData[self.data.general.iid]=nil\n"+marker)
+            for method in ("setPage_xiulian", "setPage_feisheng"):
+                marker = f"function generalup.{method}(self)\n"
+                assert code.count(marker) == 1
+                code = code.replace(marker, marker+"    UIRequest({type=5511,update=true})\n")
+        for method in methods:
+            marker = f"function {prefix}.{method}("
+            assert code.count(marker) == 1
+            pos = code.index("\n", code.index(marker))+1
+            code = code[:pos]+"    self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1\n    self.autoJuexing=false;self.autoXiulian=false\n"+code[pos:]
+        if name == "Layer_generalup":
+            start = code.index("function generalup.setTupoNext(")
+            end = code.index("\nend", start)+len("\nend")
+            block = code[start:end]
+            pos = block.index("\n")+1
+            block = block[:pos]+"    local generation,iid,advance=self.localPartnerGeneration,self.data.general.iid,self.data.general.level2\n"+block[pos:]
+            guard = "\n        if generation~=self.localPartnerGeneration or not self.data.general or iid~=self.data.general.iid or advance~=self.data.general.level2 then return end\n"
+            block = block.replace("function()", "function()"+guard).replace("local cb = function (  )", "local cb = function (  )"+guard)
+            code = code[:start]+block+code[end:]
+            start = code.index("function generalup.setFeiShengConsume(")
+            end = code.index("\nend", start)+len("\nend")
+            block = code[start:end]
+            pos = block.index("\n")+1
+            block = block[:pos]+"    local generation,iid,soar=self.localPartnerGeneration,self.data.general.iid,self.data.general.level8\n"+block[pos:]
+            guard = "\n        if generation~=self.localPartnerGeneration or not self.data.general or iid~=self.data.general.iid or soar~=self.data.general.level8 then return end\n"
+            block = block.replace("function()", "function()"+guard)
+            code = code[:start]+block+code[end:]
+        for method in (("resetPage_tupo", "resetPage_Awaken", "xiuLianSuccess", "feiShengCallback", "feishengUpStage") if name == "Layer_generalup" else ("resetPage_tupo",) if name == "window_generalup" else ()):
+            start = code.index(f"function {prefix}.{method}(")
+            end = code.index("\nend", start)+len("\nend")
+            block = code[start:end]
+            pos = block.index("\n")+1
+            block = block[:pos]+"    local generation,iid=self.localPartnerGeneration,self.data.general.iid\n"+block[pos:]
+            guard = "\n        if generation~=self.localPartnerGeneration or not self.data.general or iid~=self.data.general.iid then return end\n"
+            for marker in ("CCCallFunc:create(function()", "setAnimationCompletedCallback(function()", "local function func()"):
+                block = block.replace(marker, marker+guard)
+            code = code[:start]+block+code[end:]
+        put(name, code)
+    code = load("UIProps")
+    marker = "function UIPropQueryById(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker+"    if t.partnerView and not LocalPartnerGrowthPage(t.partnerView,true) then return end\n")
+    put("UIProps", code)
+    code = load("UIErrorMessage")
+    marker = "function UIErrorMessage(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker+'''    local page=LocalPartnerGrowthPage and LocalPartnerGrowthPage(t.partnerErrorView)
+    if page then
+        page.autoJuexing=false;page.autoXiulian=false
+        if page.ReloadData then page:ReloadData() end
+    end
+''')
+    put("UIErrorMessage", code)
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker+'''    if gamedata and gamedata.ext then
+        local pending=gamedata.ext.localPartnerGrowthBusy
+        if pending and pending.opcode==error.ids[1] then gamedata.ext.localPartnerGrowthBusy=nil end
+        local queue=gamedata.ext["partnerQuery"..tostring(error.ids[1])]
+        if queue and #queue>0 then table.remove(queue,1) end
+    end
+''')
+    put("GameErrorMessage", code, "common_lua")
+
+
 def patch_exchange_scripts(patched):
     for name, filename in (("GameActivityMultipleRebate", "exchange_network.lua"), ("UIActivityMultipleRebate", "exchange_ui.lua"),
                            ("GameGeneralCompound", "general_compound_network.lua"), ("UIGenerals", "general_compound_ui.lua")):
@@ -4333,6 +4437,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_artifact_scripts(patched)
     patch_champion_scripts(patched)
     patch_hades_scripts(patched)
+    patch_partner_growth_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")

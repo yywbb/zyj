@@ -1,6 +1,6 @@
 """主角魔晶培养/进阶/觉醒与普通伙伴突破；在事务副本上准备属性和消耗。"""
 
-from . import battle, cheer, formation, qiankun
+from . import battle, cheer, formation, partner_growth, qiankun
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 QUERIES = (1023, 1056)
@@ -194,7 +194,7 @@ def prepare(opcode, save, body, config):
                 raise ValueError("伙伴预览需要本账号武将IID")
             iid = values[0]
         else:
-            if len(values) not in (1, 2) or len(values) == 2 and values[1] != 0:
+            if len(values) not in (1, 2, 3) or len(values) == 2 and values[1] != 0:
                 raise ValueError("普通伙伴突破参数无效")
             matches = [i for i, raw in generals.items() if pb_get_varint(raw, 1) == values[0]]
             if len(matches) != 1:
@@ -204,9 +204,24 @@ def prepare(opcode, save, body, config):
         cid, level, previous = (pb_get_varint(raw, n) or 0 for n in (1, 3, 4))
         general = config["general"][str(cid)]
         target = previous + 1
-        # shortcut: 普通+1–10；红/金将转换需觉醒、好感和飞升业务一并实现。
+        if opcode == 1017 and target <= 10 and len(values) == 3:
+            raise ValueError("普通伙伴突破参数无效")
+        if target > 10:
+            if opcode == 1017 and (len(values) != 3 or values[2] != previous):
+                raise ValueError("高阶突破需要当前显示等级，请更新客户端并重新打开页面")
+            changed, costs = partner_growth.breakthrough(save, raw, values[1] if opcode == 1017 else 0, config, preview=opcode == 1023)
+            if opcode == 1023:
+                return encode_pb_field(1, 2, changed), [], b""
+            if str(iid) in save.get("general_foster_state", {}).get("pending", {}):
+                raise ValueError("请先保留或放弃当前伙伴的培养预览")
+            record = save.get("general_foster_state", {}).get("records", {}).get(str(iid))
+            if record:
+                record["cid"] = pb_get_varint(changed, 1)
+            changed = partner_growth.power(save, raw, changed)
+            update = encode_pb_field(1, 2, changed)
+            return update, costs, update
         if (not general["battle"] or general["quality"] not in (3, 4, 5, 6) or not general["init_cid"]
-                or target > 10 or any(pb_get_varint(raw, n) for n in range(21, 41))):
+                or any(pb_get_varint(raw, n) for n in range(21, 41))):
             raise ValueError("尚不支持此伙伴的高级突破")
         row = config["general_awake"][str(target)]
         if opcode == 1017:

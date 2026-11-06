@@ -99,9 +99,12 @@ def dispatch(state, floor, time_id, iid, save, config, now, rng):
     raw = roster.get(iid)
     general = config["general"].get(str(pb_get_varint(raw or b"", 1)), {})
     if (not raw or general.get("actor") == "lead" or not general.get("battle")
-            or general.get("init_cid") != pb_get_varint(raw, 1) or any(pb_get_varint(raw, n) for n in range(21, 41))
+            or not general.get("init_cid") or general.get("partner_id")
             or any(j["cid"] == general["init_cid"] for j in state["jobs"].values())):
         raise ValueError("伙伴不属于本人、已派驻或含未实现的高级数据")
+    if general["init_cid"] != pb_get_varint(raw, 1) or any(pb_get_varint(raw, n) for n in range(21, 41)):
+        from . import partner_growth
+        partner_growth.validate(raw, config)
     if len([r for r in config["general_fragment"].values() if r["general"] == general["init_cid"]]) != 1:
         raise ValueError("该伙伴没有唯一魂魄配置")
     ticks, texts = [], [int(v) for v in row["text_id"].split(";") if v]

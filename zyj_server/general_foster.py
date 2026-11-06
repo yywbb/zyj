@@ -129,11 +129,13 @@ def prepare(opcode, save, body, config, seed):
     cid = pb_get_varint(raw, 1)
     row = config["general"][str(cid)]
     if (iid == pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
-            or not row["battle"] or not row["init_cid"] or row["quality"] not in range(2, 7)
-            or (pb_get_varint(raw, 4) or 0) > 10 or pb_get_varint(raw, 3) <= 1
-            or any(pb_get_varint(raw, n) for n in range(21, 41))
+            or not row["battle"] or not row["init_cid"] or row["quality"] not in range(2, 8)
+            or pb_get_varint(raw, 3) <= 1
             or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
         raise ValueError("请选择2级以上普通伙伴，主角和高级对象暂不支持")
+    if (pb_get_varint(raw, 4) or 0) > 10 or any(pb_get_varint(raw, n) for n in range(21, 41)):
+        from . import partner_growth
+        partner_growth.validate(raw, config)
     state = get_state(save, config)
     # shortcut: 旧培养分配不倒算，有可验证的分配台账后再开放其转移。
     record = state["records"].get(str(iid), {"cid": cid, "units": [0, 0, 0]})

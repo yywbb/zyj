@@ -23,10 +23,12 @@ def assigned(save, config):
         raw = generals.get(iid)
         row = config["general"].get(str(pb_get_varint(raw or b"", 1)), {})
         if (sid > maximum or not raw or iid in seen or iid in main or not row.get("battle")
-                or row.get("actor") == "lead" or not row.get("init_cid") or row.get("quality") not in range(2, 7)
-                or (pb_get_varint(raw, 4) or 0) > 10 or any(pb_get_varint(raw, f) for f in range(21, 41))
+                or row.get("actor") == "lead" or not row.get("init_cid") or row.get("quality") not in range(2, 8)
                 or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
             raise ValueError("助阵伙伴未解锁、不属于本人、重复占用或含未实现的高级属性")
+        if (pb_get_varint(raw, 4) or 0) > 10 or any(pb_get_varint(raw, f) for f in range(21, 41)):
+            from . import partner_growth
+            partner_growth.validate(raw, config)
         if any(config["general"][str(pb_get_varint(g, 1))]["init_cid"] == row["init_cid"]
                for g in (*result.values(), *(generals[i] for i in main if i in generals))):
             raise ValueError("同源伙伴不能重复上阵或助阵")

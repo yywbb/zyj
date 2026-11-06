@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from . import activities, equip_baptize, equip_evolve, fashion, favorite, formation, general_foster, recharge, recruit
+from . import activities, equip_baptize, equip_evolve, fashion, favorite, formation, general_foster, partner_growth, recharge, recruit
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 
 QUERIES = (3704, 3850, 7030, 3780)
@@ -177,10 +177,14 @@ def prepare(opcode, save, body, config):
                 if divisor <= 0 or price < 0:
                     raise ValueError("培养重生费用配置无效")
                 costs.append((1001, config["renascence"][str(pb_get_varint(raw, 3))]["generallvcost"]
-                              + config["renascence"][str(pb_get_varint(raw, 4) or 0)]["breakcost"] + (2*used*price+divisor)//(2*divisor)))
+                              + config["renascence"][str(pb_get_varint(raw, 4) or 0)]["breakcost"]
+                              + config["renascence"][str(pb_get_varint(raw, 18) or 0)]["return"]
+                              + config["renascence"][str(pb_get_varint(raw, 23) or 0)]["feishengchongshengxiaohao"]
+                              + (2*used*price+divisor)//(2*divisor)))
                 updates += encode_pb_field(8, 2, baseline)
                 del state["receipts"][f"general:{iid}"]
                 general_foster.remove(save, iid)
+                partner_growth.remove(save, iid)
             else:
                 if not pristine_general(raw, config, save):
                     raise ValueError("强化过的伙伴请先安全重生，炼化未执行")
@@ -263,6 +267,7 @@ def prepare(opcode, save, body, config):
             state["receipts"].pop(f'{"general" if n == 1 else "equip"}:{iid}', None)
             if n == 1:
                 general_foster.remove(save, iid)
+                partner_growth.remove(save, iid)
     if gets[1000] + save["role_state"]["coin"] >= (1 << 63):
         raise ValueError("实际退款银币超出当前余额容量；未扣款、未重生，请保留装备和收据")
     reward = activities.build_reward(save, ";".join(f"{cid},{num}" for cid, num in gets.items() if num), config) + updates

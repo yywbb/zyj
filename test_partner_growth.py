@@ -1,0 +1,522 @@
+"""伙伴高阶成长：临时账号、真实配置、费用和失败回滚。"""
+
+import copy
+from collections import Counter
+from itertools import product
+import json
+import unittest
+import zipfile
+from unittest.mock import patch
+
+import test_soul
+import test_hades_battle
+import build_local_apk as builder
+from zyj_server import battle, cheer, development, formation, partner_growth, player, protocol, ranking, recruit
+
+
+def setUpModule():
+    test_soul.setUpModule()
+
+
+class PartnerGrowthTests(unittest.TestCase):
+    request = test_soul.SoulTests.request
+    add_account = test_soul.SoulTests.add_account
+    success = test_soul.SoulTests.success
+    reconnect = test_soul.SoulTests.reconnect
+    refresh = test_soul.SoulTests.refresh
+    grant = test_soul.SoulTests.grant
+    props = test_soul.SoulTests.props
+    gen = test_soul.SoulTests.gen
+    assert_rejected = test_soul.SoulTests.assert_rejected
+    client_scripts = classmethod(test_soul.SoulTests.client_scripts.__func__)
+    network_lua = test_soul.SoulTests.network_lua
+    client_call = test_soul.SoulTests.client_call
+
+    def setUp(self):
+        test_soul.SoulTests.setUp(self)
+        self.save["role_state"].update(level=150, coin=10**12, gold=1000000)
+        self.iid = 2000900
+        self.put_hero()
+
+    def put_hero(self, cid=10609, advance=10, awake=40, level=300):
+        row = self.config["general"][str(cid)]
+        raw = recruit.new_general(cid, self.iid, self.config)
+        for field, value in ((3, level), (4, advance), (18, awake)):
+            raw = protocol.pb_set_varint(raw, field, value)
+        for name, field in (("atk", 6), ("def", 7), ("hp", 8), ("speed", 9)):
+            raw = protocol.pb_set_varint(raw, field, int(battle.general_base(row, name, level, advance, self.config)))
+        permanent = battle.self_stats(row, level, advance, self.config)
+        awaken = partner_growth.awakened(raw, self.config)
+        for field in range(6, 17):
+            raw = protocol.pb_set_varint(raw, field, (protocol.pb_get_varint(raw, field) or 0)+permanent[field]+awaken.get(field, 0))
+        raw = protocol.pb_set_varint(raw, 17, row["potential"]+int(row["potential-grow"]*(level-1)))
+        raw = protocol.pb_set_varint(raw, 20, sum(protocol.pb_get_varint(raw, f) for f in (6, 7, 9))+protocol.pb_get_varint(raw, 8)//10)
+        raw += protocol.encode_pb_field(50, 2, b"preserve-partner")
+        player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+        self.save["self_stats_version"] = 1
+        return raw
+
+    def test_yuding_plus_ten_preview_returns_real_red_template_without_changing_state(self):
+        before = copy.deepcopy(self.save)
+        result, costs, update = development.prepare(1023, self.save, protocol.encode_pb_field(1, 0, self.iid), self.config)
+        raw = formation.records(result, 1, 2)[self.iid]
+        self.assertEqual((protocol.pb_get_varint(raw, 1), protocol.pb_get_varint(raw, 4)), (10831, 11))
+        self.assertIn((50, 2, b"preserve-partner"), list(protocol.iter_pb_fields(raw)))
+        self.assertEqual((self.save, costs, update), (before, [], b""))
+
+    def paid(self, opcode, values):
+        raw = b"".join(protocol.encode_pb_field(1, 0, v) for v in values)
+        working = copy.deepcopy(self.save)
+        if opcode == 1017:
+            _, costs, _ = development.prepare(opcode, working, raw, self.config)
+        else:
+            _, costs, _ = partner_growth.prepare(opcode, working, raw, self.config, self.now, 7)
+        total = Counter()
+        for cid, count in costs:
+            total[cid] += count
+        costs = total
+        for cid, count in costs.items():
+            if cid not in (1000, 1001):
+                player.change_item_count(self.save, cid, count, self.config, self.now)
+        coin = self.save["role_state"]["coin"]
+        result = self.request(1, opcode, values=values)
+        self.assertEqual(result[0][0], opcode, result)
+        self.refresh()
+        self.assertEqual(self.save["role_state"]["coin"], coin-costs[1000])
+        return result
+
+    def test_awakening_uses_original_aptitude_start_actual_cost_and_stale_target_guard(self):
+        raw = self.put_hero(awake=0)
+        result = self.paid(1025, [self.iid, 0])
+        self.assertEqual(protocol.pb_get_varint(self.gen(self.iid), 18), 21)
+        row = self.config["general_awakenattr"]["23"]["21"]
+        for name, field in (("atk", 6), ("def", 7), ("hp", 8), ("hit", 14)):
+            self.assertEqual(protocol.pb_get_varint(self.gen(self.iid), field), (protocol.pb_get_varint(raw, field) or 0)+row["awaken_"+name])
+        self.assertIn(1200, [mid for mid, _ in result])
+        self.assert_rejected(1025, values=[self.iid, 0])
+        self.reconnect(); self.refresh()
+        self.assertEqual(protocol.pb_get_varint(self.gen(self.iid), 18), 21)
+
+    def test_red_levels_charge_red_quality_prices_and_real_essences_once(self):
+        for stage in (11, 12, 13):
+            old = self.put_hero(cid=10609 if stage == 11 else 10831, advance=stage-1, awake=90)
+            result = self.paid(1017, [protocol.pb_get_varint(old, 1), 0, stage-1])
+            hero = self.gen(self.iid)
+            self.assertEqual((protocol.pb_get_varint(hero, 1), protocol.pb_get_varint(hero, 4)), (10831, stage))
+            self.assertIn(3780, [mid for mid, _ in result])
+            self.assert_rejected(1017, values=[10831, 0, stage-1])
+            self.assertIn((50, 2, b"preserve-partner"), list(protocol.iter_pb_fields(hero)))
+
+    def test_every_combat_supported_red_template_reaches_plus_thirteen_with_real_costs(self):
+        completed = []
+        for cid, row in sorted(self.config["general"].items()):
+            if row["quality"] != 6 or not row["battle"] or row.get("partner_id") or row.get("actor") == "lead" or row["breach_upper_limit"] < 13:
+                continue
+            raw = self.put_hero(int(cid), advance=10, awake=90)
+            try:
+                partner_growth.check_combat(protocol.pb_set_varint(raw, 4, 13), self.config)
+            except ValueError:
+                with self.assertRaises(ValueError):
+                    development.prepare(1017, copy.deepcopy(self.save), protocol.encode_pb_field(1, 0, int(cid))+b"\x08\x00\x08\x0a", self.config)
+                continue
+            for stage in (11, 12, 13):
+                self.paid(1017, [int(cid), 0, stage-1])
+            self.assertEqual(protocol.pb_get_varint(self.gen(self.iid), 4), 13)
+            completed.append(int(cid))
+        self.assertEqual(len(completed), 38)
+
+    def test_all_six_later_levels_research_and_soaring_gates_reach_plus_sixteen(self):
+        self.put_hero(awake=90)
+        for target in range(11, 17):
+            need = self.config["general_awake"][str(target)]["soaring_limit"]
+            for level in range((protocol.pb_get_varint(self.gen(self.iid), 23) or 0)+1, need+1):
+                step = self.config["partner_soaring"][str(level)]
+                growth = self.save.setdefault("partner_growth_state", {"serial": 0, "checked_at": 0, "research": {}})
+                growth["research"][str(self.iid)] = [step["immortal"], 0, 0, 0, 0]*2
+                self.paid(7001, [self.iid, level-1])
+            hero = self.gen(self.iid)
+            self.paid(1017, [protocol.pb_get_varint(hero, 1), 1 if target >= 14 else 0, target-1])
+        hero = self.gen(self.iid)
+        self.assertEqual([protocol.pb_get_varint(hero, f) for f in (1, 4, 23, 35, 36, 37)], [164036, 16, 30, 1, 1, 1])
+        self.assertGreater(protocol.pb_get_varint(hero, 26), 0)
+        entry = ranking.entry(1, self.save, self.config)
+        self.assertEqual(entry["scores"]["18"], protocol.pb_get_varint(hero, 20)+protocol.pb_get_varint(hero, 34))
+        partner_growth.validate(hero, self.config)
+        self.assert_rejected(1017, values=[164036, 1, 16])
+        self.reconnect(); self.refresh()
+        self.assertEqual(self.gen(self.iid), hero)
+        self.success(1, 1004, raw=protocol.encode_pb_field(1, 0, 1)+protocol.encode_pb_field(3, 0, self.iid));self.refresh()
+        self.assertEqual(cheer.combat(self.save, self.config), [164036])
+        old = copy.deepcopy(self.save)
+        self.success(1, 1004, raw=protocol.encode_pb_field(1, 0, 1)+protocol.encode_pb_field(3, 0, 0));self.refresh()
+        self.success(1, 1003, raw=protocol.encode_pb_field(1, 0, 2)+protocol.encode_pb_field(3, 0, self.iid));self.refresh()
+        self.assertEqual(self.save["role_state"]["g_power"]-old["role_state"]["g_power"], protocol.pb_get_varint(hero, 34))
+        self.success(1, 1003, raw=protocol.encode_pb_field(1, 0, 2)+protocol.encode_pb_field(3, 0, 0));self.refresh()
+        self.assertEqual(self.save["role_state"]["g_power"], old["role_state"]["g_power"])
+
+    def test_actual_research_rolls_and_stage_boundary_charge_separately(self):
+        self.put_hero(awake=90)
+        self.success(1, 5512, values=[self.iid]);self.refresh()
+        self.paid(5513, [self.iid, 1, 0, 0, 0, 0])
+        progress = partner_growth.research(self.save, self.iid, self.config)
+        self.assertGreater(progress[4], 0)
+        self.assertEqual(progress[4], sum(progress[1:4]))
+        self.assert_rejected(5513, values=[self.iid, 1, 0, 0, 0, 0])
+        growth = self.save["partner_growth_state"]
+        cap = self.config["Immortal_level"]["1"]["0"]["character"]
+        growth["research"][str(self.iid)] = [0, cap, 0, 0, cap]+[0]*5
+        self.paid(5513, [self.iid, 1, 1, 0, cap, growth["serial"]])
+        self.assertEqual(partner_growth.research(self.save, self.iid, self.config), [1, 0, 0, 0, 0]+[0]*5)
+
+    def test_missing_gates_insufficient_materials_and_save_failure_are_atomic(self):
+        self.put_hero(awake=0)
+        self.assert_rejected(1017, values=[10609, 0, 10])
+        self.assert_rejected(1025, values=[self.iid, 0])
+        self.assert_rejected(7001, values=[self.iid, 0])
+        step = self.config["general_awaken"]["21"]
+        for cid, count in partner_growth.pairs(step["consume1"]):
+            if cid != 1000:
+                self.grant(cid, count)
+        before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 1025, values=[self.iid, 0])
+        self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+
+    def test_malformed_growth_requests_and_corrupt_research_never_change_saves(self):
+        for opcode, requests in ((1025, ([], [self.iid], [self.iid, 40, 0], [0, 40])),
+                                 (7001, ([], [self.iid], [self.iid, 0, 0])),
+                                 (5512, ([], [self.iid, 0])),
+                                 (5513, ([], [self.iid, 1, 0], [self.iid, 3, 0, 0, 0, 0], [self.iid, 1, 2, 0, 0, 0]))):
+            for values in requests:
+                self.assert_rejected(opcode, values=values)
+        self.assert_rejected(5511, values=[self.iid])
+        before = copy.deepcopy(self.save)
+        for state in ({"research": {}, "serial": True, "checked_at": 0},
+                      {"research": {str(self.iid): [0, 1, 0, 0, 0]+[0]*5}, "serial": 0, "checked_at": 0},
+                      {"research": {str(self.iid): [True]+[0]*9}, "serial": 0, "checked_at": 0}):
+            working = {**self.save, "partner_growth_state": state}
+            with self.assertRaises(ValueError):
+                partner_growth.state(working, self.config)
+        self.assertEqual(self.save, before)
+
+    def test_actual_packaged_network_pb_cost_fifo_shared_lock_and_matching_errors(self):
+        raw = protocol.encode_pb_field(1, 0, 10609)+protocol.encode_pb_field(1, 0, 0)+protocol.encode_pb_field(1, 0, 10)
+        _, costs, _ = development.prepare(1017, copy.deepcopy(self.save), raw, self.config)
+        for cid, count in costs:
+            if cid != 1000:
+                player.change_item_count(self.save, cid, count, self.config, self.now)
+        lua = self.network_lua(native_protobuf=True)
+        code = self.client_scripts()["assets/scripts/gamedata.so"].decode()
+        for name in ("updategeneralfragmentbynum", "UpdateRedFragment", "isGeneralOn"):
+            start = code.index("function gamedata."+name+"(")
+            end = code.find("\nfunction ", start+1)
+            lua.execute(code[start:end].encode())
+        lua.execute(b'gc=assert(require("GameGeneralBreak"));gamedata.cache.generalfragments={[10609]={cid=10609,num=120}};gamedata.cache.redfragment={[18831]={cid=18831,num=40}};gamedata.cache.generalslove={alldata={}}')
+        lua.globals().props_raw = bytes.fromhex(self.save["world_state"]["1200"])
+        lua.execute(b'local t=require("idnums_pb").IdNums();t:ParseFromString(props_raw);gamedata:Props(t.idnums)')
+        view = lua.table_from({b"iid": self.iid, b"cid": 10609, b"advance": 10, b"awake": 40, b"soar": 0, b"generation": 1})
+        query = lua.table_from({b"general": self.iid, b"partnerView": view})
+        lua.globals().UIGeneralBreakPreviewCallBack(query)
+        lua.globals().UIGeneralBreakPreviewCallBack(query)
+        preview = self.success(1, 1023, values=[self.iid])
+        result = lua.globals().NetGeneralBreakPreviewCallBack(lua.table_from({b"rbuf": preview, b"ser": 0}))
+        self.assertTrue(result[b"partnerIgnored"])
+        for _ in range(2):
+            result = lua.globals().NetGeneralBreakPreviewCallBack(lua.table_from({b"rbuf": preview, b"ser": 7}))
+            self.assertEqual(result[b"nextGeneral"][b"cid"], 10831)
+        request = lua.table_from({b"ids": lua.table_from({b"1": 10609}), b"scope": 0, b"partnerView": view})
+        mode, opcode, body = lua.globals().UIGeneralBreakCallBack(request)
+        self.assertEqual((mode, opcode, protocol.parse_ids_pb(body)), (1, 1017, [10609, 0, 10]))
+        self.assertEqual(lua.globals().UIGeneralBreakCallBack(request)[0], 0)
+        error = lambda mid: lua.table_from({b"rbuf": protocol.encode_pb_field(1, 0, mid)+b"\x08\x00"})
+        lua.globals().NetErrorMessageCallback9(error(1025))
+        self.assertIsNotNone(lua.globals().gamedata[b"ext"][b"localPartnerGrowthBusy"])
+        before = self.save["role_state"]["coin"]
+        packet = self.success(1, opcode, raw=body)
+        result = lua.globals().NetGeneralBreakCallBack(lua.table_from({b"rbuf": packet, b"ser": 9}))
+        self.assertEqual(result[b"general"][b"cid"], 10831)
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], before-10000000)
+        self.assertIsNone(lua.globals().gamedata[b"ext"][b"localPartnerGrowthBusy"])
+        self.assertTrue(lua.globals().NetGeneralBreakCallBack(lua.table_from({b"rbuf": packet, b"ser": 0}))[b"partnerIgnored"])
+        self.assertIsNone(lua.globals().gameConfig)
+
+    def test_yuding_all_gold_choices_simulate_both_sides_without_mutating_inputs(self):
+        for choices in product((1, 3), repeat=3):
+            raw = self.put_hero(cid=164036, advance=13, awake=90)
+            raw = protocol.pb_set_varint(raw, 4, 16)
+            for i, choice in enumerate(choices, 35):
+                raw = protocol.pb_set_varint(raw, i, choice)
+            packed = sum(choice*10**(2-i) for i, choice in enumerate(choices))
+            raw = protocol.pb_set_varint(raw, 40, self.config["jinjiangkezhiguanxi"][str(packed)]["camp"])
+            for field, value in partner_growth.fairy(raw, self.config).items():
+                raw = protocol.pb_set_varint(raw, field, value)
+            raw = partner_growth.power(self.save, self.gen(self.iid), raw)
+            partner_growth.validate(raw, self.config)
+            unit = {name: protocol.pb_get_varint(raw, f) or 0 for name, f in battle.GENERAL_FIELDS.items()}
+            unit.update(skill=180063, skilllevel=0, partner_skills=partner_growth.skills(raw, self.config))
+            for direct in (True, False):
+                teams = {True: {}, False: {}}
+                for side in teams:
+                    for i, pos in enumerate(battle.POSITIONS):
+                        teams[side][pos] = dict(unit, iid=(1000 if side else 2000)+i, hp=10000000, speed=10+i)
+                        if side != direct or i:
+                            teams[side][pos].update(cid=10213, skill=self.config["general"]["10213"]["skillid"], advance=0, partner_skills=[])
+                original = copy.deepcopy(teams)
+                report = battle.simulate(teams[True], teams[False], self.config, 7, max_rounds=3)
+                self.assertEqual(teams, original)
+                self.assertIn("endmeta", report)
+                test_hades_battle.HadesBattleTests.assert_replays(self, report)
+
+    def test_actual_packaged_awakening_and_research_callbacks_use_server_bound_snapshots(self):
+        self.put_hero(awake=0)
+        for cid in (20278, 20017, 20661):
+            self.grant(cid, 10000)
+        lua = self.network_lua(native_protobuf=True)
+        code = self.client_scripts()["assets/scripts/gamedata.so"].decode()
+        start = code.index("function gamedata.isGeneralOn(")
+        lua.execute(code[start:code.index("\nfunction ", start+1)].encode())
+        lua.eval(b"require")(b"GameGeneralBreak")
+        lua.globals().props_raw = bytes.fromhex(self.save["world_state"]["1200"])
+        lua.execute(b'local t=require("idnums_pb").IdNums();t:ParseFromString(props_raw);gamedata:Props(t.idnums)')
+        def view():
+            hero = lua.globals().gamedata[b"cache"][b"generals"][self.iid]
+            return lua.table_from({b"iid": self.iid, b"cid": hero[b"cid"], b"advance": hero[b"level2"], b"awake": hero[b"skilllevel"], b"soar": hero[b"level8"]})
+        request = lua.table_from({b"iid": self.iid, b"partnerView": view()})
+        mode, mid, raw = lua.globals().UIGeneralAwakenCallBack(request)
+        self.assertEqual((mode, mid, protocol.parse_ids_pb(raw)), (1, 1025, [self.iid, 0]))
+        coin = self.save["role_state"]["coin"]
+        result = lua.globals().NetGeneralAwakenCallBack(lua.table_from({b"rbuf": self.success(1, mid, raw=raw), b"ser": 1}))
+        self.refresh()
+        self.assertEqual(result[b"general"][b"skilllevel"], 21)
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.save["role_state"]["coin"])
+        self.assertLess(self.save["role_state"]["coin"], coin)
+        query = lua.table_from({b"iid": self.iid, b"partnerView": view()})
+        _, mid, raw = lua.globals().UIGeneralXiuLianInfoCallBack(query)
+        lua.globals().NetGeneralXiuLianInfoCallBack(lua.table_from({b"rbuf": self.success(1, mid, raw=raw), b"ser": 2}))
+        request = lua.table_from({b"iid": self.iid, b"xiuLian": 1, b"isBreak": 0, b"partnerView": view()})
+        mode, mid, raw = lua.globals().UIGeneralXiuLianCallBack(request)
+        self.assertEqual((mode, mid), (1, 5513))
+        result = lua.globals().NetGeneralXiuLianCallBack(lua.table_from({b"rbuf": self.success(1, mid, raw=raw), b"ser": 3}))
+        self.refresh()
+        self.assertEqual(result[b"generalXiuLian"][b"heart1"], partner_growth.research(self.save, self.iid, self.config)[4])
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.save["role_state"]["coin"])
+
+    def test_actual_ui_context_rejects_closed_reopened_or_switched_partner(self):
+        from lupa.lua51 import LuaRuntime
+        lua = LuaRuntime(encoding=None)
+        lua.execute(b'''UIRequest=function(req) sent=req end
+            GameScene={layers={},addUpdate=function() end};gameWindows={windows={}}
+            local page={data={general={iid=7,cid=10609,level2=10,skilllevel=40,level8=0}},
+                selectpage="tupo",localPartnerGeneration=2,setTupoNext=function(self,t) applied=(applied or 0)+1 end}
+            GameScene.layers.generalup={show=true,module=page}''')
+        source = self.client_scripts()["assets/scripts/UIGenerals.so"]
+        source = source[source.index(b"local operations={[1017]"):]
+        lua.execute(source)
+        lua.execute(b'UIRequest({type=1023,general=7});response={partnerView=sent.partnerView};UIGeneralBreakPreview(response)')
+        self.assertEqual(lua.globals().applied, 1)
+        for change in (b'GameScene.layers.generalup.show=false', b'GameScene.layers.generalup.show=true;GameScene.layers.generalup.module.localPartnerGeneration=3',
+                       b'GameScene.layers.generalup.module.localPartnerGeneration=2;GameScene.layers.generalup.module.data.general.iid=8',
+                       b'GameScene.layers.generalup.module.data.general.iid=7;GameScene.layers.generalup.module.data.general.level2=11'):
+            lua.execute(change+b';UIGeneralBreakPreview(response)')
+            self.assertEqual(lua.globals().applied, 1)
+
+    def test_native_soaring_animation_completion_never_touches_closed_generation(self):
+        from lupa.lua51 import LuaRuntime
+        lua = LuaRuntime(encoding=None)
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"]
+        start = code.index(b"function generalup.feiShengCallback(")
+        end = code.index(b"\nend", start)+len(b"\nend")
+        lua.execute(b'''generalup={};print=function() end
+            getAnimationManager=function() return {setAnimationCompletedCallback=function(self,fn) delayed=fn end,
+                runAnimationsForSequenceNamed=function() end} end
+            page={data={general={iid=7}},localPartnerGeneration=3,feishengEffectItems={[1]={{items={}},{items={}}}},
+                ReloadData=function() applied=(applied or 0)+1 end}
+            gamedata={config={partner_soaring={['2']={}}}}''')
+        lua.execute(code[start:end])
+        lua.execute(b'generalup.feiShengCallback(page,{level8=1});page.localPartnerGeneration=4;page.data=nil;delayed()')
+        self.assertIsNone(lua.globals().applied)
+
+    def test_unknown_battle_dependencies_time_rollback_and_overflow_never_charge(self):
+        self.put_hero(awake=90)
+        self.config["general"]["10831"]["break11"] = 9001196
+        self.config["breakskill"]["9001196"]["type_param"] = 1234567
+        self.assert_rejected(1017, values=[10609, 0, 10])
+        self.save["partner_growth_state"] = {"research": {}, "serial": 0, "checked_at": self.now+1}
+        self.assert_rejected(1025, values=[self.iid, 90])
+        self.save["partner_growth_state"]["checked_at"] = self.now
+        self.save["partner_growth_state"]["serial"] = (1 << 31)-1
+        self.assert_rejected(5513, values=[self.iid, 1, 0, 0, 0, (1 << 31)-1])
+
+    def test_active_conversion_and_soaring_keep_real_stats_power_equipment_and_battle_projection(self):
+        self.success(1, 1003, raw=protocol.encode_pb_field(1, 0, 2)+protocol.encode_pb_field(3, 0, self.iid));self.refresh()
+        before, old = copy.deepcopy(self.save), self.gen(self.iid)
+        self.paid(1017, [10609, 0, 10])
+        changed = self.gen(self.iid)
+        self.assertEqual(self.save["role_state"]["power"]-before["role_state"]["power"], protocol.pb_get_varint(changed, 20)-protocol.pb_get_varint(old, 20))
+        self.assertEqual(formation.records(bytes.fromhex(self.save["world_state"]["1002"]), 4, 2)[self.iid], formation.records(bytes.fromhex(before["world_state"]["1002"]), 4, 2)[self.iid])
+        self.save["partner_growth_state"]["research"][str(self.iid)] = [1, 0, 0, 0, 0]*2
+        before = copy.deepcopy(self.save)
+        self.paid(7001, [self.iid, 0])
+        changed = self.gen(self.iid)
+        self.assertEqual(self.save["role_state"]["g_power"]-before["role_state"]["g_power"], protocol.pb_get_varint(changed, 34))
+        attack, _ = battle.rosters(self.save, self.config["copy"]["42101"]["1"], self.config)
+        unit = next(u for u in attack.values() if u["iid"] == self.iid)
+        self.assertEqual(unit["atk"], protocol.pb_get_varint(changed, 6)+protocol.pb_get_varint(changed, 26)//10)
+        self.assertEqual((unit["skilllevel"], unit["awakening"]), (0, 40))
+
+    def test_failed_advanced_breakthrough_never_leaks_costs_template_or_new_state(self):
+        raw = b"".join(protocol.encode_pb_field(1, 0, v) for v in (10609, 0, 10))
+        _, costs, _ = development.prepare(1017, copy.deepcopy(self.save), raw, self.config)
+        for cid, count in costs:
+            if cid != 1000:
+                player.change_item_count(self.save, cid, count, self.config, self.now)
+        before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 1017, raw=raw)
+        self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+
+    def test_complete_cost_receipt_refunds_actual_growth_and_keeps_unknown_fields(self):
+        baseline = recruit.new_general(10609, self.iid, self.config)+protocol.encode_pb_field(50, 2, b"preserve-partner")
+        self.save["qiankun_state"]["receipts"][f"general:{self.iid}"] = {"before": baseline.hex(), "after": self.gen(self.iid).hex(), "costs": [[20017, 100]]}
+        self.paid(1025, [self.iid, 40])
+        self.paid(1017, [10609, 0, 10])
+        receipt = self.save["qiankun_state"]["receipts"][f"general:{self.iid}"]
+        before_coin = self.save["role_state"]["coin"]
+        refunded_coin = dict(receipt["costs"])[1000]
+        result = self.success(1, 1035, values=[self.iid]);self.refresh()
+        self.assertEqual(self.gen(self.iid), baseline)
+        self.assertEqual(self.save["role_state"]["coin"], before_coin+refunded_coin)
+        self.assertNotIn(f"general:{self.iid}", self.save["qiankun_state"]["receipts"])
+        self.assertIn(self.iid, formation.records(result, 8, 2))
+
+    def test_research_rebirth_invalidates_old_serial_and_publishes_zero_levels(self):
+        baseline = recruit.new_general(10609, self.iid, self.config)
+        self.save["qiankun_state"]["receipts"][f"general:{self.iid}"] = {"before": baseline.hex(), "after": self.gen(self.iid).hex(), "costs": [[20017, 100]]}
+        self.paid(5513, [self.iid, 1, 0, 0, 0, 0])
+        before = self.save["partner_growth_state"]["serial"]
+        packets = self.request(1, 1035, values=[self.iid]);self.refresh()
+        self.assertEqual(packets[0][0], 1035, packets)
+        self.assertEqual(self.save["partner_growth_state"]["serial"], before+1)
+        self.assertNotIn(str(self.iid), self.save["partner_growth_state"]["research"])
+        levels = protocol.parse_ids_pb(next(raw for mid, raw in packets if mid == 5511))
+        index = levels.index(self.iid)
+        self.assertEqual(levels[index:index+3], [self.iid, 0, 0])
+
+    def test_client_roster_updates_keep_research_until_actual_rebirth(self):
+        lua = self.network_lua(native_protobuf=True)
+        lua.eval(b"require")(b"GameGeneralBreak")
+        raw = self.gen(self.iid)
+        query = lua.table_from({b"iid": self.iid})
+        lua.globals().UIGeneralXiuLianInfoCallBack(query)
+        detail = b"".join(protocol.encode_pb_field(1, 0, v) for v in [1, 0, 0, 0, 0]*2+[4])
+        lua.globals().NetGeneralXiuLianInfoCallBack(lua.table_from({b"rbuf": detail, b"ser": 1}))
+        def apply(general):
+            lua.globals().raw_general = protocol.encode_pb_field(1, 2, general)
+            lua.execute(b'local p=require("generals_pb").Generals();p:ParseFromString(raw_general);gamedata:Generals(p.generals)')
+        apply(raw)
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"generals"][self.iid][b"level6"], 1)
+        apply(recruit.new_general(10609, self.iid, self.config))
+        hero = lua.globals().gamedata[b"cache"][b"generals"][self.iid]
+        self.assertEqual((hero[b"level6"], hero[b"level7"]), (0, 0))
+
+
+class PartnerBattleTests(unittest.TestCase):
+    unit = test_hades_battle.HadesBattleTests.unit
+    hits = test_hades_battle.HadesBattleTests.hits
+    assert_replays = test_hades_battle.HadesBattleTests.assert_replays
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = player.load_role_config("configs_sec5.zip")
+
+    def isolated(self):
+        row = {**self.config["general"]["164036"], **{f"break{i}": 0 for i in range(1, 17)}}
+        return {**self.config, "general": {**self.config["general"], "164036": row}}
+
+    def gold(self, pid, **values):
+        return self.unit(164036, iid=700, advance=16, partner_skills=[pid], **values)
+
+    def test_chan_kill_adds_next_attack_damage_and_team_ap_without_repeating_old_bonus(self):
+        report = battle.simulate({2: self.gold(9001196, speed=300), 8: self.unit(10610, iid=701, speed=500, atk=1000)},
+                                 {2: self.unit(iid=1, hp=50, speed=1, atk=1), 8: self.unit(iid=2, speed=1, atk=1)}, self.isolated(), 7, max_rounds=2)
+        self.assertEqual(self.hits(report)[:2], [200, 100])
+        self.assert_replays(report)
+
+    def test_four_enemy_damage_threshold_and_five_enemy_personal_skill_targets(self):
+        report = battle.simulate({2: self.gold(9001197, speed=300)}, {2: self.unit(iid=1, atk=1)}, self.isolated(), 7, max_rounds=1)
+        self.assertEqual(self.hits(report)[0], 160)
+        report = battle.simulate({2: self.gold(9001197, speed=300, initial_ap=4)},
+                                 {p: self.unit(iid=i+1, atk=1) for i, p in enumerate(battle.POSITIONS[:5])}, self.isolated(), 7, max_rounds=1)
+        cast = next(a for a in report["b"]["a"] if a["s"].get("S") == 180063)
+        self.assertEqual(len([d for d in cast["e"] if not d["r"] and isinstance(d.get("m"), dict)]), 5)
+        self.assert_replays(report)
+
+    def test_two_round_aid_keeps_combo_ownership_and_ap_gates(self):
+        config = self.isolated()
+        config["combskillprobability"] = copy.deepcopy(config["combskillprobability"])
+        config["combskillprobability"]["12988"]["bout1"] = 0
+        report = battle.simulate({2: self.gold(9001198, speed=1), 8: self.unit(10610, iid=701, speed=100, initial_ap=4), 10: self.unit(10608, iid=702, speed=1)},
+                                 {8: self.unit(iid=1, speed=100, hp=1000000, atk=1)}, config, 7, max_rounds=1)
+        action = next(a for a in report["b"]["a"] if a["s"] and a["s"]["t"] in ("N", "k", "x"))
+        self.assertEqual((action["s"].get("S"), action["s"]["p"]), (12988, [8, 10, 2]))
+        self.assert_replays(report)
+
+    def test_even_round_ap_can_enable_personal_cast_without_legacy_awakening_scaling(self):
+        report = battle.simulate({2: self.gold(9001199, speed=300)},
+                                 {8: self.unit(iid=1, hp=1000000, atk=1)}, self.isolated(), 7, max_rounds=2)
+        actions = [a["s"]["t"] for a in report["b"]["a"] if a["s"].get("r") and a["s"]["t"] in ("N", "k", "x")]
+        self.assertEqual(actions, ["N", "k"])
+        self.assert_replays(report)
+
+    def test_unpurgeable_qi_blocks_basic_ap_and_spreads_to_another_enemy(self):
+        report = battle.simulate({2: self.gold(9001200, speed=300)},
+                                 {2: self.unit(iid=1, hp=1000000, atk=1), 8: self.unit(iid=2, hp=1000000, atk=1)}, self.isolated(), 7, max_rounds=2)
+        self.assertEqual([report["endmeta"]["defense"][str(p)]["ap"] for p in (2, 8)], [0, 2])
+        self.assert_replays(report)
+
+    def revival_report(self, rounds=1):
+        team = {p: self.unit(iid=700+i, hp=10000, atk=1, speed=1) for i, p in enumerate(battle.POSITIONS[:5])}
+        team[2] = self.gold(9001201, hp=100, atk=1, speed=1, cover_d=100, cover_p=100, cover_l=1)
+        return battle.simulate(team, {2: self.unit(iid=1, hp=1000000, atk=1000, speed=500)}, self.isolated(), 7, max_rounds=rounds)
+
+    def test_gold_revival_requires_four_living_allies_restores_cover_and_is_once(self):
+        report = self.revival_report()
+        self.assertEqual((report["endmeta"]["attack"]["2"]["h"], report["endmeta"]["attack"]["2"]["cover_d"]), (100, 65))
+        self.assert_replays(report)
+        self.assertEqual(self.revival_report(2)["endmeta"]["attack"]["2"]["h"], 0)
+
+    def test_actual_gold_and_revival_reports_convert_original_apk_animation_assets(self):
+        from lupa.lua51 import LuaRuntime
+        lua = LuaRuntime()
+        config = dict(self.config)
+        with zipfile.ZipFile("configs_sec5.zip") as archive:
+            for name in ("generalanimation", "skillanimation", "personalboss_att"):
+                config[name] = json.loads(archive.read("5/"+name+".json"))
+        lua.globals().gamedata = lua.table_from({"config": config}, recursive=True)
+        lua.execute('''print=function() end;printT=print;battleScene={slotNum=7}
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            CCFileUtils={sharedFileUtils=function(self) return self end,fullPathForFilename=function(self,p) return p end}
+            ui={Split=function(s,sep) local t={} for v in string.gmatch(s,'[^'..sep..']+') do t[#t+1]=v end return t end}''')
+        with zipfile.ZipFile(builder.SRC_APK) as archive:
+            names, assets = archive.namelist(), {}
+            lua.globals().CCFileUtils.isFileExist = lambda _, path: any(n.endswith("/"+path) for n in names)
+            def load(path):
+                if path not in assets:
+                    assets[path] = json.loads(archive.read(next(n for n in names if n.endswith("/"+path))))
+                return lua.table_from(assets[path], recursive=True)
+            lua.globals().LoadJsonFileToTable = load
+            lua.execute(PartnerGrowthTests.client_scripts()["assets/scripts/battleReportConvert.so"])
+            lua.execute(builder.read_script("BattleReportAbbToKey"))
+            for report in (self.revival_report(), battle.simulate({2: self.gold(9001200, speed=300)},
+                    {2: self.unit(iid=1, hp=1000000, atk=1), 8: self.unit(iid=2, hp=1000000, atk=1)}, self.isolated(), 7, max_rounds=2)):
+                native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
+                attack, defense = lua.globals().getBattleInitSlotInfo(native)
+                animations, ext = lua.globals().convertBattleReportToAnimationSub(native, attack, defense, None, "penglai")
+                self.assertGreater(len(animations), 1)
+                for side, key in (("attack", "atk"), ("defense", "def")):
+                    for pos, unit in report["endmeta"][side].items():
+                        self.assertEqual((ext.endinfo[key][pos].hp, ext.endinfo[key][pos].ap), (unit["h"], unit["ap"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

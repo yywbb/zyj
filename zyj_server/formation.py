@@ -310,7 +310,8 @@ def apply_slots(save, slots, config, *, cheers=None, souls=None):
     # 空阵位也明确回 general=0，客户端据此删除旧将；装备留在阵位，换将继承。
     update += b"".join(encode_pb_field(4, 2, pb_set_varint(v, 2, pb_get_varint(v, 2) or 0)) for _, v in sorted(slots.items()))
     power = sum(pb_get_varint(generals[iid], 20) or 0 for iid in after)
-    if power >= (1 << 31) or power + save["role_state"]["g_power"] >= (1 << 31):
+    save["role_state"]["g_power"] += sum(pb_get_varint(generals[iid], 34) or 0 for iid in after)-sum(pb_get_varint(generals[iid], 34) or 0 for iid in before)
+    if power >= (1 << 31) or not 0 <= save["role_state"]["g_power"] < (1 << 31) or power + save["role_state"]["g_power"] >= (1 << 31):
         raise ValueError("阵容战力超出范围")
     save["role_state"].update(power=power, power_all=power + save["role_state"]["g_power"])
     return update

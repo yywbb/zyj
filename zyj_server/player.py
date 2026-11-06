@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, hades_copy, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, illusion, nightclub, soul, wing
+from . import achievements, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, illusion, nightclub, partner_growth, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -60,7 +60,7 @@ def load_role_config(config_path):
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
                              "equip_forgingConsume", "equip_foringlv",
                               "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
-                              "hoshimiya_break", "hoshimiya_jihuo", "protagonist_awaken",
+                               "hoshimiya_break", "hoshimiya_jihuo", "protagonist_awaken", "general_awaken", "general_awakenattr", "partner_soaring", "Immortal_type", "Immortal_level", "Immortal_probability", "jinjiangkezhiguanxi",
                                "lingzhentu_zhenfa", "lingzhentu_cond", "lingzhentu_lv", "lingzhentu_jihuo", "lingzhentu_add",
                               "mozhao_evolve", "mozhao_soaring", "mozhao_liandan", "mozhao_shop", "mozhao_shoptype",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",
@@ -818,6 +818,15 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if update:
             record_slot_update(save, update)
         activities.record_liveness(save, 22, actual, role_config, now)
+    elif opcode in (*partner_growth.QUERIES, *partner_growth.MUTATIONS):
+        body, costs, update = partner_growth.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if update:
+            raw = next(v for n, w, v in iter_pb_fields(update) if (n, w) == (1, 2))
+            before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
+            qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config, save))
+            record_slot_update(save, update)
     elif opcode in (*development.QUERIES, *development.MUTATIONS) and not body:
         body, costs, update = development.prepare(opcode, save, request_body, role_config)
         for cid, count in costs:
@@ -825,6 +834,12 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if update:
             if opcode == 1017:
                 raw = next(v for n, w, v in iter_pb_fields(update) if (n, w) == (1, 2))
+                if pb_get_varint(raw, 4) > 10:
+                    growth = partner_growth.state(save, role_config)
+                    if now < growth["checked_at"]:
+                        raise ValueError("伙伴突破不接受时间回拨")
+                    growth["checked_at"] = now
+                    save["partner_growth_state"] = growth
                 before = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)[pb_get_varint(raw, 2)]
                 qiankun.record_training(save, "general", before, raw, costs, qiankun.pristine_general(before, role_config, save))
             record_slot_update(save, update)
@@ -1266,7 +1281,7 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
     if pet_update or self_update:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
     local_update = (responses and responses[0]["opcode"] in (1003, 1004, 1005, 1006, 1007, 1009, 1130, *training.OPCODES, *fashion.TRANSACTIONS, *soul.MUTATIONS, *equip_evolve.OPCODES, 1077,
-                                                         *development.MUTATIONS, *gamestar.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS, 1140, 1141) and not responses[0]["hex"])
+                                                          *development.MUTATIONS, *partner_growth.MUTATIONS, *gamestar.MUTATIONS, *pets.MUTATIONS, *favorite.MUTATIONS, *equip_baptize.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS, 1140, 1141) and not responses[0]["hex"])
     break_comb = responses and responses[0]["opcode"] == 999900 and any(mid == 1017 for mid, _ in get_comb_messages(request_body))
     if local_update or break_comb or pet_update or self_update or sigil_update or cheer_update:
         state, previous = save["role_state"], get_role_state(before, role_config)
@@ -1275,6 +1290,16 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
                              (state["power"] - previous["power"], state["power"], state["g_power"] - previous["g_power"], state["g_power"],
                               state["power_all"] - previous["power_all"], state["power_all"]))
             packets.append(pack_frame(205, 0, power))
+    if responses and (responses[0]["opcode"] in partner_growth.MUTATIONS or responses[0]["opcode"] == 1017 and len(parse_ids_pb(request_body)) == 3):
+        for mid in (1200, 1012):
+            if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
+                packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
+        if save.get("qiankun_state", {}).get("red_fragments") != before.get("qiankun_state", {}).get("red_fragments"):
+            packets.append(pack_frame(3780, 0, qiankun.red_query(save, b"")))
+        packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
+    if responses and (responses[0]["opcode"] in partner_growth.MUTATIONS or save.get("partner_growth_state") != before.get("partner_growth_state")):
+        levels, _, _ = partner_growth.prepare(5511, save, b"", role_config, now, 0)
+        packets.append(pack_frame(5511, 0, levels))
     return save_response_group(packets, save, before, save_path, step_counts, role_config, now)
 
 
