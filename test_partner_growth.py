@@ -267,6 +267,80 @@ class PartnerGrowthTests(unittest.TestCase):
                 self.assertIn("endmeta", report)
                 test_hades_battle.HadesBattleTests.assert_replays(self, report)
 
+    def test_yuanshi_and_tongtian_all_paid_gold_choices_keep_gates_costs_and_reconnect(self):
+        for cid, gold in ((10829, 164004), (10839, 164038)):
+            for choices in product((1, 3), repeat=3):
+                with self.subTest(cid=cid, choices=choices):
+                    raw = self.put_hero(cid, advance=13, awake=90)
+                    self.assert_rejected(1017, values=[cid, choices[0], 13])
+                    raw = protocol.pb_set_varint(raw, 23, 30)
+                    for field, value in partner_growth.fairy(raw, self.config).items():
+                        raw = protocol.pb_set_varint(raw, field, value)
+                    raw = partner_growth.power(self.save, self.gen(self.iid), raw)
+                    player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+                    for stage, choice in enumerate(choices, 14):
+                        old = protocol.pb_get_varint(self.gen(self.iid), 1)
+                        self.paid(1017, [old, choice, stage-1])
+                        self.assert_rejected(1017, values=[old, choice, stage-1])
+                    hero = self.gen(self.iid)
+                    self.assertEqual([protocol.pb_get_varint(hero, f) for f in (1, 4, 35, 36, 37)], [gold, 16, *choices])
+                    self.assertIn((50, 2, b"preserve-partner"), list(protocol.iter_pb_fields(hero)))
+                    partner_growth.check_combat(hero, self.config)
+                    self.reconnect();self.refresh()
+                    self.assertEqual(self.gen(self.iid), hero)
+
+    def test_new_gold_missing_materials_and_final_save_failure_do_not_convert_or_charge(self):
+        for cid, choice in product((10829, 10839), (1, 3)):
+            self.save["role_state"].update(level=150, coin=10**12, gold=1000000)
+            raw = protocol.pb_set_varint(self.put_hero(cid, advance=13, awake=90), 23, 30)
+            for field, value in partner_growth.fairy(raw, self.config).items():
+                raw = protocol.pb_set_varint(raw, field, value)
+            raw = partner_growth.power(self.save, self.gen(self.iid), raw)
+            player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+            player.change_item_count(self.save, 20811, -self.props(20811), self.config, self.now)
+            self.assert_rejected(1017, values=[cid, choice, 13])
+            working = copy.deepcopy(self.save)
+            body = b"".join(protocol.encode_pb_field(1, 0, v) for v in (cid, choice, 13))
+            _, costs, _ = development.prepare(1017, working, body, self.config)
+            for item, count in costs:
+                if item not in (1000, 1001):
+                    self.grant(item, count)
+            before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                self.request(1, 1017, values=[cid, choice, 13])
+            self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+            self.reconnect();self.refresh()
+
+    def test_new_gold_paid_active_rosters_fight_real_campaign_and_failed_save_is_atomic(self):
+        original_simulate = battle.simulate
+        for cid, gold in ((10829, 164004), (10839, 164038)):
+            raw = protocol.pb_set_varint(self.put_hero(cid, advance=13, awake=90), 23, 30)
+            for field, value in partner_growth.fairy(raw, self.config).items():
+                raw = protocol.pb_set_varint(raw, field, value)
+            raw = partner_growth.power(self.save, self.gen(self.iid), raw)
+            player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+            for stage in (14, 15, 16):
+                self.paid(1017, [protocol.pb_get_varint(self.gen(self.iid), 1), 1, stage-1])
+            self.success(1, 1003, raw=protocol.encode_pb_field(1, 0, 2)+protocol.encode_pb_field(3, 0, self.iid));self.refresh()
+            self.save["role_state"]["stamina"] = 100
+            reports = []
+            def simulate(*args, **kwargs):
+                report = original_simulate(*args, **kwargs)
+                reports.append(report)
+                return report
+            with patch.object(battle, "simulate", side_effect=simulate):
+                self.success(1, 1306, values=[42102, 1]);self.refresh()
+            self.assertTrue(reports[0]["result"])
+            test_hades_battle.HadesBattleTests.assert_replays(self, reports[0])
+            self.assertEqual(reports[0]["meta"]["attack"]["g"][str(self.iid)]["c"], gold)
+            self.assertEqual(self.save["role_state"]["stamina"], 100-self.config["copy"]["42102"]["1"]["physical"])
+            before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+            with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                self.request(1, 1306, values=[42102, 1])
+            self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+            self.reconnect();self.refresh()
+            self.assertEqual(protocol.pb_get_varint(self.gen(self.iid), 1), gold)
+
     def test_actual_packaged_awakening_and_research_callbacks_use_server_bound_snapshots(self):
         self.put_hero(awake=0)
         for cid in (20278, 20017, 20661):
@@ -486,6 +560,10 @@ class PartnerBattleTests(unittest.TestCase):
         self.assertEqual(self.revival_report(2)["endmeta"]["attack"]["2"]["h"], 0)
 
     def test_actual_gold_and_revival_reports_convert_original_apk_animation_assets(self):
+        self.assert_native_reports((self.revival_report(), battle.simulate({2: self.gold(9001200, speed=300)},
+                {2: self.unit(iid=1, hp=1000000, atk=1), 8: self.unit(iid=2, hp=1000000, atk=1)}, self.isolated(), 7, max_rounds=2)))
+
+    def assert_native_reports(self, reports):
         from lupa.lua51 import LuaRuntime
         lua = LuaRuntime()
         config = dict(self.config)
@@ -507,8 +585,7 @@ class PartnerBattleTests(unittest.TestCase):
             lua.globals().LoadJsonFileToTable = load
             lua.execute(PartnerGrowthTests.client_scripts()["assets/scripts/battleReportConvert.so"])
             lua.execute(builder.read_script("BattleReportAbbToKey"))
-            for report in (self.revival_report(), battle.simulate({2: self.gold(9001200, speed=300)},
-                    {2: self.unit(iid=1, hp=1000000, atk=1), 8: self.unit(iid=2, hp=1000000, atk=1)}, self.isolated(), 7, max_rounds=2)):
+            for report in reports:
                 native = lua.table_from(json.loads(lua.globals().ReplaceAbbToKey(json.dumps(report))), recursive=True)
                 attack, defense = lua.globals().getBattleInitSlotInfo(native)
                 animations, ext = lua.globals().convertBattleReportToAnimationSub(native, attack, defense, None, "penglai")
@@ -516,6 +593,275 @@ class PartnerBattleTests(unittest.TestCase):
                 for side, key in (("attack", "atk"), ("defense", "def")):
                     for pos, unit in report["endmeta"][side].items():
                         self.assertEqual((ext.endinfo[key][pos].hp, ext.endinfo[key][pos].ap), (unit["h"], unit["ap"]))
+
+
+class YuanshiTongtianBattleTests(unittest.TestCase):
+    unit = test_hades_battle.HadesBattleTests.unit
+    hits = test_hades_battle.HadesBattleTests.hits
+    assert_replays = test_hades_battle.HadesBattleTests.assert_replays
+    assert_native_reports = PartnerBattleTests.assert_native_reports
+    setUpClass = classmethod(PartnerBattleTests.setUpClass.__func__)
+
+    def isolated(self, *extra):
+        config = {**self.config, "general": {**self.config["general"]}}
+        for cid in (164004, 164038):
+            config["general"][str(cid)] = {**self.config["general"][str(cid)], **{f"break{i}": 0 for i in range(1, 17)}}
+        if extra:
+            config["general"]["164004"]["break1"] = extra[0]
+        return config
+
+    def gold(self, cid, *pids, **values):
+        return self.unit(cid, **{"iid": 700, "advance": 16, "partner_skills": list(pids), **values})
+
+    def test_photon_mark_doubles_only_owners_target_and_moves_only_on_own_kill(self):
+        for ally_kill, expected in ((False, [50, 200]), (True, [100, 100])):
+            attack = {2: self.gold(164004, 9001034, speed=300)}
+            if ally_kill:
+                attack[8] = self.unit(iid=701, speed=400)
+            report = battle.simulate(attack, {2: self.unit(iid=1, hp=50, atk=1, speed=1),
+                                             8: self.unit(iid=2, atk=1, speed=1)}, self.isolated(), 7, max_rounds=2)
+            self.assertEqual(self.hits(report), expected)
+            self.assert_replays(report)
+        report = battle.simulate({8: self.gold(164004, 9001034, speed=300)}, {2: self.unit(iid=1, atk=1)}, self.isolated(), 7, max_rounds=1)
+        self.assertEqual(self.hits(report, pos=8), [100])
+
+    def test_enemy_deaths_restore_ap_and_add_damage_but_immediate_revival_does_not(self):
+        config = self.isolated()
+        report = battle.simulate({2: self.gold(164004, 9001035, speed=300)},
+                                 {2: self.unit(iid=1, hp=50, atk=1, speed=1), 8: self.unit(iid=2, atk=1, speed=1)}, config, 7, max_rounds=2)
+        self.assertEqual(self.hits(report), [50, 105])
+        self.assertEqual(report["endmeta"]["attack"]["2"]["ap"], 5)
+        self.assert_replays(report)
+        config["general"]["10305"] = {**config["general"]["10305"], "break1": 9000376}
+        report = battle.simulate({2: self.gold(164004, 9001035, speed=300)},
+                                 {2: self.unit(10305, iid=1, advance=1, hp=50, atk=1, speed=1)}, config, 7, max_rounds=1)
+        self.assertEqual(report["endmeta"]["attack"]["2"]["ap"], 2)
+        self.assert_replays(report)
+
+    def test_revived_enemy_self_explosion_does_not_reuse_an_old_killer_for_mark_transfer(self):
+        config = self.isolated()
+        config["general"]["10823"] = {**config["general"]["10823"], "break1": config["general"]["10821"]["break1"]}
+        report = battle.simulate({2: self.gold(164004, 9001034, speed=300)},
+                                 {2: self.unit(10823, iid=1, npc=True, advance=1, hp=50, atk=1, speed=500),
+                                  8: self.unit(iid=2, atk=1, speed=1)}, config, 7, max_rounds=2)
+        self.assertEqual(self.hits(report), [25, 100])
+        self.assert_replays(report)
+
+    def test_battery_adds_initial_ap_and_damage_for_first_round_only(self):
+        report = battle.simulate({2: self.gold(164004, 9001036, speed=300)}, {2: self.unit(iid=1, hp=1000000, atk=1)}, self.isolated(), 7, max_rounds=2)
+        self.assertEqual(report["meta"]["attack"]["g"]["700"]["ap"], 2)
+        self.assertEqual(self.hits(report)[0], 115)
+        cast = next(a for a in report["b"]["a"] if a["s"].get("S") == 180029)
+        self.assertEqual(next(d["m"]["m"] for d in cast["e"] if not d["r"] and isinstance(d.get("m"), dict)), 81)
+        self.assert_replays(report)
+
+    def test_chan_aura_is_team_scoped_and_same_family_does_not_stack(self):
+        attack = {2: self.gold(164004, 9001037, speed=300), 8: self.gold(164004, 9001037, iid=701, speed=200),
+                  10: self.unit(iid=702, speed=100)}
+        report = battle.simulate(attack, {2: self.unit(iid=1, atk=100, speed=400)}, self.isolated(), 7, max_rounds=1)
+        self.assertEqual(self.hits(report), [110])
+        self.assertEqual(self.hits(report, pos=8), [110])
+        self.assertEqual(self.hits(report, pos=10), [100])
+        self.assertEqual(self.hits(report, False), [85])
+        self.assert_replays(report)
+
+    def test_last_stand_extension_blocks_damage_and_healing_through_next_round_only(self):
+        config = self.isolated(9000379)
+        report = battle.simulate({2: self.gold(164004, 9001038, atk=1, hp=100, speed=1),
+                                 8: self.unit(10610, iid=701, initial_ap=4, speed=200)},
+                                {2: self.unit(iid=1, atk=1000, hp=10**9, speed=500)}, config, 7, max_rounds=3)
+        self.assertEqual(self.hits(report, False)[:2], [99, 0])
+        heals = [d["m"]["m"] for a in report["b"]["a"] if a["s"].get("S") == self.config["general"]["10610"]["skillid"]
+                 for d in a["e"] if d["r"] and d["p"] == 2 and isinstance(d.get("m"), dict)]
+        self.assertEqual(heals, [0])
+        self.assertEqual(report["endmeta"]["attack"]["2"]["h"], 0)
+        self.assert_replays(report)
+
+    def test_round_matrix_blocks_control_and_nonpet_ap_loss_but_not_pet(self):
+        config = self.isolated()
+        config["breakskill"] = {**config["breakskill"], "9001039": {**config["breakskill"]["9001039"], "value": 1}}
+        config["general"]["10201"] = {**config["general"]["10201"], "break1": 9100002, "break2": 9000370}
+        with patch.object(battle.random.Random, "random", return_value=0):
+            report = battle.simulate({2: self.unit(advance=2, speed=300)},
+                                     {2: self.gold(164004, 9001039, iid=1, hp=10**9, initial_ap=4)}, config, 7, max_rounds=1)
+        enemy = next(a for a in report["b"]["a"] if a["s"].get("r") is True and a["s"]["t"] == "N")
+        self.assertFalse(any(d.get("u", {}).get("u") == "dizzy" for d in enemy["e"]))
+        self.assertTrue(all(d["ap"] == 4 for d in enemy["e"] if d["r"] is False and "ap" in d))
+        self.assert_replays(report)
+        phase = min(int(k) for k, r in config["pet3_attr"]["90008"].items() if r["skillid"] == 12997)
+        config["combskill"] = {**config["combskill"], "12997": {**config["combskill"]["12997"], "trigger": 1}}
+        report = battle.simulate({2: self.unit()}, {2: self.gold(164004, 9001039, iid=1, initial_ap=4)}, config, 7,
+                                 attack_pet={"cid": 90008, "iid": 999, "phase": phase, "level": 1}, max_rounds=1)
+        self.assertTrue(any(d.get("ap") == 2 and not d["r"] for a in report["b"]["a"] if a["s"].get("p") == [0] for d in a["e"]))
+        self.assert_replays(report)
+
+    def test_sword_marks_increase_owner_damage_reduce_return_hits_and_expire(self):
+        with patch.object(battle.random.Random, "random", return_value=.99):
+            report = battle.simulate({2: self.gold(164038, 9001208, speed=300, initial_ap=4)},
+                                     {2: self.unit(iid=1, hp=100000, atk=100), 8: self.unit(iid=2, hp=100000, atk=100)}, self.isolated(), 7, max_rounds=3)
+        self.assertEqual(self.hits(report), [220, 220, 130, 100])
+        self.assertEqual(self.hits(report, False), [70, 70, 200])
+        self.assert_replays(report)
+
+    def test_personal_extra_targets_and_stun_probability_do_not_expand_combo(self):
+        enemies = {p: self.unit(iid=i+1, hp=100000, atk=1) for i, p in enumerate(battle.POSITIONS[:5])}
+        with patch.object(battle.random.Random, "random", return_value=.7), patch.object(battle.random.Random, "randint", return_value=2):
+            report = battle.simulate({2: self.gold(164038, 9001209, speed=300, initial_ap=4)}, enemies, self.isolated(), 7, max_rounds=1)
+        cast = next(a for a in report["b"]["a"] if a["s"].get("S") == 180072)
+        hits = [d for d in cast["e"] if not d["r"] and isinstance(d.get("m"), dict)]
+        self.assertEqual(len(hits), 4)
+        self.assertTrue(all(d.get("u") == {"u": "dizzy", "w": True} for d in hits))
+        self.assert_replays(report)
+
+    def test_personal_ap_drain_picks_highest_one_or_two_and_respects_immunity(self):
+        with patch.object(battle.random.Random, "randint", return_value=2):
+            report = battle.simulate({2: self.gold(164038, 9001210, speed=300, initial_ap=4)},
+                                     {p: self.unit(iid=i+1, initial_ap=ap, hp=100000, atk=1) for i, (p, ap) in enumerate(((2, 1), (8, 10), (10, 7)))}, self.isolated(), 7, max_rounds=1)
+        drain = next(a for a in report["b"]["a"] if not a["s"] and sum("ap" in d and not d["r"] for d in a["e"]) == 2)
+        self.assertEqual([(d["p"], d["ap"]) for d in drain["e"]], [(8, 8), (10, 5)])
+        self.assert_replays(report)
+        config = self.isolated()
+        config["general"]["10305"] = {**config["general"]["10305"], "break1": 9000537}
+        report = battle.simulate({2: self.gold(164038, 9001210, speed=300, initial_ap=4)},
+                                 {2: self.unit(10305, iid=1, advance=1, initial_ap=4, hp=100000)}, config, 7, max_rounds=1)
+        drain = next(a for a in report["b"]["a"] if not a["s"] and any(not d["r"] and "ap" in d for d in a["e"]))
+        self.assertEqual(drain["e"][0]["ap"], 4)
+        self.assert_replays(report)
+
+    def test_kill_from_extra_damage_casts_personal_once_without_second_ap_cost(self):
+        config = self.isolated()
+        config["general"]["164038"]["break1"] = 9000645
+        report = battle.simulate({2: self.gold(164038, 9001211, speed=300)},
+                                 {2: self.unit(iid=1, hp=100000, atk=1), 8: self.unit(iid=2, hp=1, atk=1),
+                                  10: self.unit(iid=3, hp=1, atk=1)}, config, 7, max_rounds=1)
+        casts = [a for a in report["b"]["a"] if a["s"].get("S") == 180072]
+        self.assertEqual(len(casts), 1)
+        self.assertEqual(report["endmeta"]["attack"]["2"]["ap"], 2)
+        self.assert_replays(report)
+
+    def test_personal_recovery_heals_lowest_to_full_and_rolls_two_ap(self):
+        with patch.object(battle.random.Random, "random", return_value=0):
+            report = battle.simulate({2: self.gold(164038, 9001212, speed=300, initial_ap=4), 8: self.unit(iid=701, hp=1000, speed=1)},
+                                     {8: self.unit(iid=1, speed=400, atk=500, hp=10**9)}, self.isolated(), 7, max_rounds=1)
+        self.assertTrue(any(d["r"] and d["p"] == 2 and d.get("m", {}).get("m", 0) == -500 for a in report["b"]["a"] for d in a["e"] if isinstance(d.get("m"), dict)))
+        self.assertEqual(report["endmeta"]["attack"]["2"]["h"], 10000)
+        self.assertEqual(report["endmeta"]["attack"]["2"]["ap"], 2)
+        self.assert_replays(report)
+
+    def test_even_round_immunity_blocks_two_hits_then_expires(self):
+        with patch.object(battle.random.Random, "random", return_value=.99):
+            report = battle.simulate({2: self.gold(164038, 9001213, speed=500)},
+                                     {p: self.unit(iid=i+1, hp=10**9, atk=100) for i, p in enumerate(battle.POSITIONS[:3])}, self.isolated(), 7, max_rounds=3)
+        hits = []
+        round_no = 1
+        for a in report["b"]["a"]:
+            if not a["s"] and not a["e"]:
+                round_no += 1
+            if a["s"].get("r") is False:
+                hits += [(round_no, d["m"]["m"], d["m"]["u"]) for d in a["e"] if d["r"] and isinstance(d.get("m"), dict)]
+        self.assertEqual([h[1] for h in hits if h[0] == 2], [0, 0, 100])
+        self.assertTrue(all(h[1] > 0 for h in hits if h[0] == 3))
+        self.assert_replays(report)
+
+    def test_gold_attack_auras_stack_across_heroes_not_choices_and_exclude_red(self):
+        config = self.isolated()
+        config["general"]["164036"] = {**config["general"]["164036"], **{f"break{i}": 0 for i in range(1, 17)}}
+        attack = {2: self.gold(164004, 9001038), 8: self.gold(164004, 9001039, iid=701),
+                  10: self.gold(164038, 9001212, iid=702), 4: self.gold(164036, 9001201, iid=703),
+                  12: self.unit(10829, iid=704)}
+        teams = {True: attack, False: {2: self.unit(iid=1)}}
+        battle._prepare_teams(teams, config)
+        self.assertEqual([u["atk"] for u in attack.values()], [160100]*4+[100])
+
+    def test_counted_immunity_survives_artifact_display_expiry_then_clears_next_round(self):
+        config = self.isolated()
+        row = next(r for r in config["trump_skillRnd"]["2"].values() if r["name"] == "屏障")
+        sid = row["skill6"]
+        config["breakskill"] = {**config["breakskill"], str(sid): {**config["breakskill"][str(sid)], "value2": 1}}
+        actor = self.gold(164038, 9001213, speed=500, artifact={"cid": 110005, "level": 0, "skills": [sid]})
+        with patch.object(battle.random.Random, "random", return_value=.99):
+            report = battle.simulate({2: actor}, {2: self.unit(iid=1, hp=10**9, atk=100)}, config, 7, max_rounds=3)
+        switches, round_no = {}, 1
+        for action in report["b"]["a"]:
+            if not action["s"] and not action["e"]:
+                round_no += 1
+            for change in action["e"]:
+                if change["r"] and change.get("u", {}).get("u") == "invincible":
+                    switches.setdefault(round_no, []).append(change["u"]["w"])
+        self.assertEqual(switches[2], [True])
+        self.assertEqual(switches[3], [False])
+        self.assert_replays(report)
+
+    def test_even_round_immunity_requires_not_more_allies_and_ignores_execution(self):
+        report = battle.simulate({2: self.gold(164038, 9001213, speed=300), 8: self.unit(iid=701)},
+                                 {2: self.unit(iid=1, hp=10**9, atk=100)}, self.isolated(), 7, max_rounds=2)
+        self.assertTrue(all(n > 0 for n in self.hits(report, False)))
+        self.assert_replays(report)
+        boss = self.unit(iid=1, npc=True, hp=10**9, atk=1, speed=1, skill=0, boss_cycle=[12640])
+        boss["cid"] = int(next(iter(self.config["personalboss_att"])))
+        # 第一轮普攻，第二轮Boss才有一次行动；免疫已在第二轮开始获得。
+        config = self.isolated()
+        config["general"][str(boss["cid"])] = dict(self.config["personalboss_att"][str(boss["cid"])], skillid=0, combskillid=0, init_cid=0)
+        actor = self.gold(164038, 9001213, speed=300)
+        config["general"]["164038"]["break1"] = 9100002
+        with patch.object(battle.random.Random, "random", side_effect=[0]+[.99]*20):
+            report = battle.simulate({2: actor}, {2: boss}, config, 7, max_rounds=2)
+        self.assertEqual(report["endmeta"]["attack"]["2"]["h"], 0)
+        self.assert_replays(report)
+
+    def test_kill_followup_stops_at_terminal_state_and_never_fires_for_an_ally(self):
+        for ally in (False, True):
+            attack = {2: self.gold(164038, 9001211, speed=300)}
+            if ally:
+                attack[8] = self.unit(iid=701, speed=500)
+            report = battle.simulate(attack, {2: self.unit(iid=1, hp=1, speed=1)}, self.isolated(), 7, max_rounds=30)
+            self.assertFalse(any(a["s"].get("S") == 180072 for a in report["b"]["a"]))
+            self.assertTrue(report["result"])
+            self.assert_replays(report)
+
+    def test_different_seeds_pve_pvp_and_gold_pair_all_choices_keep_terminal_replay(self):
+        for choices in product((1, 3), repeat=6):
+            attack = {}
+            for pos, cid, offset in ((2, 164004, 0), (8, 164038, 3)):
+                row = self.config["general"][str(cid)]
+                pids = [row[f"gold{i}_will_skills_{ch}"] for i, ch in enumerate(choices[offset:offset+3], 1)]
+                attack[pos] = self.gold(cid, *pids, iid=700+pos, hp=10**7, speed=300-pos, initial_ap=4)
+            for direct, npc, seed in ((True, False, 31), (False, True, 77)):
+                teams = {direct: attack, not direct: {p: self.unit(iid=100+i, hp=10**7, atk=500000, npc=npc) for i, p in enumerate(battle.POSITIONS)}}
+                original = copy.deepcopy(teams)
+                report = battle.simulate(teams[True], teams[False], self.config, seed)
+                self.assertEqual(teams, original)
+                self.assert_replays(report)
+
+    def reports(self):
+        for cid in (164004, 164038):
+            row = self.config["general"][str(cid)]
+            for choices in product((1, 3), repeat=3):
+                pids = [row[f"gold{i}_will_skills_{ch}"] for i, ch in enumerate(choices, 1)]
+                for direct in (True, False):
+                    teams = {direct: {2: self.gold(cid, *pids, hp=10**8, initial_ap=4, speed=300)},
+                             not direct: {p: self.unit(iid=100+i, hp=10**8, atk=1000) for i, p in enumerate(battle.POSITIONS)}}
+                    original = copy.deepcopy(teams)
+                    report = battle.simulate(teams[True], teams[False], self.config, 7, max_rounds=6)
+                    self.assertEqual(report, battle.simulate(teams[True], teams[False], self.config, 7, max_rounds=6))
+                    self.assertEqual(teams, original)
+                    self.assert_replays(report)
+                    yield report
+
+    def test_all_real_choices_both_sides_are_deterministic_and_replay_native_assets(self):
+        self.assert_native_reports(self.reports())
+
+    def test_gold_pair_combo_uses_both_real_positions_without_personal_only_effects(self):
+        config = self.isolated()
+        config["combskillprobability"] = copy.deepcopy(config["combskillprobability"])
+        config["combskillprobability"]["13073"]["bout1"] = 1
+        report = battle.simulate({2: self.gold(164004, 9001034, speed=300, initial_ap=4),
+                                 8: self.gold(164038, 9001209, 9001212, iid=701, speed=1, hp=1000000)},
+                                {2: self.unit(iid=1, hp=10**9, atk=1)}, config, 7, max_rounds=1)
+        cast = next(a for a in report["b"]["a"] if a["s"].get("S") == 13073)
+        self.assertEqual(cast["s"]["p"], [2, 8])
+        self.assert_replays(report)
+        self.assert_native_reports([report])
 
 
 if __name__ == "__main__":
