@@ -56,7 +56,7 @@ def load_role_config(config_path):
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
                               "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "treasure2_star", "build",
-                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold",
+                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold", "illusion",
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
                              "equip_forgingConsume", "equip_foringlv",
                               "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
@@ -697,7 +697,9 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         if update:
             record_slot_update(save, update)
     elif opcode in illusion.OPCODES:
-        body = illusion.prepare(opcode, save, request_body, role_config)
+        body, update = illusion.prepare(opcode, save, request_body, role_config, now)
+        if update:
+            record_slot_update(save, update)
     elif opcode in cover.OPCODES:
         body, costs, reward, update, delta = cover.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:

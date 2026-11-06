@@ -381,7 +381,7 @@ class Session:
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS, *exchange.MUTATIONS,
                                   *daily_events.CLAIMS, *collection.MUTATIONS, *achievements.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES,
-                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS):
+                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *illusion.MUTATIONS):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:
