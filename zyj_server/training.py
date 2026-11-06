@@ -51,8 +51,9 @@ def use_exp(save, body, config):
         raise ValueError("武将不存在")
     raw = generals[iid]
     row = config["general"][str(pb_get_varint(raw, 1))]
-    if (not row["battle"]
-            or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if n == 41 and w == 2)):
+    from . import illusion
+    illusion.validate_general(raw, config)
+    if not row["battle"]:
         raise ValueError("暂不支持此武将的高级成长")
     if any(pb_get_varint(raw, n) for n in range(21, 41)):
         from . import partner_growth

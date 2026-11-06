@@ -3076,6 +3076,103 @@ def patch_game_helper_scripts(patched):
     put("UIErrorMessage", replace(code, marker, marker+'    if LocalHelperUIError and LocalHelperUIError(t) then return end\n'))
 
 
+def patch_illusion_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        code = xxtea_decrypt(raw, XXTEA_KEY)
+        return code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8")
+
+    def put(name, code):
+        patched[f"assets/scripts/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    def replace(code, old, new):
+        assert code.count(old) == 1, old
+        return code.replace(old, new)
+
+    def method(code, prefix, name, transform):
+        start = code.index(f"function {prefix}.{name}(")
+        end = code.find("\nfunction ", start+1)
+        if end == -1:
+            end = code.index(f"\nreturn {prefix}", start)
+        return code[:start]+transform(code[start:end])+code[end:]
+
+    def generation(part):
+        at = part.index("\n")+1
+        return part[:at]+"    self.localIllusionGeneration=(self.localIllusionGeneration or 0)+1\n"+part[at:]
+
+    for name, filename in (("GameIllusion", "illusion_network.lua"), ("UIIllusion", "illusion_ui.lua")):
+        with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
+            put(name, load(name)+"\n"+stream.read())
+    code = load("GameCombMessages")
+    marker = "        fd.rbuf = v.data\n"
+    put("GameCombMessages", replace(code, marker, marker+'        fd.localIllusionInit = v.id==8110 and gamedata.ext.combmessageOrder=="datainit"\n'))
+    code = load("gamedata")
+    marker = "            general.illusionGeneralCid = general.illusion.illusionGeneralCid\n"
+    put("gamedata", replace(code, marker, marker+"            general.illusion.scope = general.illusion.score\n"))
+    code = load("Layer_illusion")
+    for name in ("init", "clear"):
+        code = method(code, "huanhuaList", name, generation)
+    code = replace(code, "    UIRequest({type = 8110})\n    UIRequest({type = 8252, page = 1})", "    UIRequest({type = 8110,update = 1})")
+    marker = "    local data = self.data[tostring(index)]\n"
+    code = replace(code, marker, marker+'''    local generation,revision=self.localIllusionGeneration,self.localIllusionRevision
+    local function current()
+        local row=self.data and self.data[tostring(index)]
+        return self.rootNode and self.localIllusionGeneration==generation and self.localIllusionRevision==revision
+            and row and row.cid==data.cid and row.endtime==data.endtime
+    end
+''')
+    # 只保护控件/选择回调，不改 current 自身。
+    code = method(code, "huanhuaList", "setCell", lambda part: part.replace(
+        "addHandleOfControlEvent(function()\n", "addHandleOfControlEvent(function()\n        if not current() then return end\n").replace(
+        "local cb = function (select)\n", "local cb = function (select)\n                if not current() then return end\n"))
+    code = method(code, "huanhuaList", "reloaddata", lambda part: part.replace(
+        "    if data then", "    self.localIllusionRevision=(self.localIllusionRevision or 0)+1\n    if data then", 1))
+    marker = "return huanhuaList"
+    timer = '''local localIllusionInit=huanhuaList.init
+function huanhuaList.init(self,...)
+    localIllusionInit(self,...)
+    local generation=self.localIllusionGeneration
+    local nextCheck=os.time()+1
+    local requested
+    local function tick()
+        if not self.rootNode or self.localIllusionGeneration~=generation then return end
+        if os.time()>=nextCheck then
+            nextCheck=os.time()+1
+            for _,row in pairs(self.data or {}) do
+                if row.endtime<=gamedata:time() and requested~=row.endtime then
+                    requested=row.endtime
+                    UIRequest({type=8110,update=1})
+                    break
+                end
+            end
+        end
+        self.rootNode:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(0.5),CCCallFunc:create(tick)))
+    end
+    tick()
+end
+'''
+    put("Layer_illusion", replace(code, marker, timer+marker))
+    code = load("window_changebreakskill")
+    for name in ("reload", "close"):
+        code = method(code, "changebreakskill", name, generation)
+    marker = "    UIRequest({type = 12001, order = 32005, cids = {20822}})"
+    code = replace(code, marker, marker+"\n    if self.selectIllusion then self.localIllusionExpected=nil;UIRequest({type=8110,update=1}) end")
+    for name in ("reload", "setCell"):
+        def guarded(part):
+            at = part.index("\n")+1
+            if part[at:].startswith("    self.localIllusionGeneration="):
+                at = part.index("\n", at)+1
+            part = part[:at]+"    local generation=self.localIllusionGeneration\n"+part[at:]
+            return part.replace("addHandleOfControlEvent(function()\n", "addHandleOfControlEvent(function()\n        if not self.rootNode or self.localIllusionGeneration~=generation then return end\n")
+        code = method(code, "changebreakskill", name, guarded)
+    code = method(code, "changebreakskill", "changeskill", lambda part: part.replace(
+        "    local scopetmp", "    self.localIllusionSelection=(self.localIllusionSelection or 0)+1\n    local selection=self.localIllusionSelection\n    local generation=self.localIllusionGeneration\n    local scopetmp", 1).replace(
+        "addHandleOfControlEvent(function()\n", "addHandleOfControlEvent(function()\n        if not self.rootNode or self.localIllusionGeneration~=generation or self.localIllusionSelection~=selection then return end\n"))
+    put("window_changebreakskill", code)
+
+
 def patch_artifact_scripts(patched):
     def load(name, folder="scripts"):
         raw = patched.get(f"assets/{folder}/{name}.so")
@@ -4438,6 +4535,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_champion_scripts(patched)
     patch_hades_scripts(patched)
     patch_partner_growth_scripts(patched)
+    patch_illusion_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")

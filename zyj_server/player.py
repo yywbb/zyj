@@ -56,7 +56,7 @@ def load_role_config(config_path):
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
                               "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "treasure2_star", "build",
-                             "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold", "illusion",
+                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold", "illusion", "illusion_attenuation",
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
                              "equip_forgingConsume", "equip_foringlv",
                               "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
@@ -596,6 +596,8 @@ def apply_reward(save, body, role_config, now=None):
         elif field == 8 and wire == 2:
             record_protagonist_general(save, value)
             record_slot_update(save, encode_pb_field(1, 2, value))
+        elif field == 18 and wire == 2:
+            illusion.receive_reward(save, value, role_config, int(time.time()) if now is None else now)
 
 
 def record_protagonist_general(save, general):
@@ -1195,6 +1197,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
 def prepare_recorded_responses(seq, responses, save, request_body, save_path, step_counts, role_config, connected_at, *, auto_sigils=None, guild_profit=None, guild_level=None, cup_rank=None, examination_ranks=None):
     before = copy.deepcopy(save)
     now = int(time.time())
+    illusion.synchronize(save, role_config, now)
     if guild_level and responses and responses[0]["opcode"] in achievements.OPCODES:
         state = achievements.get_state(save, role_config)
         state["guild_level"] = guild_level()
@@ -1306,6 +1309,11 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
 
 
 def save_response_group(packets, save, before, save_path, step_counts, role_config, now):
+    illusion_update = illusion.synchronize(save, role_config, now)
+    if (illusion_update or save.get("illusion_state", {}).get("items") != before.get("illusion_state", {}).get("items")
+            or save.get("illusion_state", {}).get("serial", 0) != before.get("illusion_state", {}).get("serial", 0)):
+        packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
+        packets.append(pack_frame(8110, 0, illusion.query(save, role_config)))
     # 神器和全队条件随换将/成长变化；统一结算差值，不能再次当作基础成长。
     update = b""
     for module in (artifact, deployment):
@@ -1364,6 +1372,7 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
 def prepare_battle_responses(seq, save, request_body, save_path, step_counts, role_config, connected_at, *, opcode=1306, guild_profit=None):
     before = copy.deepcopy(save)
     now = int(time.time())
+    illusion.synchronize(save, role_config, now)
     if guild_profit:
         save["guild_profit"] = guild_profit(now)
     self_update = settle_self_stats(save, role_config)

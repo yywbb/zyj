@@ -2,7 +2,7 @@
 
 import random
 
-from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
+from .protocol import encode_pb_field, pb_get_varint, pb_set_varint
 
 QUERIES = (5511, 5512)
 MUTATIONS = (1025, 5513, 7001)
@@ -45,12 +45,13 @@ def remove(save, iid):
 
 
 def validate(raw, config):
+    from . import illusion
+    illusion.validate_general(raw, config)
     row = config["general"].get(str(pb_get_varint(raw, 1)), {})
     if (not row.get("battle") or not row.get("init_cid") or row.get("actor") == "lead"
             or row.get("partner_id") or row.get("quality") not in range(3, 8)
             or not 0 <= (pb_get_varint(raw, 4) or 0) <= min(16, row.get("breach_upper_limit", 10))
-            or any(pb_get_varint(raw, n) for n in (21, 22, 38, 39))
-            or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
+            or any(pb_get_varint(raw, n) for n in (21, 22, 38, 39))):
         raise ValueError("此伙伴包含尚未接通的升星、幻化或高级属性")
     awake = pb_get_varint(raw, 18) or 0
     if awake and (str(awake) not in config["general_awaken"] or not row.get("awaken")):
@@ -105,11 +106,14 @@ def skills(raw, config):
 
 
 def check_combat(raw, config):
-    from . import battle
+    from . import battle, illusion
     row = config["general"][str(pb_get_varint(raw, 1))]
     unit = {name: pb_get_varint(raw, f) or 0 for name, f in battle.GENERAL_FIELDS.items()}
     unit.update(skill=row["skillid"], skilllevel=0, partner_skills=skills(raw, config))
     battle._prepare_teams({True: {2: unit.copy()}, False: {2: unit.copy()}}, config)
+    data = illusion.values(raw)
+    if data and data[0]:
+        illusion.check_combat(raw, illusion.metadata(raw, data[0], config), config)
 
 
 def rebase(save, raw, changed, config):

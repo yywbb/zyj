@@ -101,14 +101,14 @@ def pick(config, group, rng):
             return cid, count
 
 
-def build_reward(save, gets, config):
+def build_reward(save, gets, config, now=None):
     """招募和礼包共用武将去重，预览不调用此函数发放。"""
     from . import favorite
     roster = [v for n, w, v in iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])) if n == 1 and w == 2]
     owned = {config["general"][str(pb_get_varint(v, 1))]["init_cid"] for v in roster}
     iid = max([2000000, *(pb_get_varint(v, 2) for v in roster)])
     fragments = {v["general"]: v for v in config["general_fragment"].values()}
-    generals, props, illusions = [], {}, []
+    generals, props, illusions = [], {}, {}
     for cid, count in gets:
         if type(count) is not int or not 0 < count < (1 << (63 if cid == 1000 else 31)):
             raise ValueError("奖励数量无效")
@@ -130,7 +130,7 @@ def build_reward(save, gets, config):
                     pstate["active"] = new_pet[0]
             props[debris] = props.get(debris, 0) + count * 100
         elif str(cid) in config.get("illusion", {}):
-            illusions.append(illusion.grant(save, cid, count, config, int(time.time())))
+            illusions[cid] = illusions.get(cid, 0) + count
         elif str(cid) in config["general"]:
             for _ in range(count):
                 if cid in owned:
@@ -143,7 +143,10 @@ def build_reward(save, gets, config):
                     owned.add(cid)
         else:
             props[cid] = props.get(cid, 0) + count
-    return activities.build_reward(save, ";".join(f"{cid},{amount}" for cid, amount in props.items()), config) + b"".join(generals) + illusion.reward_field(illusions)
+    return (activities.build_reward(save, ";".join(f"{cid},{amount}" for cid, amount in props.items()), config)
+            + b"".join(generals) + illusion.reward_field([
+                illusion.grant(save, cid, count, config, int(time.time()) if now is None else now)
+                for cid, count in sorted(illusions.items())]))
 
 
 def get_pending(save):

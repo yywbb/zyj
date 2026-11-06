@@ -79,6 +79,8 @@ class Session:
         gamestar.get_state(self.save, role_config)
         deployment.get_state(self.save, role_config)
         partner_growth.state(self.save, role_config)
+        illusion.get_state(self.save, role_config)
+        illusion.validate_ownership(self.save, role_config)
         collection.get_state(self.save, role_config)
         achievements.get_state(self.save, role_config)
         pets.get_state(self.save, role_config)

@@ -2375,7 +2375,7 @@ class ReplayRoutingTests(unittest.TestCase):
         recorded_messages = protocol.get_comb_messages(bytes.fromhex(recorded["hex"]))
         self.assertEqual([mid for mid, _ in messages], [mid for mid, _ in recorded_messages])
         self.assertEqual({mid: body for mid, body in messages if mid in (8101, 8105, 8109, 8110)},
-                         dict.fromkeys((8101, 8105, 8109, 8110), b""))
+                         {**dict.fromkeys((8101, 8105, 8109), b""), 8110: protocol.encode_pb_field(100, 2, recharge.ids([0]))})
         role = self.role_data(responses[0])
         self.assertEqual([role[n] for n in (5, 6, 8, 9, 10)], [1, 0, 0, 0, 50])
         baseline_role = self.role_data(self.recorded[(12, 999900)])
@@ -10181,8 +10181,9 @@ class ReplayRoutingTests(unittest.TestCase):
             with self.subTest(body=body):
                 packets = session.handle(8110, 6, body)
                 self.assertEqual(len(packets), 1)
-                self.assertEqual(struct.unpack(">IIII", packets[0][:16]), (0xEE1C, 0, 8110, 6))
-                self.assertEqual(packets[0][16:], b"")
+                expected = protocol.encode_pb_field(100, 2, recharge.ids([0]))
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16]), (0xEE1C, len(expected), 8110, 6))
+                self.assertEqual(packets[0][16:], expected)
 
     def test_activity_tabs_match_official_fields_without_account_history(self):
         self.replay(self.requests)

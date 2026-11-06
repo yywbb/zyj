@@ -224,6 +224,7 @@ def strengthen_stones(save, body, config):
 
 
 def apply_slots(save, slots, config, *, cheers=None, souls=None):
+    from . import illusion
     # 撤下伙伴时释放神器，不能留在不可操作的空阵位。
     slots = {sid: pb_set_varint(slot, 26, 0) if not pb_get_varint(slot, 2) and pb_get_varint(slot, 26) else slot
              for sid, slot in slots.items()}
@@ -240,6 +241,8 @@ def apply_slots(save, slots, config, *, cheers=None, souls=None):
     cheers = old_cheers if cheers is None else cheers
     old_iids = {pb_get_varint(v, 2) for v in old_cheers.values()} - {None, 0}
     new_iids = {pb_get_varint(v, 2) for v in cheers.values()} - {None, 0}
+    if any(illusion.values(raw) and illusion.values(raw)[0] for raw in generals.values()):
+        illusion.validate_slots(generals, after.keys() | new_iids, config)
     if ({config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in after}
             & {config["general"][str(pb_get_varint(generals[i], 1))]["init_cid"] for i in new_iids}):
         raise ValueError("同源伙伴不能同时上阵和助阵，请先撤下")

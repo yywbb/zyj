@@ -3,7 +3,7 @@
 from fractions import Fraction
 import random
 
-from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
+from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 OPCODES = (1013, 1014, 1126)
 FIELDS = (6, 8, 7)
@@ -126,12 +126,13 @@ def prepare(opcode, save, body, config, seed):
     if iid not in generals:
         raise ValueError("培养伙伴不存在或不属于当前账号")
     raw = generals[iid]
+    from . import illusion
+    illusion.validate_general(raw, config)
     cid = pb_get_varint(raw, 1)
     row = config["general"][str(cid)]
     if (iid == pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
             or not row["battle"] or not row["init_cid"] or row["quality"] not in range(2, 8)
-            or pb_get_varint(raw, 3) <= 1
-            or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
+            or pb_get_varint(raw, 3) <= 1):
         raise ValueError("请选择2级以上普通伙伴，主角和高级对象暂不支持")
     if (pb_get_varint(raw, 4) or 0) > 10 or any(pb_get_varint(raw, n) for n in range(21, 41)):
         from . import partner_growth

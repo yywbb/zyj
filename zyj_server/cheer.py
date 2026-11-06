@@ -2,10 +2,11 @@
 
 from fractions import Fraction
 
-from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
+from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
 
 
 def assigned(save, config):
+    from . import illusion
     world = bytes.fromhex(save["world_state"]["1002"])
     generals = {pb_get_varint(v, 2): v for n, w, v in iter_pb_fields(world) if (n, w) == (1, 2)}
     main = {pb_get_varint(v, 2) for n, w, v in iter_pb_fields(world) if (n, w) == (4, 2)}
@@ -23,8 +24,7 @@ def assigned(save, config):
         raw = generals.get(iid)
         row = config["general"].get(str(pb_get_varint(raw or b"", 1)), {})
         if (sid > maximum or not raw or iid in seen or iid in main or not row.get("battle")
-                or row.get("actor") == "lead" or not row.get("init_cid") or row.get("quality") not in range(2, 8)
-                or any(any(parse_ids_pb(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
+                or row.get("actor") == "lead" or not row.get("init_cid") or row.get("quality") not in range(2, 8)):
             raise ValueError("助阵伙伴未解锁、不属于本人、重复占用或含未实现的高级属性")
         if (pb_get_varint(raw, 4) or 0) > 10 or any(pb_get_varint(raw, f) for f in range(21, 41)):
             from . import partner_growth
@@ -34,6 +34,8 @@ def assigned(save, config):
             raise ValueError("同源伙伴不能重复上阵或助阵")
         seen.add(iid)
         result[sid] = raw
+    if any(illusion.values(raw) and illusion.values(raw)[0] for raw in generals.values()):
+        illusion.validate_slots(generals, seen | (main - {None, 0}), config)
     return result
 
 
@@ -91,5 +93,10 @@ def growth(save, previous, config):
     return update, power
 
 
-def combat(save, config):
-    return [pb_get_varint(raw, 1) for _, raw in sorted(assigned(save, config).items())]
+def combat(save, config, *, illusion_mode="pve", now=None):
+    from . import illusion
+    result = []
+    for _, raw in sorted(assigned(save, config).items()):
+        data = illusion.effective(raw, save, config, illusion_mode, now)
+        result.append(data[8] if data else pb_get_varint(raw, 1))
+    return result

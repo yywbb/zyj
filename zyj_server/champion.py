@@ -108,7 +108,7 @@ def fight(save, state, point, config, seed):
         raise ValueError('试炼次数不足或据点尚未开放/已经战胜')
     rank, row = npc(state, point, config)
     attack, defense = arena.rosters(save, row, config)
-    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
+    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config, illusion_mode="pvp"))
     report['meta']['attack']['n'] = save['role_name']
     report['meta']['defense']['n'] = row['name']
     state['used'] += 1

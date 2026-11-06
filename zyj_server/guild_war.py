@@ -3,6 +3,7 @@
 import copy
 from fractions import Fraction
 import secrets
+import time
 
 OPCODES = tuple(range(2130, 2148))
 MUTATIONS = (2132, 2135, 2136, 2137, 2142, 2146, 2147)
@@ -74,10 +75,12 @@ def get_state(state, config, now):
 
 
 def freeze(save):
-    snapshot = copy.deepcopy({k: save[k] for k in ("role_state", "role_name", "pet_state", "guild_skills", "wing_state", "cover_state") if k in save})
+    snapshot = copy.deepcopy({k: save[k] for k in ("role_state", "role_name", "pet_state", "guild_skills", "wing_state", "cover_state", "illusion_state", "partner_growth_state") if k in save})
     if "cover_state" in snapshot:
         snapshot["cover_state"].update(shop={}, day=0, checked_at=0)
     snapshot["world_state"] = {"1002": save["world_state"]["1002"]}
+    if "illusion_state" in snapshot:
+        snapshot["illusion_frozen_at"] = int(time.time())
     return snapshot
 
 
@@ -85,7 +88,7 @@ def team_roster(team, config, counts):
     from . import battle, pets
 
     snapshot = team["snapshot"]
-    roster, _ = battle.rosters(snapshot, config["copy"]["42101"]["1"], config)
+    roster, _ = battle.rosters(snapshot, config["copy"]["42101"]["1"], config, illusion_mode="pvp")
     atk = min(counts[0] // 2 * 5, 50) + counts[1] * 5
     defense = min((counts[0] + 1) // 2 * 5, 50) + counts[1] * 5
     for u in roster.values():
@@ -129,8 +132,8 @@ def duel(war, city, attacker, defender, state, saves, config):
             unit["def"] += castle["def"] // len(defense)
         seed = secrets.randbits(64)
         report = battle.simulate(attack, defense, config, seed, attack_pet=pet_a, defense_pet=pet_b,
-                                 attack_cheer=cheer.combat(ta["snapshot"], config),
-                                 defense_cheer=() if "npc" in td else cheer.combat(td["snapshot"], config))
+                                 attack_cheer=cheer.combat(ta["snapshot"], config, illusion_mode="pvp"),
+                                 defense_cheer=() if "npc" in td else cheer.combat(td["snapshot"], config, illusion_mode="pvp"))
         report["meta"]["attack"]["n"] = ta["snapshot"]["role_name"]
         report["meta"]["defense"]["n"] = name
         fight["reports"].append({"a": a, "b": b, "name_a": ta["snapshot"]["role_name"], "name_b": name,
@@ -340,5 +343,5 @@ def join(war, row, gid, save, viewer, city, config, now):
         raise ValueError("据点尚未报名或入会未满一天")
     from . import battle
     snapshot = freeze(save)
-    battle.rosters(snapshot, config["copy"]["42101"]["1"], config)
+    battle.rosters(snapshot, config["copy"]["42101"]["1"], config, illusion_mode="pvp")
     war["teams"][str(viewer)] = {"guild": int(gid), "point": city, "identity": save["created_at"], "snapshot": snapshot}

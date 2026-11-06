@@ -126,7 +126,7 @@ def rosters(save, row, config):
     for i in range(1, 8):
         for name in ("adddmgpct", "subdmgpct"):
             point.setdefault(f"{name}{i}-correct", 0)
-    return battle.rosters(save, point, config)
+    return battle.rosters(save, point, config, illusion_mode="pvp")
 
 
 def prepare(opcode, save, body, config, now, seed):
@@ -171,7 +171,7 @@ def prepare(opcode, save, body, config, now, seed):
         target = fields[0][2]
         row = config["athletics_copy2"][str(target)]
     attack, defense = rosters(save, row, config)
-    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
+    report = battle.simulate(attack, defense, config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config, illusion_mode="pvp"))
     report["meta"]["attack"]["n"] = save["role_name"]
     report["meta"]["defense"]["n"] = row.get("name", "NPC牛魔王")
     state["used"] += 1

@@ -244,6 +244,10 @@ def prepare(opcode, save, body, config):
         for field in new:
             changes[field] = changes.get(field, 0) + new[field] - old[field] + new_self[field] - old_self[field]
         changed, increase = adjust(changed, changes)
+        from . import illusion
+        data = illusion.values(raw)
+        if data and data[0]:
+            illusion.check_combat(changed, illusion.metadata(changed, data[0], config), config)
         reply = encode_pb_field(1, 2, changed)
         if opcode == 1023:
             return reply, costs, update

@@ -398,10 +398,10 @@ def prepare(opcode, body, state, saves, account, config, now, cursors, online, g
             from .guild_boss import battle_result
             point = config["copy"]["42101"]["1"]
             attacker, defender = copy.deepcopy(save), copy.deepcopy(saves[peer])
-            attack, _ = battle.rosters(attacker, point, config)
-            defense, _ = battle.rosters(defender, point, config)
+            attack, _ = battle.rosters(attacker, point, config, illusion_mode="pvp", now=now)
+            defense, _ = battle.rosters(defender, point, config, illusion_mode="pvp", now=now)
             report = battle.simulate(attack, defense, config, random.getrandbits(64), attack_pet=pets.combat(attacker, config), defense_pet=pets.combat(defender, config),
-                                     attack_cheer=cheer.combat(attacker, config), defense_cheer=cheer.combat(defender, config))
+                                     attack_cheer=cheer.combat(attacker, config, illusion_mode="pvp", now=now), defense_cheer=cheer.combat(defender, config, illusion_mode="pvp", now=now))
             report["meta"]["attack"]["n"], report["meta"]["defense"]["n"] = save["role_name"], saves[peer]["role_name"]
             reply = battle_result(report)
     elif opcode == 3002:

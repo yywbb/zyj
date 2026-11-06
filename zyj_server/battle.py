@@ -6,7 +6,7 @@ from fractions import Fraction
 
 from . import guild_skill
 
-from . import artifact, cover, equip_baptize, equip_evolve, godstone, magic, partner_growth, pets, sigil, soul, treasure_refine, wing
+from . import artifact, cover, equip_baptize, equip_evolve, godstone, illusion, magic, partner_growth, pets, sigil, soul, treasure_refine, wing
 from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 
 
@@ -87,7 +87,7 @@ def sweep(save, body, config):
     return point, min(remaining, state["stamina"] // point["physical"]) if method else 1
 
 
-def rosters(save, point, config):
+def rosters(save, point, config, *, illusion_mode="pve", now=None):
     """属性来自当前阵容快照；怪物属性来自关卡修正，绝不读取录制账号。"""
     fields = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))
     generals = {pb_get_varint(v, 2): v for n, w, v in fields if n == 1 and w == 2}
@@ -180,6 +180,20 @@ def rosters(save, point, config):
                              for sid in treasure_refine.star_skills(parse_ids_pb(equips[pb_get_varint(slot, field)]), config)]
         if treasure_passives:
             unit["treasure_passives"] = treasure_passives
+        image = illusion.effective(raw, save, config, illusion_mode, now)
+        if image:
+            source = config["general"][str(unit["cid"])]
+            target = config["general"][str(image[8])]
+            advance = min(unit["advance"], target["breach_upper_limit"])
+            before = self_stats(source, unit["level"], unit["advance"], config)
+            after = self_stats(target, unit["level"], advance, config, basis=(source, unit["advance"]))
+            for name, field in GENERAL_FIELDS.items():
+                if field in before:
+                    unit[name] += after[field]-before[field]
+            for name in ("atk", "def", "hp"):
+                unit[name] = max(1 if name != "def" else 0, unit[name]*(100-image[7])//100)
+            unit.update(cid=image[8], advance=advance, skill=target["skillid"], gold_camp=image[6],
+                        partner_skills=[target[f"gold{i}_will_skills_{image[i]}"] for i in range(1, 4) if image[i]])
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")
@@ -2085,7 +2099,7 @@ def general_base(row, name, level, advance, config):
     return value
 
 
-def self_stats(row, level, advance, config):
+def self_stats(row, level, advance, config, *, basis=None):
     values = {field: Fraction(0) for field in range(6, 17)}
     ids = {row.get(f"break{i}", 0) for i in range(1, advance + 1)} - {0}
     for pid in sorted(ids):
@@ -2098,7 +2112,8 @@ def self_stats(row, level, advance, config):
         value = Fraction(str(passive["value"])) * (-1 if passive["kind"] == "1" else 1)
         # 四围百分比只乘通用突破后的基础成长；概率属性使用配置百分点。
         if passive["method"] == "percent" and name in ("atk", "def", "hp", "speed"):
-            value *= int(general_base(row, name, level, advance, config))
+            base_row, base_advance = basis or (row, advance)
+            value *= int(general_base(base_row, name, level, base_advance, config))
         values[GENERAL_FIELDS[name]] += value
     return {field: int(value) for field, value in values.items()}
 

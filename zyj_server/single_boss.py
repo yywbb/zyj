@@ -87,6 +87,12 @@ def project_team(save, team, config):
     validate_team(save, team, config)
     temporary = copy.deepcopy(save)
     world = bytes.fromhex(save["world_state"]["1002"])
+    from . import illusion
+    # 王的男人仅使用本体；在战斗副本清除幻化，避免幻影身份误拦专用阵容。
+    world = b"".join(encode_pb_field(n, w, illusion.with_illusion(v, None) if (n, w) == (1, 2) and illusion.values(v)[:1] not in ([], [0]) else v)
+                     for n, w, v in iter_pb_fields(world))
+    temporary["world_state"]["1002"] = world.hex()
+    temporary.pop("illusion_state", None)
     generals, old = formation.records(world, 1, 2), formation.records(world, 4, 2)
     slots = {i: pb_set_varint(pb_set_varint(old.get(iid, b"") if iid else b"", 1, i), 2, iid) for i, iid in enumerate(team[:7], 1)}
     origins = {config["general"][str(pb_get_varint(generals[iid], 1))]["init_cid"] for iid in team[:7] if iid}
@@ -126,7 +132,7 @@ def project_team(save, team, config):
 def rosters(save, team, row, config):
     temporary, power = project_team(save, team, config)
     point = dict(config["copy"]["42101"]["1"])
-    attack, _ = battle.rosters(temporary, point, config)
+    attack, _ = battle.rosters(temporary, point, config, illusion_mode="none")
     cycle = []
     for entry in row["order"].strip(";").split(";"):
         index = int(entry)
@@ -239,7 +245,7 @@ def prepare(opcode, save, body, config, now, seed):
         raise ValueError("一键挑战需要80级或VIP5，且只能挑战已通关难度")
     attack, defense, combat_config, pet, _ = rosters(save, state["teams"][str(kind)], row, config)
     origins = {config["general"][str(unit["cid"])]["init_cid"] for unit in attack.values()}
-    supports = [cid for cid in cheer.combat(save, config) if config["general"][str(cid)]["init_cid"] not in origins]
+    supports = [cid for cid in cheer.combat(save, config, illusion_mode="none") if config["general"][str(cid)]["init_cid"] not in origins]
     rng, gets, won = random.Random(seed), Counter(), 0
     for attempt in range(1, count + 1):
         battle_seed = rng.getrandbits(64)
