@@ -10174,6 +10174,16 @@ class ReplayRoutingTests(unittest.TestCase):
         self.assertEqual([struct.unpack(">IIII", packet[:16])[2] for packet in packets], [999999, 1999])
         self.assertEqual((session.save, self.save_path.read_bytes()), (memory, disk))
 
+    def test_illusion_query_returns_empty_ids_without_invalid_request_error(self):
+        self.replay(self.requests)
+        session = Session(self.tables, self.save_path, self.step_counts, self.role_config)
+        for body in (b"", recharge.ids([0]), recharge.ids([1])):
+            with self.subTest(body=body):
+                packets = session.handle(8110, 6, body)
+                self.assertEqual(len(packets), 1)
+                self.assertEqual(struct.unpack(">IIII", packets[0][:16]), (0xEE1C, 0, 8110, 6))
+                self.assertEqual(packets[0][16:], b"")
+
     def test_activity_tabs_match_official_fields_without_account_history(self):
         self.replay(self.requests)
         capture = json.loads((Path(server.BASE_DIR) / "official_battle_capture_20261028_2014.json").read_text())

@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, hades_copy, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, nightclub, soul, wing
+from . import achievements, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, illusion, nightclub, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -696,6 +696,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if update:
             record_slot_update(save, update)
+    elif opcode in illusion.OPCODES:
+        body = illusion.prepare(opcode, save, request_body, role_config)
     elif opcode in cover.OPCODES:
         body, costs, reward, update, delta = cover.prepare(opcode, save, request_body, role_config, now)
         for cid, count in costs:
