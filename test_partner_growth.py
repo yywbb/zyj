@@ -394,6 +394,78 @@ class PartnerGrowthTests(unittest.TestCase):
             lua.execute(change+b';UIGeneralBreakPreview(response)')
             self.assertEqual(lua.globals().applied, 1)
 
+    def test_native_research_refresh_keeps_success_and_requeries_after_reentry(self):
+        from lupa.lua51 import LuaRuntime
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        for phase in (0, 1):
+            with self.subTest(material_refresh=phase):
+                lua = LuaRuntime()
+                lua.globals().config = lua.table_from(self.config, recursive=True)
+                lua.execute('''generalup={};gamedata={config=config};print=function() end
+                    GameScene={checkUpdate=function() return false end,checkopenlevelbyId=function() return true end}
+                    gameConfig={images={},strings={string_common=function() return "" end},checkBuildOpen=function() return true end}
+                    guide={controller={addComplete=function() end}}
+                    ui={setLabelString=function() end,getIDandNUMs=function() return {{cid=20661,num=10}} end}
+                    setSpriteFrameByName=function() end
+                    sent={};UIRequest=function(req) sent[#sent+1]=req end
+                    local node=setmetatable({}, {__index=function() return function() end end})
+                    local hero={iid=7,cid=10609,level1=300,level2=10,skilllevel=0,level6=0,level7=0}
+                    snapshot={iid=7,heart1=10,heart2=0}
+                    page=setmetatable({data={general=hero},generalsdata={['1']=hero},generalindex=1,
+                        generalcid=10609,selectpage="xiulian",xiulianType=1,autoXiulian=true,
+                        localPartnerGeneration=2,localPartnerTarget=7,xiuLianData={[7]=snapshot},
+                        rootItems=setmetatable({}, {__index=function() return node end}),generalListTableView=node,
+                        pagenodes={xiulian="xiuliannode"},setPageTitleOffset=function() end,touchLayerSet=function() end,
+                        setXiuLianData=function(self) displayed=self.xiuLianData[7] end}, {__index=generalup})''')
+                for name in ("ReloadData", "freshUI", "shiftPage", "setPage_xiulian", "getXiulianProp"):
+                    start = code.index(f"function generalup.{name}(")
+                    lua.execute(code[start:code.index("\nend", start)+len("\nend")])
+                lua.globals().page.isRefreshXiulianProps = phase
+                lua.execute('page:ReloadData();assert(page.xiuLianData[7]==snapshot);assert(displayed==snapshot)')
+                self.assertTrue(lua.globals().page.autoXiulian)
+                self.assertIsNone(lua.globals().page.isRefreshXiulianProps)
+                self.assertEqual([req.type for req in lua.globals().sent.values()], [12001])
+                lua.execute('''sent={};page.isRefreshXiulianProps=1;page.xiuLianHave={}
+                    page:shiftPage("xiulian")
+                    assert(page.xiuLianData[7]==nil and page.xiuLianHave==nil)
+                    assert(page.isRefreshXiulianProps==nil and not page.autoXiulian)''')
+                self.assertEqual([req.type for req in lua.globals().sent.values()], [5511, 5512])
+                lua.execute('''sent={};page.xiuLianData={[7]=snapshot,[8]={iid=8}}
+                    page.generalsdata['1'].iid=8;page.isRefreshXiulianProps=1;page.xiuLianHave={}
+                    page:freshUI()
+                    assert(page.xiuLianData[7]==snapshot and page.xiuLianData[8]==nil)
+                    assert(page.isRefreshXiulianProps==nil and page.xiuLianHave==nil)''')
+                self.assertEqual([req.type for req in lua.globals().sent.values()], [5511, 5512])
+
+    def test_native_research_material_timers_ignore_closed_or_switched_pages(self):
+        from lupa.lua51 import LuaRuntime
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        start = code.index("function generalup.setXiuLianPropShow(")
+        code = code[start:code.index("\nend", start)+len("\nend")]
+        for phase, change in product((1, 2), ("page.localPartnerGeneration=4;page.data=nil", "page.data.general.iid=8")):
+            with self.subTest(timer=phase, change=change):
+                lua = LuaRuntime()
+                lua.execute('''generalup={};printT=function() end;print=function() end
+                    gameConfig={strings={string_common=function() return "" end}};ui={setLabelString=function() end}
+                    CCControlEventTouchUpInside=1;CCDelayTime={create=function() return {} end}
+                    CCCallFunc={create=function(_,fn) return fn end}
+                    CCSequence={createWithTwoActions=function(_,delay,fn) return fn end}
+                    delayed={};local node=setmetatable({runAction=function(self,fn) delayed[#delayed+1]=fn end},
+                        {__index=function() return function() end end})
+                    page=setmetatable({data={general={iid=7}},localPartnerGeneration=3,selectpage="xiulian",
+                        autoXiulian=true,xiuLianProps={},xiuLianAddData={[7]={}},
+                        rootItems=setmetatable({}, {__index=function() return node end}),
+                        executeXiulian=function() executed=(executed or 0)+1 end,
+                        setXiuLianData=function() refreshed=(refreshed or 0)+1 end,
+                        setXiuLianStateShow=function() refreshed=(refreshed or 0)+1 end}, {__index=generalup})''')
+                lua.execute(code)
+                lua.execute('page:setXiuLianPropShow({});delayed[1]();assert(executed==1);executed=nil')
+                if phase == 2:
+                    lua.execute('page.autoXiulian=false;delayed[1]();refreshed=nil')
+                lua.execute(change+f';delayed[{phase}]()')
+                self.assertIsNone(lua.globals().executed)
+                self.assertIsNone(lua.globals().refreshed)
+
     def test_native_soaring_animation_completion_never_touches_closed_generation(self):
         from lupa.lua51 import LuaRuntime
         lua = LuaRuntime(encoding=None)

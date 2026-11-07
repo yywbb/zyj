@@ -2505,21 +2505,24 @@ def patch_partner_growth_scripts(patched):
     if hero and self.localPartnerTarget~=hero.iid then
         self.localPartnerTarget=hero.iid
         self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1
+        self.xiuLianData[hero.iid]=nil
+        self.isRefreshXiulianProps=nil;self.xiuLianHave=nil
         self.autoJuexing=false;self.autoXiulian=false
     end
 ''')
             marker = "    if not self.xiuLianData[self.data.general.iid] then\n"
             assert code.count(marker) == 1
-            code = code.replace(marker, "    self.xiuLianData[self.data.general.iid]=nil\n"+marker)
-            for method in ("setPage_xiulian", "setPage_feisheng"):
-                marker = f"function generalup.{method}(self)\n"
-                assert code.count(marker) == 1
-                code = code.replace(marker, marker+"    UIRequest({type=5511,update=true})\n")
+            code = code.replace(marker, marker+"        UIRequest({type=5511,update=true})\n")
+            marker = "function generalup.setPage_feisheng(self)\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker+"    UIRequest({type=5511,update=true})\n")
         for method in methods:
             marker = f"function {prefix}.{method}("
             assert code.count(marker) == 1
             pos = code.index("\n", code.index(marker))+1
             code = code[:pos]+"    self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1\n    self.autoJuexing=false;self.autoXiulian=false\n"+code[pos:]
+            if name == "Layer_generalup" and method != "clear":
+                code = code[:pos]+"    self.xiuLianData={}\n    self.isRefreshXiulianProps=nil;self.xiuLianHave=nil\n"+code[pos:]
         if name == "Layer_generalup":
             start = code.index("function generalup.setTupoNext(")
             end = code.index("\nend", start)+len("\nend")
@@ -2537,7 +2540,7 @@ def patch_partner_growth_scripts(patched):
             guard = "\n        if generation~=self.localPartnerGeneration or not self.data.general or iid~=self.data.general.iid or soar~=self.data.general.level8 then return end\n"
             block = block.replace("function()", "function()"+guard)
             code = code[:start]+block+code[end:]
-        for method in (("resetPage_tupo", "resetPage_Awaken", "xiuLianSuccess", "feiShengCallback", "feishengUpStage") if name == "Layer_generalup" else ("resetPage_tupo",) if name == "window_generalup" else ()):
+        for method in (("resetPage_tupo", "resetPage_Awaken", "setXiuLianPropShow", "xiuLianSuccess", "feiShengCallback", "feishengUpStage") if name == "Layer_generalup" else ("resetPage_tupo",) if name == "window_generalup" else ()):
             start = code.index(f"function {prefix}.{method}(")
             end = code.index("\nend", start)+len("\nend")
             block = code[start:end]
