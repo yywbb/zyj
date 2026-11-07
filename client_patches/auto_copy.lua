@@ -3,6 +3,8 @@ local autoCopy = {active = false, pending = nil, layer = nil, page = 0, serial =
 -- 本地服务端不限流，原生1306/1307三秒闸门已在gameloop2解除；仅留一帧避免同帧重入。
 local autoCopyInterval = 0.05
 local autoCopyModes = {progress = "自动推图", stars = "扫描补星", sweep = "循环扫荡"}
+-- 背包恢复体力道具；按缺口选刚好够用的一档，避免浪费大丹。
+local autoCopyPills = {{20019, 50}, {20014, 25}}
 
 local function autoCopyLabel(text)
     local layer = autoCopy.layer
@@ -32,6 +34,7 @@ end
 function AutoCopyStop(reason)
     local wasActive = autoCopy.active
     autoCopy.active = false
+    autoCopy.pillBase = nil
     local layer = autoCopy.layer
     if layer and layer.autoCopyTimer then layer.autoCopyTimer:stopAllActions() end
     autoCopyLabel(autoCopy.pending and "等待操作结果" or "")
@@ -161,6 +164,21 @@ local function autoCopyLevel(role)
     return autoCopy.level
 end
 
+-- 优先挑刚好覆盖缺口的小丹，都不够时用最大的；没开自动用丹或背包没有则返回nil。
+local function autoCopyPill(need)
+    if not autoCopy.pill then return nil end
+    local fit, big
+    for _, row in ipairs(autoCopyPills) do
+        local count = gamedata.cache.props[row[1]] and gamedata.cache.props[row[1]].num or 0
+        if count > 0 then
+            if row[2] >= need then
+                if not fit or row[2] < fit[2] then fit = row end
+            elseif not big or row[2] > big[2] then big = row end
+        end
+    end
+    return fit or big
+end
+
 local function autoCopyRun(role, vipstatus, now)
     if not autoCopyReady() then return end
     local target = autoCopyTarget()
@@ -184,9 +202,17 @@ local function autoCopyRun(role, vipstatus, now)
     local shortStamina = role.stamina < config.physical
     local shortChallenge = (data.kill or 0) >= config.challenge
     if shortChallenge and not autoCopy.reset then AutoCopyStop("挂机已停止：挑战次数不足"); return end
-    if shortStamina and not autoCopy.buy then AutoCopyStop("挂机已停止：体力不足"); return end
+    if shortStamina and not autoCopy.buy and not autoCopy.pill then AutoCopyStop("挂机已停止：体力不足"); return end
     local resetPrice = shortChallenge and config.challenge * 5 or 0
     if shortStamina then
+        -- 背包体力丹优先于元宝购买；用丹后由服务端结果刷新再决定下一步。
+        local pill = autoCopyPill(config.physical - role.stamina)
+        if pill then
+            autoCopy.pillBase = role.stamina
+            autoCopySend({type = 1201, cid = pill[1], num = 1})
+            return
+        end
+        if not autoCopy.buy then AutoCopyStop("挂机已停止：体力丹已用完且未开启购买体力"); return end
         if not vipstatus then autoCopySend({type = 300, update = true}); return end
         local used = vipstatus.b_physical
         local vip = gamedata.config.vip[tostring(role.vip)]
@@ -210,19 +236,35 @@ end
 
 function AutoCopyHandle(t)
     if t.localAutoCopyIgnored then return true end
-    if not t.localAutoCopy then
-        if t.type == 1306 or t.type == 1307 then AutoCopyStop("挂机已停止：收到手动战斗结果") end
-        return false
-    end
     local pending = autoCopy.pending
-    if not pending or t.localAutoCopy ~= pending.local_auto_copy or t.type ~= pending.type
-            or pending.map and (t.map ~= pending.map or t.point ~= pending.point) then return true end
+    if not t.localAutoCopy then
+        -- 1201不经过挂机的网络包装，按pending类型认领自己的体力丹结果。
+        if not (t.type == 1201 and pending and pending.type == 1201) then
+            if t.type == 1306 or t.type == 1307 then AutoCopyStop("挂机已停止：收到手动战斗结果") end
+            return false
+        end
+    elseif not pending or t.localAutoCopy ~= pending.local_auto_copy or t.type ~= pending.type
+            or pending.map and (t.map ~= pending.map or t.point ~= pending.point) then
+        return true
+    end
     autoCopy.pending = nil
     local layer = autoCopy.layer
     if layer and layer.autoCopyTimer then layer.autoCopyTimer:stopAllActions() end
     if not autoCopy.active then
         autoCopyLabel("")
         return t.type ~= 1306 and t.type ~= 1307
+    end
+    if t.type == 1201 then
+        local base = autoCopy.pillBase
+        autoCopy.pillBase = nil
+        -- 1201不经挂机的网络包装，没有localAutoRole，取服务端已刷新的角色数据。
+        local role = t.localAutoRole or gamedata.cache.role
+        if not role or base and role.stamina <= base then
+            AutoCopyStop("挂机已停止：体力丹未生效，请检查背包")
+            return true
+        end
+        autoCopyRun(role, nil, t.localAutoTime or gamedata:time())
+        return true
     end
     if t.copy then
         autoCopy.copy = t.copy
@@ -255,7 +297,7 @@ function AutoCopyHandle(t)
     return true
 end
 
-function AutoCopyStart(mode, buy, reset)
+function AutoCopyStart(mode, buy, reset, pill)
     local layer, page = autoCopy.layer, autoCopy.page
     if not autoCopyModes[mode] or AutoCopyBlockManual() or not layer then return end
     if guide and guide.controller and guide.controller.isOnGuide then runGamePrompt({msg = "请先完成当前引导"}); return end
@@ -265,11 +307,12 @@ function AutoCopyStart(mode, buy, reset)
         or "固定扫荡进度最靠后的三星关，每次按剩余次数和当前体力取最大可扫次数，不兑换经验；升级后继续。"
     rules = rules.."\n自动买体力："..(buy and "开（每次购买1份，按当前次数/星期报价，受VIP日限）" or "关")
         .."\n自动重置："..(reset and "开（每次关卡挑战次数×5元宝）" or "关")
-        .."\n"..((buy or reset) and "可能连续消耗元宝直至不足；停止不能撤回已发出的扣费。" or "不购买体力、不用体力丹、不重置。")
+        .."\n自动用体力丹："..(pill and "开（体力不足时先按缺口使用背包体力丹，用尽后再按购买设置）" or "关")
+        .."\n"..((buy or reset) and "可能连续消耗元宝直至不足；停止不能撤回已发出的扣费。" or "不购买体力、不重置。")
     gameWindows:openWindow("confirm", {msg = rules}, function()
         if autoCopy.layer ~= layer or autoCopy.page ~= page or autoCopy.pending or autoCopy.active
                 or (getbattlecallbackactive and getbattlecallbackactive()) then return end
-        autoCopy.mode, autoCopy.buy, autoCopy.reset = mode, buy == true, reset == true
+        autoCopy.mode, autoCopy.buy, autoCopy.reset, autoCopy.pill = mode, buy == true, reset == true, pill == true
         autoCopy.startMap = layer.data.id
         autoCopy.target, autoCopy.visited = nil, {}
         autoCopy.active = true

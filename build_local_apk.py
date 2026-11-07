@@ -4581,6 +4581,12 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_equip_evolve_scripts(patched)
     patch_wing_scripts(patched)
     patch_protagonist_growth_scripts(patched)
+    code = xxtea_decrypt(patched["assets/scripts/UIProps.so"], XXTEA_KEY)
+    code = code[:struct.unpack("<I", code[-4:])[0]].decode("utf-8").replace("\r\n", "\n")
+    marker = "function UIPropsUse(t)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    if AutoCopyHandle then AutoCopyHandle(t) end\n")
+    patched["assets/scripts/UIProps.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     patch_cover_scripts(patched)
     patch_deployment_scripts(patched)
     patch_exchange_scripts(patched)

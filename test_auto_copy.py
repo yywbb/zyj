@@ -16,13 +16,14 @@ updateDataLife=function() rewardUpdates=(rewardUpdates or 0)+1 end
 setTriggerGiftEnable=function() end
 guide={controller={isOnGuide=false}}
 gameConfig={originSize={width=1080}}
-gamedata={config={copy={
+gamedata={cache={props={}},config={copy={
     ['42101']={['1']={physical=5,challenge=3,xp=10},['2']={physical=5,challenge=3,xp=10}},
     ['42102']={['1']={physical=6,challenge=2,xp=12}}},
     vip={['0']={b_physical=3,b_fbsd=0,copy_sweep=0},['2']={b_physical=3,b_fbsd=1,copy_sweep=1}},
     global_kv={basic_buy_stamina={value='50'},copy_wipe_level={value='1'},copy_wipe_level10={value='30'}},
     buycount_price={['1']={stamina=50},['2']={stamina=100},['3']={stamina=150}},
     activity_huodong={['1']={param=3,open_time=3,modulus=0.8}}}}
+function gamedata:time() return os.time() end
 function node()
     return {children={},addChild=function(self,c) table.insert(self.children,c) end,
         setPreferredSize=function(self,s) self.size=s end,setContentSize=function(self,s) self.size=s end,
@@ -77,7 +78,7 @@ function attach(data)
     function layer:reloadnormalData(data,param) self.normaldata=data or self.normaldata;self.lastParam=param end
     GameScene.layers.copy_map.module=layer;AutoCopyAttach(layer,1500)
 end
-function start(mode,buy,reset) AutoCopyStart(mode or 'progress',buy or false,reset or false);confirmNow() end
+function start(mode,buy,reset,pill) AutoCopyStart(mode or 'progress',buy or false,reset or false,pill or false);confirmNow() end
 function tick() layer.autoCopyTimer:fire() end
 function respond(data,request)
     local req=request or requests[#requests];local t=data or {}
@@ -94,6 +95,16 @@ function respond(data,request)
     return t
 end
 function readCycle(data) tick();assert(requests[#requests].type==1300);respond({copy=data or layer.normaldata}) end
+function givePill(cid,num) gamedata.cache.props[cid]={cid=cid,num=num} end
+function respondPill(delta,request)
+    local req=request or requests[#requests]
+    assert(req.type==1201,'期待1201，实际'..tostring(req.type))
+    gamedata.cache.role=GameScene.roleinfo
+    GameScene.roleinfo.stamina=GameScene.roleinfo.stamina+(delta or 25)
+    local row=gamedata.cache.props[req.cid];row.num=row.num-1
+    -- 与真实链路一致：1201由UIPropsUse交给挂机，不带localAutoRole。
+    return AutoCopyHandle({type=1201,rewards={},props={}})
+end
 '''
 
 
@@ -116,14 +127,14 @@ class AutoCopyTests(unittest.TestCase):
     def test_popup_modes_paid_options_default_off_and_stale_confirmation(self):
         self.lua.execute('''
             layer.autoCopyButton.callback();assert(#requests==0)
-            assert(autoWindow.mode=='progress' and not autoWindow.buy and not autoWindow.reset)
+            assert(autoWindow.mode=='progress' and not autoWindow.buy and not autoWindow.reset and not autoWindow.pill)
             autoWindow.modeButtons.stars.callback();assert(autoWindow.mode=='stars')
-            autoWindow.buyButton.callback();autoWindow.resetButton.callback()
-            assert(autoWindow.buy and autoWindow.reset)
+            autoWindow.buyButton.callback();autoWindow.resetButton.callback();autoWindow.pillButton.callback()
+            assert(autoWindow.buy and autoWindow.reset and autoWindow.pill)
             autoWindow.startButton.callback()
-            assert(confirmationText:find('元宝') and confirmationText:find('连续') and #requests==0)
+            assert(confirmationText:find('元宝') and confirmationText:find('连续') and confirmationText:find('体力丹') and #requests==0)
             AutoCopyDetach(layer);attach();confirmNow();assert(not AutoCopyIsRunning() and #requests==0)
-            layer.autoCopyButton.callback();assert(not autoWindow.buy and not autoWindow.reset)
+            layer.autoCopyButton.callback();assert(not autoWindow.buy and not autoWindow.reset and not autoWindow.pill)
             assert(layer.autoCopyButton.position.x+layer.autoCopyButton.size.width/2<830)
         ''')
 
@@ -238,6 +249,64 @@ class AutoCopyTests(unittest.TestCase):
             attach(copies(3,0,0));GameScene.roleinfo.gold=1000;start('sweep',true,false);readCycle()
             respond({vipstatus={b_physical=1}})
             assert(requests[#requests].type==301 and requests[#requests].gold==80)
+        ''')
+
+    def test_stamina_pill_prefers_smallest_fitting_pill_before_gold(self):
+        self.lua.execute('''
+            attach(copies(3,0,0));GameScene.roleinfo.stamina=0;GameScene.roleinfo.gold=1000
+            givePill(20014,2);givePill(20019,1)
+            start('sweep',true,false,true);readCycle()
+            assert(requests[#requests].type==1201 and requests[#requests].cid==20014 and requests[#requests].num==1)
+            respondPill(25)
+            assert(requests[#requests].type==1307 and GameScene.roleinfo.gold==1000)
+            assert(gamedata.cache.props[20014].num==1)
+        ''')
+
+    def test_stamina_pill_uses_large_pill_for_large_deficit(self):
+        self.lua.execute('''
+            attach(copies(3,0,0));GameScene.roleinfo.stamina=0;GameScene.roleinfo.gold=1000
+            gamedata.config.copy['42101']['1'].physical=60
+            givePill(20014,1);givePill(20019,1)
+            start('sweep',false,false,true);readCycle()
+            assert(requests[#requests].type==1201 and requests[#requests].cid==20019)
+            respondPill(50)
+            assert(requests[#requests].type==1201 and requests[#requests].cid==20014)
+            respondPill(25)
+            assert(requests[#requests].type==1307 and requests[#requests].map==42101)
+        ''')
+
+    def test_stamina_pill_short_then_falls_back_to_buy(self):
+        self.lua.execute('''
+            attach(copies(3,0,0));GameScene.roleinfo.stamina=0;GameScene.roleinfo.gold=1000
+            gamedata.config.copy['42101']['1'].physical=40
+            givePill(20014,1);start('sweep',true,false,true);readCycle()
+            assert(requests[#requests].type==1201 and requests[#requests].cid==20014)
+            respondPill(25)
+            assert(requests[#requests].type==300)
+        ''')
+
+    def test_stamina_pill_exhausted_falls_back_to_buy_or_stops(self):
+        self.lua.execute('''
+            attach(copies(3,0,0));GameScene.roleinfo.stamina=0
+            start('sweep',false,false,true);readCycle()
+            assert(not AutoCopyIsRunning() and notices[#notices]:find('体力丹'))
+            attach(copies(3,0,0));GameScene.roleinfo.stamina=0;GameScene.roleinfo.gold=1000
+            start('sweep',true,false,true);readCycle()
+            assert(requests[#requests].type==300)
+            respond({vipstatus={b_physical=1}})
+            assert(requests[#requests].type==301)
+        ''')
+
+    def test_ineffective_or_manual_pill_never_drains_items_or_stops_running(self):
+        self.lua.execute('''
+            attach(copies(3,0,0));GameScene.roleinfo.stamina=0
+            givePill(20014,5);start('sweep',false,false,true);readCycle()
+            local count=#requests
+            assert(respondPill(0))
+            assert(not AutoCopyIsRunning() and notices[#notices]:find('未生效') and #requests==count)
+            attach(copies(3,0,0));GameScene.roleinfo.stamina=30
+            start('sweep',false,false,true);readCycle()
+            assert(not AutoCopyHandle({type=1201,rewards={}}) and AutoCopyIsRunning())
         ''')
 
     def test_matching_rejections_timeout_cancel_and_late_callbacks_never_retry_payment(self):

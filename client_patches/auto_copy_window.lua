@@ -9,7 +9,7 @@ local function title(button, text)
 end
 
 function window.open(self, priority, data)
-    self.mode, self.buy, self.reset = "progress", false, false
+    self.mode, self.buy, self.reset, self.pill = "progress", false, false, false
     self.rootNode = CCNode:create()
     self.rootNode:setContentSize(CCSizeMake(800,840))
     self.rootNode:setAnchorPoint(ccp(0.5,0.5))
@@ -37,25 +37,28 @@ function window.open(self, priority, data)
     self.modeButtons = {}
     for i, row in ipairs(modes) do
         local key = row[1]
-        self.modeButtons[key] = button(row[2],400,650-(i-1)*92,640,function()
+        self.modeButtons[key] = button(row[2],400,664-(i-1)*86,640,function()
             self.mode = key
             for _, item in ipairs(modes) do title(self.modeButtons[item[1]],(item[1] == key and "已选：" or "")..item[2]) end
         end)
     end
     title(self.modeButtons.progress,"已选：自动推图")
-    self.buyButton = button("自动买体力：关",230,356,320,function()
+    self.pillButton = button("自动用体力丹：关",400,408,640,function()
+        self.pill = not self.pill;title(self.pillButton,"自动用体力丹："..(self.pill and "开" or "关"))
+    end)
+    self.buyButton = button("自动买体力：关",230,322,320,function()
         self.buy = not self.buy;title(self.buyButton,"自动买体力："..(self.buy and "开" or "关"))
     end)
-    self.resetButton = button("自动重置：关",570,356,320,function()
+    self.resetButton = button("自动重置：关",570,322,320,function()
         self.reset = not self.reset;title(self.resetButton,"自动重置："..(self.reset and "开" or "关"))
     end)
-    label("补星每轮每关一次；扫荡选择进度最靠后的三星关",280,24)
-    label("买体力按当前报价；重置每次挑战次数×5元宝",240,24)
-    label("开启补给可能连续消耗元宝；结果未知不重试",200,24)
+    label("补星每轮每关一次；扫荡选择进度最靠后的三星关",266,24)
+    label("买体力按当前报价；重置每次挑战次数×5元宝",232,24)
+    label("体力丹按缺口优先使用；开启补给可能连续消耗元宝",198,24)
     self.startButton = button("开始挂机",230,118,280,function()
-        local mode, buy, reset = self.mode, self.buy, self.reset
+        local mode, buy, reset, pill = self.mode, self.buy, self.reset, self.pill
         gameWindows:closeWindowDirect("localAutoCopy")
-        AutoCopyStart(mode,buy,reset)
+        AutoCopyStart(mode,buy,reset,pill)
     end)
     self.startButton:setEnabled(not (data and data.pending))
     self.stopButton = button("停止挂机",570,118,280,function()
@@ -70,7 +73,7 @@ function window.close(self)
     self.rootNode:removeAllChildrenWithCleanup(true)
     self.rootNode:removeFromParentAndCleanup(true)
     self.rootNode, self.modeButtons = nil, nil
-    self.buyButton, self.resetButton, self.startButton, self.stopButton, self.closeButton = nil,nil,nil,nil,nil
+    self.buyButton, self.resetButton, self.pillButton, self.startButton, self.stopButton, self.closeButton = nil,nil,nil,nil,nil,nil
 end
 
 return window
