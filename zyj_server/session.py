@@ -7,7 +7,7 @@ import time
 
 from . import activities, activity_copy, arena, blackmarket, cornucopia, daily_events, development, equip_baptize, fashion, favorite, friend_copy, general_foster, guide, guild, hades_copy, magic, mieshendian, online_rewards, penglai, pets, player, qiankun, ranking, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from . import cheer, cup, equip_evolve, friends, guild_chat, soul
-from . import achievements, artifact, champion, collection, cover, deployment, dragon_wishing, examination, exchange, game_helper, gamestar, illusion, nightclub, partner_growth, wing
+from . import skytoken, achievements, artifact, champion, collection, cover, deployment, dragon_wishing, examination, exchange, game_helper, gamestar, illusion, nightclub, partner_growth, wing
 from .protocol import encode_pb_field, get_comb_ids, get_comb_messages, iter_pb_fields, pack_frame, pb_set_field
 from .replay import Replay, normalize_comb_request
 
@@ -383,7 +383,7 @@ class Session:
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS, *exchange.MUTATIONS,
                                   *daily_events.CLAIMS, *collection.MUTATIONS, *achievements.MUTATIONS, *soul.MUTATIONS, *equip_evolve.OPCODES,
-                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *illusion.MUTATIONS):
+                                   *training.OPCODES, *shop.PURCHASES, *fashion.TRANSACTIONS, *favorite.MUTATIONS, *cornucopia.MUTATIONS, *penglai.MUTATIONS, *single_boss.MUTATIONS, *equip_baptize.OPCODES, *sigil.MUTATIONS, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *illusion.MUTATIONS, *skytoken.OPCODES):
             key = (seq, body)
             cached = self.random_replies.get(opcode)
             if cached and cached[0] == key:

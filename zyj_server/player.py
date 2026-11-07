@@ -10,7 +10,7 @@ import tempfile
 import time
 import zipfile
 
-from . import activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, hades_copy, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
+from . import skytoken, activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, hades_copy, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
 from . import achievements, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, illusion, nightclub, partner_growth, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
@@ -698,6 +698,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if update:
             record_slot_update(save, update)
+    elif opcode in skytoken.OPCODES:
+        body, costs, update = skytoken.prepare(opcode, save, request_body, role_config)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        record_slot_update(save, update)
     elif opcode in illusion.OPCODES:
         body, update = illusion.prepare(opcode, save, request_body, role_config, now)
         if update:
@@ -1272,10 +1277,10 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
         for mid in WORLD_QUERY_IDS:
             if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
-    soul_change = responses and (responses[0]["opcode"] in soul.OPCODES or responses[0]["opcode"] == 1007 and parse_ids_pb(request_body)[1:2] == [2])
+    soul_change = responses and (responses[0]["opcode"] in (*soul.OPCODES, *skytoken.OPCODES) or responses[0]["opcode"] == 1007 and parse_ids_pb(request_body)[1:2] == [2])
     if soul_change and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1002, 0, bytes.fromhex(save["world_state"]["1002"])))
-    if responses and responses[0]["opcode"] in (1058, *artifact.MUTATIONS, *champion.MUTATIONS, *gamestar.MUTATIONS, *dragon_wishing.MUTATIONS, *nightclub.MUTATIONS, *exchange.MUTATIONS, *penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
+    if responses and responses[0]["opcode"] in (1058, *skytoken.OPCODES, *artifact.MUTATIONS, *champion.MUTATIONS, *gamestar.MUTATIONS, *dragon_wishing.MUTATIONS, *nightclub.MUTATIONS, *exchange.MUTATIONS, *penglai.MUTATIONS, *equip_baptize.OPCODES, *equip_evolve.OPCODES, *treasure_refine.OPCODES, *general_foster.OPCODES, *magic.MUTATIONS, *soul.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1200"] != before["world_state"]["1200"]:
         packets.append(pack_frame(1200, 0, bytes.fromhex(save["world_state"]["1200"])))
     if responses and responses[0]["opcode"] in (1120, 1365, *equip_evolve.OPCODES, *wing.MUTATIONS, *cover.MUTATIONS) and save["world_state"]["1002"] != before["world_state"]["1002"]:
         packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
