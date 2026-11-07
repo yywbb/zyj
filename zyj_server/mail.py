@@ -53,7 +53,14 @@ def send_mail(path, target, title, content, attachments=None, recharge_info=None
                 raise ValueError("附件物品数量无效")
             attach[str(cid)] = total
 
-    # 处理充值信息
+    # 特殊礼包（如 20081 天机令大礼包）在邮件发出的瞬间自动拆包为所有天机令与激活材料，
+    # 避免未重打 APK 的客户端将 20081 显示为原版的“删除道具（金币图标）”。
+    if "20081" in attach:
+        pack_count = attach.pop("20081")
+        for cid in range(201901, 201925):
+            attach[str(cid)] = min((1 << 31) - 1, attach.get(str(cid), 0) + pack_count)
+        for cid in range(192596, 192600):
+            attach[str(cid)] = min((1 << 31) - 1, attach.get(str(cid), 0) + 1160 * pack_count)
     rmb = 0
     if recharge_info:
         if not isinstance(recharge_info, dict):
@@ -291,7 +298,15 @@ def prepare(opcode, save, body, mail_path, ranking_state, viewer, config, now=No
                     rstate["forever"] = True
                     rstate["card_rmb"] += 98
 
-        all_gets.extend(m["gets"])
+        for item in m["gets"]:
+            if item[0] == 20081:
+                pack_count = item[1]
+                for cid in range(201901, 201925):
+                    all_gets.append((cid, pack_count))
+                for cid in range(192596, 192600):
+                    all_gets.append((cid, 1160 * pack_count))
+            else:
+                all_gets.append(item)
 
     reward = recruit.build_reward(save, all_gets, config) if all_gets else b""
     return reward, reward

@@ -412,7 +412,16 @@ class Workbench:
                 if action == "grant":
                     if any(self.items[item["cid"]]["kind"] == "武将" for item in data["items"]):
                         recruit.require_role(save)
-                    reward = recruit.build_reward(save, [(item["cid"], item["count"]) for item in data["items"]], store.role_config)
+                    expanded_items = []
+                    for item in data["items"]:
+                        if item["cid"] == 20081:
+                            for cid in range(201901, 201925):
+                                expanded_items.append((cid, item["count"]))
+                            for cid in range(192596, 192600):
+                                expanded_items.append((cid, 1160 * item["count"]))
+                        else:
+                            expanded_items.append((item["cid"], item["count"]))
+                    reward = recruit.build_reward(save, expanded_items, store.role_config)
                     player.apply_reward(save, reward, store.role_config, now)
                 else:
                     _manage(save, action, data, store.role_config, store.step_counts, now)
