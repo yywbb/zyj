@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import test_soul
-from zyj_server import battle, cheer, cup, formation, guild_war, illusion, partner_growth, player, protocol, qiankun, recruit, single_boss
+from zyj_server import activities, battle, cheer, cup, formation, guild_war, illusion, partner_growth, player, protocol, qiankun, recruit, single_boss
 
 
 def setUpModule():
@@ -380,3 +380,132 @@ class IllusionTests(unittest.TestCase):
         packets = self.sessions[1].handle(8111, self.seq, body)
         self.assertEqual([(int.from_bytes(p[8:12], "big"), p[16:]) for p in packets], result)
         self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+
+    def account_age(self, day=1):
+        """把建号日推到第 day 天：175/176 停在该天，177 停在对应轮次的第几天。"""
+        self.refresh()
+        start = (self.now + illusion.UTC8) // illusion.DAY * illusion.DAY - illusion.UTC8
+        self.save["created_at"] = start - (day - 1) * illusion.DAY + 60
+
+    def fragment(self, cid):
+        body = bytes.fromhex(self.save["world_state"]["1012"])
+        return protocol.pb_get_varint(formation.records(body, 1, 1).get(cid, b""), 2) or 0
+
+    def recharge_rmb(self, amount):
+        """走真实 1008 奖励通道累计充值，而不是直接改字段。"""
+        self.refresh()
+        player.apply_reward(self.save, activities.build_reward(self.save, f"1008,{amount}", self.config),
+                            self.config, self.now)
+
+    def gift_ids(self, table, position):
+        return [cid for cid, _ in illusion.gift_rows(self.config, table, position)]
+
+    def task_ids(self, cycle):
+        return sorted(int(key) for key in self.config[f"illusion_task_{cycle}"])
+
+    def test_activity_pages_are_read_only_and_report_configured_rows(self):
+        self.account_age(1)
+        self.assertEqual(self.gen(self.iid), self.gen(self.iid))
+        self.assertNotIn("illusion_state", self.save)
+        first = protocol.parse_ids_pb(self.success(1, 8113))
+        self.assertEqual(first[0::3], self.gift_ids("illusion_present_time_x1", 1))
+        # 全新账号没有充值记录，礼包一律停在"去充值"。
+        self.assertEqual(set(first[1::3]), {0})
+        self.assertEqual(first[2::3], [0] * 8)
+        second = protocol.parse_ids_pb(self.success(1, 8115))
+        self.assertEqual(second[0::3], self.gift_ids("illusion_present_time_x2", 1))
+        tasks = protocol.parse_ids_pb(self.success(1, 8117))
+        self.assertEqual(tasks[0::3], self.task_ids(1))
+        # 类型1免费、类型4购买可直接领；类型2/3/6/8/11/12/15/19/20 必须真实达成。
+        self.assertEqual(tasks[1::3], [1, 0, 0, 1, 0, 0, 0, 0, 0])
+        self.assertEqual(tasks[2::3], [0, 0, 0, 0, 0, 0, 0, 0, 0])
+        self.refresh()
+        self.assertNotIn("illusion_state", self.save)
+
+    def test_old_account_stays_on_the_last_round_instead_of_empty_pages(self):
+        self.account_age(1)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8117))[0::3], self.task_ids(1))
+        self.account_age(10 ** 4)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8117))[0::3], self.task_ids(4))
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8113))[0::3],
+                         self.gift_ids("illusion_present_time_x1", 4))
+
+    def test_free_task_grants_configured_days_and_claims_only_once(self):
+        self.account_age(1)
+        body = self.success(1, 8118, values=[1])
+        self.refresh()
+        iid, end = illusion.get_state(self.save, self.config)["items"]["200503"]
+        self.assertEqual(iid, 0)
+        self.assertEqual((end + illusion.UTC8) % illusion.DAY, 0)
+        self.assertGreater(end, self.now)
+        self.assertLessEqual(end, self.now + 4 * illusion.DAY)
+        reward = [v for n, w, v in protocol.iter_pb_fields(body) if n == 18]
+        self.assertEqual(protocol.parse_ids_pb(reward[0]), [200503, iid, end, 3])
+        self.assert_rejected(8118, values=[1])
+        self.reconnect(); self.refresh()
+        self.assertEqual(illusion.get_state(self.save, self.config)["items"]["200503"], [iid, end])
+
+    def test_gift_needs_actual_recharge_and_stops_at_configured_times(self):
+        self.account_age(1)
+        self.assert_rejected(8114, values=[201001])
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8113))[1], 0)
+        self.recharge_rmb(648)
+        rows = protocol.parse_ids_pb(self.success(1, 8113))
+        self.assertEqual(rows[1], 1)
+        fragments = self.fragment(10839)
+        packets = self.request(1, 8114, values=[201001])
+        self.assertEqual(packets[0][0], 8114)
+        self.assertIn(1012, [mid for mid, _ in packets])
+        self.assertIn(1001, [mid for mid, _ in packets])
+        self.assertIn(8110, [mid for mid, _ in packets])
+        self.refresh()
+        self.assertEqual(self.fragment(10839), fragments + 170)
+        images = illusion.get_state(self.save, self.config)["items"]["200501"]
+        self.assertEqual(images[0], 0)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8113))[2], 1)
+        # 201001 的 number 是 2：第二次成功，第三次已达上限。
+        self.success(1, 8114, values=[201001])
+        self.refresh()
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8113))[1:3], [2, 2])
+        self.assert_rejected(8114, values=[201001])
+        self.assertGreater(illusion.get_state(self.save, self.config)["items"]["200501"][1], images[1])
+
+    def test_task_purchase_charges_real_gold_and_progress_comes_from_real_counters(self):
+        self.account_age(1)
+        gold = self.save["role_state"]["gold"]
+        self.assert_rejected(8118, values=[3])
+        packets = self.request(1, 8118, values=[4])
+        self.assertEqual(packets[0][0], 8118)
+        self.assertIn(1001, [mid for mid, _ in packets])
+        self.refresh()
+        self.assertEqual(self.save["role_state"]["gold"], gold - 800)
+        self.assertEqual(illusion.get_state(self.save, self.config)["items"]["200535"][0], 0)
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8117))[1::3][3], 2)
+        self.assert_rejected(8118, values=[4])
+        # 类型2读真实元宝累计消费，不是凭空补的次数。
+        self.refresh()
+        self.save["activity_state"]["gold_spent"] = 30000
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8117))[1::3][2], 1)
+        self.success(1, 8118, values=[3])
+        self.refresh()
+        self.assertIn("200518", illusion.get_state(self.save, self.config)["items"])
+
+    def test_activity_rejects_bad_parameters_unknown_ids_and_future_clock(self):
+        self.account_age(1)
+        self.assert_rejected(8113, values=[1])
+        self.assert_rejected(8115, values=[1])
+        self.assert_rejected(8117, values=[1])
+        self.assert_rejected(8114, values=[201001, 1])
+        self.assert_rejected(8114, values=[0])
+        self.assert_rejected(8114, values=[999999])
+        self.assert_rejected(8118, values=[200501])
+        self.refresh()
+        self.save["illusion_state"] = {"items": {}, "gifts": {"1:999999": 1}, "serial": 0, "checked_at": 0}
+        self.assert_rejected(8110, values=[1])
+        self.refresh()
+        del self.save["illusion_state"]
+        self.save["created_at"] = self.now + 10 * illusion.DAY
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8113)), [])
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8117)), [])
+        self.assert_rejected(8118, values=[1])
+

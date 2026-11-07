@@ -56,7 +56,8 @@ def load_role_config(config_path):
                              "general", "general_exp", "copy_monster", "skill", "combskill", "global_kv",
                              "combskillprobability", "breakskill", "mozhao_break", "worlddrop", "recruit_deck", "recruit_tenlottery",
                               "buycount_price", "recharge", "vip", "firstpay", "monthcardgift", "equip_strengthen", "treasure2_strengthen", "treasure2_refine", "treasure2_star", "build",
-                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold", "illusion", "illusion_attenuation",
+                              "shop", "shop_price", "gift_bag", "vip_weekgift", "sigil", "sigilposition", "kingofmofu_lv", "soul", "soul_hunt", "soul_exchange", "soulslot", "soul_integrate", "soul_integrate_lv", "soul_thousand", "gambling_items", "gambling_gold", "illusion", "illusion_attenuation", "illusion_present", "illusion_present_time_x1", "illusion_present_time_x2",
+                             "illusion_task_1", "illusion_task_2", "illusion_task_3", "illusion_task_4",
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
                              "equip_forgingConsume", "equip_foringlv",
                               "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
@@ -705,7 +706,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         record_slot_update(save, update)
     elif opcode in illusion.OPCODES:
-        body, update = illusion.prepare(opcode, save, request_body, role_config, now)
+        body, costs, reward, update = illusion.prepare(opcode, save, request_body, role_config, now)
+        for cid, count in costs:
+            change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
         if update:
             record_slot_update(save, update)
     elif opcode in cover.OPCODES:
@@ -1313,6 +1318,13 @@ def prepare_recorded_responses(seq, responses, save, request_body, save_path, st
                 packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
         if save.get("qiankun_state", {}).get("red_fragments") != before.get("qiankun_state", {}).get("red_fragments"):
             packets.append(pack_frame(3780, 0, qiankun.red_query(save, b"")))
+        packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
+    # 幻化礼包/幻化馆按配置发奖：回包 SomeThings 客户端会本地入账，
+    # 这里再补绝对道具与角色快照，保证购买扣元宝与碎片/材料不出现双侧漂移。
+    if responses and responses[0]["opcode"] in (8114, 8116, 8118):
+        for mid in (1200, 1012):
+            if save["world_state"][str(mid)] != before["world_state"][str(mid)]:
+                packets.append(pack_frame(mid, 0, bytes.fromhex(save["world_state"][str(mid)])))
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     if responses and (responses[0]["opcode"] in partner_growth.MUTATIONS or save.get("partner_growth_state") != before.get("partner_growth_state")):
         levels, _, _ = partner_growth.prepare(5511, save, b"", role_config, now, 0)

@@ -1,14 +1,22 @@
-"""限时幻影、伙伴绑定及战斗投影；原伙伴养成和缘分始终保留。"""
+"""限时幻影、伙伴绑定、战斗投影与幻化活动（175/176 礼包、177 幻化馆）；原伙伴养成和缘分始终保留。"""
 
 import random
 import time
 
+from . import activities
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_field
 
 QUERIES = (8110, 8113, 8115, 8117, 8252)
-MUTATIONS = (8111, 8112, 7021)
+MUTATIONS = (8111, 8112, 7021, 8114, 8116, 8118)
 OPCODES = QUERIES + MUTATIONS
 UTC8 = 28800
+DAY = 86400
+# 礼包页 175/176 与幻化馆 177 的上架表；幻化馆按轮次换 illusion_task_<cycle>。
+PAGES = {8113: (175, "illusion_present_time_x1"), 8115: (176, "illusion_present_time_x2")}
+GIFT_CLAIMS = {8114: 8113, 8116: 8115}
+TASK_PERIODS = 4
+# 幻化馆任务类型 -> 真实存档计数来源；未列入的类型进度恒为 0，不伪造达成。
+TASK_TYPES = (1, 2, 3, 4, 6, 8, 11, 12, 15, 19, 20)
 
 
 def ids_body(values):
@@ -39,8 +47,23 @@ def get_state(save, config):
             raise ValueError("幻影所有权、有效期或绑定无效")
         if entry[0]:
             bound.add(entry[0])
+    # 活动领取按「轮次:配置ID」记账；缺表时不允许存在任何领取记录。
+    gift_ids = {str(row["id"]) for row in config.get("illusion_present", {}).values()}
+    task_ids = {str(row["id"]) for n in range(1, TASK_PERIODS + 1)
+                for row in config.get(f"illusion_task_{n}", {}).values()}
+    ledger = {}
+    for name, allowed in (("gifts", gift_ids), ("tasks", task_ids)):
+        entries = state.get(name, {})
+        if not isinstance(entries, dict):
+            raise ValueError("幻化领取记录无效")
+        for slot, count in entries.items():
+            cycle, _, cid = str(slot).partition(":")
+            if (not cycle.isdigit() or not 1 <= int(cycle) <= TASK_PERIODS or cid not in allowed
+                    or type(count) is not int or not 0 <= count < 1 << 31):
+                raise ValueError("幻化领取记录无效")
+        ledger[name] = dict(entries)
     return {**state, "serial": state.get("serial", 0), "checked_at": state.get("checked_at", 0),
-            "items": {k: v[:] for k, v in state["items"].items()}}
+            "items": {k: v[:] for k, v in state["items"].items()}, **ledger}
 
 
 def values(raw):
@@ -122,6 +145,164 @@ def receive_reward(save, body, config, now):
 
 def reward_field(rows):
     return encode_pb_field(18, 2, ids_body(v for row in rows for v in row)) if rows else b""
+
+
+def period(save, config, now, activity_id):
+    """本地规则：以建号日（UTC+8）为首期起点，忽略配置里的 2020/2021 开服日期。
+
+    轮次跑完后停在该活动最后一轮的最后一天，老号的活动页不会变空；领取次数仍由
+    illusion_state 的「轮次:配置ID」记账封顶，不会因为停在最后一轮而重复领取。
+    """
+    row = config["activity_time"][str(activity_id)]
+    opened = int(save.get("created_at", 0))
+    day = (now + UTC8) // DAY - (opened + UTC8) // DAY + 1
+    if day < 1:
+        return 0, 0
+    span = int(row["continued_time"]) or 1
+    settled = min(day, span * (int(row["rounds"]) or 1))
+    return (settled - 1) // span + 1, (settled - 1) % span + 1
+
+
+def gift_rows(config, table, position):
+    row = config[table].get(str(position))
+    if not row or not row.get("reward"):
+        return []
+    result = []
+    for entry in row["reward"].split(";"):
+        gift = config["illusion_present"].get(entry.strip()) if entry.strip() else None
+        if not gift and entry.strip():
+            raise ValueError("幻化礼包配置缺失")
+        if gift:
+            result.append((int(gift["id"]), gift))
+    return result
+
+
+def gift_status(save, config, state, cycle, cid, gift):
+    """0 未达成充值条件、1 可领取、2 已领满；before_id 要求前档先领完。"""
+    if state["gifts"].get(f"{cycle}:{cid}", 0) >= int(gift["number"]):
+        return 2
+    before = int(gift.get("before_id") or 0)
+    if before:
+        previous = config["illusion_present"].get(str(before))
+        if not previous or state["gifts"].get(f"{cycle}:{before}", 0) < int(previous["number"]):
+            return 0
+    price = int(config["recharge"][str(gift["rmb"])]["rmb"])
+    paid = (save.get("recharge_state", {}).get("rmb", 0) >= price
+            and save.get("role_state", {}).get("vip", 0) >= int(gift["vip"]))
+    return 1 if paid else 0
+
+
+def task_progress(save, config, kind):
+    """只从各玩法真实存档读数：累计成就、本地累计消费/充值、挑战与关卡进度。"""
+    counts = save.get("achievement_state", {}).get("counts", {})
+    if kind == 2:
+        return save.get("activity_state", {}).get("gold_spent", 0)
+    if kind == 3:
+        return save.get("recharge_state", {}).get("rmb", 0)
+    if kind == 6:
+        return counts.get("worldbosscount", 0)
+    if kind == 8:
+        return len(save.get("nightclub_state", {}).get("cleared", []))
+    if kind == 11:
+        return save.get("friend_copy_state", {}).get("attempts", 0)
+    if kind == 12:
+        return counts.get("robcount", 0)
+    if kind == 15:
+        return counts.get("soulhuntcount", 0)
+    if kind == 19:
+        return max(0, int(save.get("gamestar_state", {}).get("stage", 1)) - 1)
+    if kind == 20:
+        return save.get("champion_state", {}).get("used", 0)
+    return 0
+
+
+def task_status(save, config, state, cycle, task_id, row):
+    claimed = state["tasks"].get(f"{cycle}:{task_id}", 0)
+    kind, limit = int(row["type"]), int(row["param1"])
+    if kind in (1, 4):
+        # 类型1免费按天领取、类型4直接用元宝购买，都只按 param1 记次数。
+        return (2 if claimed >= limit else 1), claimed
+    if claimed:
+        return 2, min(task_progress(save, config, kind), limit)
+    progress = min(task_progress(save, config, kind), limit)
+    return (1 if progress >= limit else 0), progress
+
+
+def spec_pairs(specification):
+    result = []
+    for entry in specification.split(";"):
+        if not entry.strip():
+            continue
+        cid, count = map(int, entry.split(","))
+        if not 0 < cid < 1 << 31 or not 0 < count < 1 << 31:
+            raise ValueError("幻化奖励数量无效")
+        result.append((cid, count))
+    return result
+
+
+def reward_body(save, specification, config, now):
+    """SomeThings：普通物品走 activities 原生奖励，幻影走第 18 字段的 4 元组。"""
+    ordinary, images = [], []
+    for cid, count in spec_pairs(specification):
+        if str(cid) in config["illusion"]:
+            images.append(grant(save, cid, count, config, now))
+        else:
+            ordinary.append(f"{cid},{count};")
+    body = activities.build_reward(save, "".join(ordinary), config) if ordinary else b""
+    return body + reward_field(images)
+
+
+def activity(save, config, state, now, opcode, request):
+    """8113/8115/8117 查询与 8114/8116/8118 领取；回包、扣费、奖励分开返回。"""
+    if opcode in QUERIES:
+        if request:
+            raise ValueError("幻化活动查询不接受参数")
+        if opcode in PAGES:
+            activity_id, table = PAGES[opcode]
+            cycle, position = period(save, config, now, activity_id)
+            rows = []
+            if cycle:
+                for cid, gift in gift_rows(config, table, position):
+                    rows.extend((cid, gift_status(save, config, state, cycle, cid, gift),
+                                 state["gifts"].get(f"{cycle}:{cid}", 0)))
+            return ids_body(rows), [], b""
+        cycle = period(save, config, now, 177)[0]
+        rows = []
+        if cycle:
+            for task_id, row in sorted(config[f"illusion_task_{cycle}"].items(), key=lambda pair: int(pair[0])):
+                status, progress = task_status(save, config, state, cycle, int(task_id), row)
+                rows.extend((int(task_id), status, progress))
+        return ids_body(rows), [], b""
+    if len(request) != 1 or not 0 < request[0] < 1 << 31:
+        raise ValueError("幻化活动领取编号无效")
+    key = request[0]
+    if opcode in GIFT_CLAIMS:
+        activity_id, table = PAGES[GIFT_CLAIMS[opcode]]
+        cycle, position = period(save, config, now, activity_id)
+        gift = dict(gift_rows(config, table, position)).get(key) if cycle else None
+        if not gift:
+            raise ValueError("此幻化礼包当前不在活动期内")
+        if gift_status(save, config, state, cycle, key, gift) != 1:
+            raise ValueError("此幻化礼包尚未达成或已领完")
+        costs, specification = [], gift["reward"]
+        state["gifts"][f"{cycle}:{key}"] = state["gifts"].get(f"{cycle}:{key}", 0) + 1
+    else:
+        cycle = period(save, config, now, 177)[0]
+        row = config[f"illusion_task_{cycle}"].get(str(key)) if cycle else None
+        if not row:
+            raise ValueError("此幻化馆任务当前不在活动期内")
+        if int(row["type"]) not in TASK_TYPES:
+            raise ValueError("此幻化馆任务类型暂不支持")
+        if task_status(save, config, state, cycle, key, row)[0] != 1:
+            raise ValueError("此幻化馆任务尚未达成或已领取")
+        costs = spec_pairs(row["param2"]) if row["param2"] else []
+        specification = row["reward"]
+        state["tasks"][f"{cycle}:{key}"] = state["tasks"].get(f"{cycle}:{key}", 0) + 1
+    reward = reward_body(save, specification, config, now)
+    state["checked_at"] = now
+    save["illusion_state"] = state
+    # 原生 8114/8116/8118 回调直接从 rbuf 解析 SomeThings 展示奖励。
+    return reward, costs, reward
 
 
 def chain(general_id, config):
@@ -262,23 +443,30 @@ def effective(raw, save, config, kind="pve", now=None):
 
 
 def prepare(opcode, save, body, config, now):
+    """返回 (回包, 扣除列表, 原生奖励, 1002 更新)，全部在调用方的工作副本上结算。"""
     from . import formation, partner_growth
     request = parse_ids(body)
-    if opcode in (8113, 8115, 8117, 8252):
-        # shortcut: 活动订单/周期/任务未接通，完整接入并验收后再开放。
-        if (opcode == 8252 and request not in ([], [1])) or (opcode != 8252 and request):
+    if opcode in (8113, 8115, 8117):
+        reply, costs, reward = activity(save, config, get_state(save, config), now, opcode, request)
+        return reply, costs, reward, b""
+    if opcode == 8252:
+        # 阵容/入口页查询仍为关闭的空投影；幻化只在 8110 列表与 General41 内展示。
+        if request not in ([], [1]):
             raise ValueError("幻化活动或阵容查询参数无效")
-        return b"", b""
+        return b"", [], b"", b""
     if opcode == 8110:
         if request not in ([], [0], [1]):
             raise ValueError("幻影查询只接受刷新标记")
-        return query(save, config), b""
+        return query(save, config), [], b"", b""
     if (not save.get("has_role") or save["role_state"]["level"] < config["build"]["599"]["level"]
             or save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2):
         raise ValueError("65级并完成引导后才能幻化")
     state = get_state(save, config)
     if now < state["checked_at"]:
         raise ValueError("服务器时间回拨，幻化未结算")
+    if opcode in (8114, 8116, 8118):
+        reply, costs, reward = activity(save, config, state, now, opcode, request)
+        return reply, costs, reward, b""
     roster = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2)
     if opcode == 7021:
         if len(request) < 6 or len(request) % 2 or request[0] != 1:
@@ -343,4 +531,4 @@ def prepare(opcode, save, body, config, now):
     save["illusion_state"] = state
     get_state(save, config)
     update = write_general(save, raw, changed)
-    return (b"" if opcode == 8112 else update) + encode_pb_field(100, 2, query(save, config)), update
+    return (b"" if opcode == 8112 else update) + encode_pb_field(100, 2, query(save, config)), [], b"", update
