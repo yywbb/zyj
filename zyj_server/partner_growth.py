@@ -234,6 +234,8 @@ def prepare(opcode, save, body, config, now, seed):
     if not save.get("has_role") or not values or values[0] not in generals:
         raise ValueError("伙伴不存在或不属于当前账号")
     iid, raw = values[0], generals[values[0]]
+    if config["general"][str(pb_get_varint(raw, 1))].get("actor") == "lead":
+        return development.lead_soaring(save, raw, values, config)
     row = validate(raw, config)
     progress = research(save, iid, config)
     if opcode == 5512:

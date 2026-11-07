@@ -56,8 +56,12 @@ def use_exp(save, body, config):
     if not row["battle"]:
         raise ValueError("暂不支持此武将的高级成长")
     if any(pb_get_varint(raw, n) for n in range(21, 41)):
-        from . import partner_growth
-        partner_growth.validate(raw, config)
+        if row.get("actor") == "lead":
+            from . import development
+            development.lead_fairy(raw, config)
+        else:
+            from . import partner_growth
+            partner_growth.validate(raw, config)
     level, experience = pb_get_varint(raw, 3), pb_get_varint(raw, 5) or 0
     maximum = min(save["role_state"]["level"] * int(config["global_kv"]["general_level"]["value"]),
                   max(map(int, config["general_exp"])))

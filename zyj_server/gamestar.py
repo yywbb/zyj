@@ -44,9 +44,9 @@ def prepare(opcode, save, body, config, now):
     raw = formation.records(bytes.fromhex(save["world_state"]["1002"]), 1, 2).get(iid)
     if not raw or config["general"][str(pb_get_varint(raw, 1))]["actor"] != "lead":
         raise ValueError("游戏厅主角状态缺失")
-    if ((pb_get_varint(raw, 4) or 0) > 23 or any(pb_get_varint(raw, n) for n in range(21, 41))
-            or any(any(development.ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
-        raise ValueError("游戏厅暂不支持此主角的高级属性")
+    if (pb_get_varint(raw, 4) or 0) > 23:
+        raise ValueError("游戏厅暂不支持此主角的高级进阶")
+    development.lead_fairy(raw, config)
     if opcode == 3721:
         if values != [stage, step] or step >= row["break_cond1"]:
             raise ValueError("游戏厅激活目标已变化，请重新打开页面")

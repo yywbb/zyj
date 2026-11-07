@@ -102,7 +102,25 @@ for _,entry in ipairs({{1023,"UIGeneralBreakPreviewCallBack","NetGeneralBreakPre
     gamedata.ext["partnerQuery"..opcode]=queue
 end
 
+local function send_lead(req,opcode)
+    if gamedata.ext.localLeadGrowthBusy or gamedata.ext.localFormationBusy or gamedata.ext.localSoulBusy or gamedata.ext.localEquipGrowthBusy then
+        return fail("主角或阵容正在结算，请等待回复；未知超时请重进游戏")
+    end
+    local protagonist=gamedata.cache.protagonist or {}
+    local hero=protagonist.general or {}
+    if not protagonist.iid or req.iid~=protagonist.iid then
+        return fail("主角飞升目标已变化，请重新打开页面")
+    end
+    local step=gamedata.config.passive_soaring[tostring((hero.level8 or 0)+1)]
+    if not step then return fail("主角飞升已满级") end
+    if (hero.level2 or 0)<(step.breach or 0) then return fail("进阶等级不足，不能飞升") end
+    local pending={opcode=opcode,lead=1,iid=protagonist.iid,cost=gamedata.getIDandNUMs(step.consume),view=req.leadGrowthView}
+    gamedata.ext.localLeadGrowthBusy=pending
+    gamedata.ext.localFormationBusy=pending
+    return 1,opcode,ids({protagonist.iid,hero.level8 or 0})
+end
 local function send(req,opcode)
+    if req.isLead==1 then return send_lead(req,opcode) end
     if gamedata.ext.localFormationBusy or gamedata.ext.localSoulBusy or gamedata.ext.localEquipGrowthBusy then
         return fail("伙伴或阵容正在结算，请等待回复；未知超时请重进游戏")
     end
@@ -160,7 +178,17 @@ local function send(req,opcode)
 end
 local function receive(fd,opcode)
     local pending=gamedata.ext.localPartnerGrowthBusy
-    if fd.ser==0 or not pending or pending.opcode~=opcode then return {type=opcode,partnerIgnored=true} end
+    local lead=pending==nil and gamedata.ext.localLeadGrowthBusy or nil
+    if lead and (lead.lead~=1 or lead.opcode~=opcode) then lead=nil end
+    if fd.ser==0 or not (pending or lead) then return {type=opcode,partnerIgnored=true} end
+    if lead then
+        local body=generals_pb.Generals();body:ParseFromString(fd.rbuf)
+        gamedata:Generals(body.generals)
+        for _,r in ipairs(lead.cost) do gamedata:updateStaff({cid=r.cid,num=-r.num}) end
+        gamedata.ext.localLeadGrowthBusy=nil
+        if gamedata.ext.localFormationBusy==lead then gamedata.ext.localFormationBusy=nil end
+        return {type=opcode,isLead=1,ison=1,general=(gamedata.cache.protagonist or {}).general}
+    end
     local raw,data=fd.rbuf
     if opcode==5513 then
         local body=comb_pb.CombMessages();body:ParseFromString(raw)

@@ -37,6 +37,8 @@
 
 ## Server modules
 
+- 2026-11-07主角飞升：`development.py`拥有100级build466的7001[IID,显示飞升]主角分支（`lead_soaring`/`lead_fairy`），等级走`passive_soaring`0–60（20818/20817/20819/20820/20890真实消耗+毕业证书20893），仙属性g_hp/g_def/g_atk（pb 24/25/26）与仙战力34、速度9整档写入，主角快照字段10与1002同步更新；旧主角含未知21–41字段或仙属性与等级不一致扣费前拒绝，进阶<breach、100级前、旧点请求拒绝。与伙伴同码7001按actor==lead分流，g_power/power_all按飞升差值结算，重连快照保留。1057普通进阶、1058觉醒、游戏厅3721/3722、经验丹、单人Boss专用阵允许主角携带飞升族字段并一致性校验；金将24–26阶进阶仍未接入。战斗v2把主角仙属性按fairy_turn_every=0.1折算攻防血并随战报fei_sheng_level下发，冻结阵容/专用阵容保留。实际GameGeneralBreak补丁复用7001共享在途锁（isLead=1主角分支），一次扣料、匹配错误、主将页回调世代与真实秒；server+APK须配套。专项`test_protagonist_growth`（含实际APK网络回环）、`test_partner_growth`、`test_single_boss`，不跑全量；未部署、安装或操作正式账号。
+
 - 2026-11-07古董拍卖：`antique.py`拥有33级build377的5410查询/开拍、5411落槌、5414鉴定师结算、5415一键拍卖及5412/5413记录查询；轮次队列与真品判定按antique_appraisal的probability/judge在开拍时一次性掷出，出价人仅用antique_npc 1–9号竞拍人（extraDropPro全为0，特殊NPC补偿事件未接，不伪造出价者），货币取antique_item.coinID真实字段，一键拍卖按antique_fast分段吸附价格并按true_rate/transaction_rate/coefficient掷骰；记录-1/-2格式上限50条，checked_at/auction/records原子保存，回拨/重复开拍/坏载荷/保存失败拒绝。原生界面已存在无需新APK，规则见模块头。专项`test_antique`及直接session/replay调用方，不跑全量；未部署、安装或操作正式账号。
 - 2026-11-07幻化核心：`illusion.py`接65级8110/8111/8112及仅幻影的免费7021；SomeThings18由实际apply_reward取得所有权，奖励预检只读。`items/serial/checked_at`与奖励/绑定原子保存，旧items只读兼容；显示有效期/原绑定/序号拒绝旧请求，成功事务/战斗前过期解绑。战斗保留本体养成/装备/缘分，只投影幻影技能/突破/合体身份/性别阵营及配置三围衰减；凡界PVE VIP1、本服PVP VIP9，不足回本体，王的男人不用幻化。新杯赛/公会战冻结当时幻化，旧快照不补。真实GameIllusion/UIIllusion/列表/改选窗包含原生PB扩展分离、初始化与读FIFO避seq0、阵容共享锁、匹配错误、旧页/选择回调世代及真实秒刷新；server+新APK必须配套。44种只在低突破全覆盖，+10/+13为38种，+16全选择仅通天/元始/玉鼎；六名高突破和其他彩金依赖仍明确拒绝。8113/5/7关闭投影、8114/6/8活动订单/任务尚未接，不能称全幻化完成；精确边界见`illusion.md`。专项`test_illusion`及直接成长/助阵/战斗/冻结阵容/初始化/奖励/打包调用方，不跑全量；不安装、额外部署或操作正式账号。
 

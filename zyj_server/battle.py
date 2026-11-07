@@ -117,7 +117,17 @@ def rosters(save, point, config, *, illusion_mode="pve", now=None):
         if not config["general"].get(str(unit["cid"]), {}).get("battle"):
             raise ValueError("该武将不能上阵战斗")
         if any(pb_get_varint(raw, field) for field in range(21, 41)):
-            partner_growth.validate(raw, config)
+            if iid != protagonist:
+                partner_growth.validate(raw, config)
+            else:
+                from . import development
+                soaring = development.lead_fairy(raw, config)[0]
+                # 主角飞升仙属性按同比例折算进战斗面板，与伙伴一致。
+                if soaring:
+                    factor = Fraction(config["global_kv"]["fairy_turn_every"]["value"])
+                    for name, field in (("hp", 24), ("def", 25), ("atk", 26)):
+                        unit[name] += int((pb_get_varint(raw, field) or 0)*factor)
+                    unit["fei_sheng_level"] = soaring
         if index > config["role_exp"][str(save["role_state"]["level"])]["slotnum"]:
             raise ValueError("阵位尚未解锁")
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
@@ -590,6 +600,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                                       **({key: unit[key] for key in ("cover_d", "cover_d2", "cover_p", "cover_l")} if unit["cover_d"] else {})}
             if unit.get("w_l"):
                 meta[str(unit["iid"])].update(w_l=unit["w_l"], w_c=unit.get("w_c", 0))
+            if unit.get("fei_sheng_level"):
+                meta[str(unit["iid"])].update(fei_sheng_level=unit["fei_sheng_level"])
             if unit.get("artifact"):
                 meta[str(unit["iid"])].update(a_cid=unit["artifact"]["cid"], a_level=unit["artifact"]["level"])
         report["meta"][side] = {"n": "本地玩家" if direct else next(iter(team.values())).get("name", "守关队伍"),

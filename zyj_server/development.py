@@ -5,6 +5,8 @@ from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_fie
 
 QUERIES = (1023, 1056)
 MUTATIONS = (1017, 1055, 1057, 1058)
+# shortcut: 主角只接通了飞升族字段；彩金进阶24–26与技能选择须实现后另批接入。
+LEAD_SOARING_FIELDS = (23, 24, 25, 26, 34)
 
 
 def ids(body):
@@ -12,6 +14,52 @@ def ids(body):
     if any(n != 1 or w != 0 or not 0 <= v < (1 << 31) for n, w, v in fields):
         raise ValueError("培养/突破参数格式错误")
     return [v for _, _, v in fields]
+
+
+def lead_fairy(raw, config):
+    """校验主角飞升字段：仙属性只来自 passive_soaring，高级字段仅限飞升族。"""
+    level = pb_get_varint(raw, 23) or 0
+    if (any(pb_get_varint(raw, n) for n in range(21, 41) if n not in LEAD_SOARING_FIELDS)
+            or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))
+            or any(not 0 <= (pb_get_varint(raw, n) or 0) < (1 << 31) for n in LEAD_SOARING_FIELDS)):
+        raise ValueError("暂不支持此主角的高级属性")
+    row = config["passive_soaring"].get(str(level))
+    if row is None:
+        raise ValueError("主角飞升等级无效")
+    fairy = {f: row[name] for name, f in (("xianhp", 24), ("xiandef", 25), ("xianadk", 26))}
+    if any((pb_get_varint(raw, f) or 0) != value for f, value in fairy.items()):
+        raise ValueError("主角仙属性与飞升等级不一致，请重新登录")
+    if (pb_get_varint(raw, 34) or 0) != fairy[25] + fairy[26] + fairy[24] // 10:
+        raise ValueError("主角仙战力与飞升等级不一致，请重新登录")
+    return level, fairy
+
+
+def lead_soaring(save, raw, values, config):
+    """主角飞升7001：与伙伴同码但走 passive_soaring，只校验进阶与建筑466，无进修要求。"""
+    iid = pb_get_varint(raw, 2)
+    level, _ = lead_fairy(raw, config)
+    step = config["passive_soaring"].get(str(level + 1))
+    if values != [iid, level] or not step:
+        raise ValueError("主角飞升目标已变化或已满级，请重新打开页面")
+    if save["role_state"]["level"] < config["build"]["466"]["level"]:
+        raise ValueError("主角飞升尚未解锁")
+    if (pb_get_varint(raw, 4) or 0) < step["breach"]:
+        raise ValueError("主角进阶等级不足以飞升")
+    costs = partner_growth.pairs(step["consume"])
+    changed = pb_set_varint(raw, 23, level + 1)
+    for field, value in ((24, step["xianhp"]), (25, step["xiandef"]), (26, step["xianadk"])):
+        changed = pb_set_varint(changed, field, value)
+    changed = pb_set_varint(changed, 34, step["xiandef"] + step["xianadk"] + step["xianhp"] // 10)
+    previous = config["passive_soaring"][str(level)]["speed"]
+    changed = adjust(changed, {9: step["speed"] - previous})[0]
+    changed = partner_growth.power(save, raw, changed)
+    snapshot = bytes.fromhex(save["protagonist_snapshot"])
+    if pb_get_varint(snapshot, 1) != iid:
+        raise ValueError("主角状态缺失，请重新登录")
+    snapshot = pb_set_field(snapshot, 10, 2, changed)
+    save["protagonist_snapshot"] = snapshot.hex()
+    update = encode_pb_field(1, 2, changed) + encode_pb_field(6, 2, snapshot)
+    return update, [(cid, count) for cid, count in costs if count], update
 
 
 def adjust(raw, changes):
@@ -118,11 +166,12 @@ def prepare(opcode, save, body, config):
                 return b"".join(previews), costs, update
             if values != [0]:
                 raise ValueError("普通主角进阶只接受方式0")
-            # shortcut: 普通进阶至23阶；金将分支需飞升/觉醒业务后接入。
+            # shortcut: 普通进阶至23阶；金将分支需彩金进阶业务后接入。
             if (not 1 <= stage < 23 or not row or row["soaring_limit"] or row["game_limit"]
-                    or any(pb_get_varint(raw, n) for n in range(21, 41))
+                    or any(pb_get_varint(raw, n) for n in range(21, 41) if n not in LEAD_SOARING_FIELDS)
                     or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
                 raise ValueError("尚不支持此主角的高级进阶")
+            lead_fairy(raw, config)
             if any(trained[field] != row[name] for field, name in ((6, "atk"), (7, "def"), (8, "hp"))):
                 raise ValueError("请先完成本阶全部魔晶培养")
             current = config["protagonist_grow"][str(stage)][f"general{choice}"]
@@ -167,9 +216,11 @@ def prepare(opcode, save, body, config):
         raw = generals.get(iid)
         if not raw or config["general"][str(pb_get_varint(raw, 1))]["actor"] != "lead":
             raise ValueError("主角觉醒状态缺失")
-        if ((pb_get_varint(raw, 4) or 0) > 23 or any(pb_get_varint(raw, n) for n in range(21, 41))
+        if ((pb_get_varint(raw, 4) or 0) > 23
+                or any(pb_get_varint(raw, n) for n in range(21, 41) if n not in LEAD_SOARING_FIELDS)
                 or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
             raise ValueError("暂不支持此主角的高级觉醒属性")
+        lead_fairy(raw, config)
         current = pb_get_varint(raw, 18) or 0
         row = config["protagonist_awaken"].get(str(current + 1))
         if values != [iid, current] or not row:

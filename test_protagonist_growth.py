@@ -440,6 +440,100 @@ class ProtagonistGrowthTests(unittest.TestCase):
             self.assertEqual(units[2]["awakening"], 130)
             self.assertEqual(units[2]["adddmgpct"], Fraction(57, 100))
 
+    def soar_lead(self, level):
+        iid = protocol.pb_get_varint(self.gen(), 2)
+        for stage in range(1, level + 1):
+            self.pay_materials(self.config["passive_soaring"][str(stage)]["consume"])
+            self.success(1, 7001, values=[iid, stage-1])
+        self.refresh()
+        return iid
+
+    def test_lead_soaring_charges_real_costs_and_projects_fairy_into_battle(self):
+        self.set_hero(growth=21, level=300)
+        row = self.config["passive_soaring"]["1"]
+        before, raw = copy.deepcopy(self.save), self.gen()
+        iid = self.soar_lead(1)
+        self.assertEqual(protocol.pb_get_varint(self.gen(), 23), 1)
+        for field, name in ((24, "xianhp"), (25, "xiandef"), (26, "xianadk")):
+            self.assertEqual(protocol.pb_get_varint(self.gen(), field), row[name])
+        self.assertEqual(protocol.pb_get_varint(self.gen(), 34), row["xiandef"]+row["xianadk"]+row["xianhp"]//10)
+        self.assertEqual(protocol.pb_get_varint(self.gen(), 9), protocol.pb_get_varint(raw, 9))
+        self.assertEqual(self.save["role_state"]["coin"], before["role_state"]["coin"] - 217972)
+        self.assertEqual((self.props(20818), self.props(20817)), (0, 0))
+        embedded = next(v for n, w, v in protocol.iter_pb_fields(bytes.fromhex(self.save["protagonist_snapshot"])) if (n, w) == (10, 2))
+        self.assertEqual(embedded, self.gen())
+        factor = Fraction(self.config["global_kv"]["fairy_turn_every"]["value"])
+        attack, _ = battle.rosters(self.save, self.config["copy"]["42101"]["1"], self.config)
+        unit = next(u for u in attack.values() if u["iid"] == iid)
+        self.assertEqual(unit["atk"], protocol.pb_get_varint(self.gen(), 6) + int(row["xianadk"]*factor))
+        self.assertEqual(unit["hp"], protocol.pb_get_varint(self.gen(), 8) + int(row["xianhp"]*factor))
+        self.assertEqual(unit["fei_sheng_level"], 1)
+        self.assert_rejected(7001, values=[iid, 0])
+        self.reconnect(); self.refresh()
+        self.assertEqual(protocol.pb_get_varint(self.gen(), 23), 1)
+
+    def test_lead_soaring_gates_malformed_and_atomic_failure_never_charge(self):
+        self.set_hero(growth=20)
+        iid = protocol.pb_get_varint(self.gen(), 2)
+        self.assert_rejected(7001, values=[iid, 0])
+        self.set_hero(growth=21)
+        self.save["role_state"]["level"] = 99
+        self.assert_rejected(7001, values=[iid, 0])
+        self.save["role_state"]["level"] = 150
+        for values in ([], [iid], [iid, 0, 0], [iid, 5], [iid+1, 0]):
+            self.assert_rejected(7001, values=values)
+        raw = self.gen()
+        for mutate in (lambda r: protocol.pb_set_varint(r, 21, 1),
+                       lambda r: protocol.pb_set_varint(r, 24, 1)):
+            player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, mutate(raw)))
+            self.assert_rejected(7001, values=[iid, 0])
+        player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+        self.pay_materials(self.config["passive_soaring"]["1"]["consume"])
+        before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 7001, values=[iid, 0])
+        self.assertEqual((self.save, self.store.path(1).read_bytes()), (before, disk))
+        self.assertEqual(self.props(20818), 130)
+
+    def test_soared_lead_keeps_gamestar_and_awaken_growth(self):
+        self.set_hero(growth=21)
+        iid = self.soar_lead(1)
+        self.pay_materials(self.config["hoshimiya_jihuo"]["1"]["1"]["activation_cost"])
+        self.success(1, 3721, values=[1, 0]); self.refresh()
+        self.assertEqual(self.save["gamestar_state"]["step"], 1)
+        self.pay_materials(self.config["protagonist_awaken"]["1"]["consume"])
+        self.success(1, 1058, values=[iid, 0]); self.refresh()
+        self.assertEqual((protocol.pb_get_varint(self.gen(), 18), protocol.pb_get_varint(self.gen(), 23)), (1, 1))
+        self.reconnect(); self.refresh()
+        self.assertEqual((protocol.pb_get_varint(self.gen(), 18), protocol.pb_get_varint(self.gen(), 23)), (1, 1))
+
+    def test_actual_lead_feisheng_network_pb_costs_locks_and_matching_errors(self):
+        self.set_hero(growth=21, level=300)
+        self.pay_materials(self.config["passive_soaring"]["1"]["consume"])
+        lua = self.growth_network_lua()
+        lua.eval(b"require")(b"GameGeneralBreak")
+        fd = lambda raw: lua.table_from({b"rbuf": raw, b"ser": 7})
+        iid = lua.globals().gamedata[b"cache"][b"protagonist"][b"iid"]
+        req = lua.table_from({b"type": 7001, b"iid": iid, b"isLead": 1})
+        mode, opcode, raw = lua.globals().UIPartnerFeiShengCallBack(req)
+        self.assertEqual((mode, opcode, protocol.parse_ids_pb(raw)), (1, 7001, [iid, 0]))
+        self.assertEqual(lua.globals().UIPartnerFeiShengCallBack(req)[0], 0)
+        lua.globals().NetErrorMessageCallback9(fd(recharge.ids([7001, 0])))
+        self.assertIsNone(lua.globals().gamedata[b"ext"][b"localLeadGrowthBusy"])
+        mode, opcode, raw = lua.globals().UIPartnerFeiShengCallBack(req)
+        self.assertEqual((mode, opcode, protocol.parse_ids_pb(raw)), (1, 7001, [iid, 0]))
+        result = lua.globals().NetPartnerFeiShengCallBack(fd(self.success(1, opcode, raw=raw)))
+        self.refresh()
+        self.assertEqual(result[b"isLead"], 1)
+        self.assertEqual(result[b"general"][b"level8"], 1)
+        self.assertEqual(lua.eval(b"gamedata.getStaffNum(20818).num"), 0)
+        self.assertIsNone(lua.globals().gamedata[b"ext"][b"localLeadGrowthBusy"])
+        mode, opcode, raw = lua.globals().UIPartnerFeiShengCallBack(req)
+        self.assertEqual((mode, protocol.parse_ids_pb(raw)), (1, [iid, 1]))
+        lua.globals().NetErrorMessageCallback9(fd(recharge.ids([7001, 0])))
+        req = lua.table_from({b"type": 7001, b"iid": iid+1, b"isLead": 1})
+        self.assertEqual(lua.globals().UIPartnerFeiShengCallBack(req)[0], 0)
+
     def growth_network_lua(self):
         lua = self.network_lua()
         lua.eval(b"require")(b"GameGameStar")
