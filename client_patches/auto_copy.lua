@@ -155,6 +155,12 @@ local function autoCopyContinue()
     timer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(autoCopyInterval), CCCallFunc:create(autoCopyRefresh)))
 end
 
+local function autoCopyLevel(role)
+    local level = tonumber(role and role.level)
+    if level then autoCopy.level = level end
+    return autoCopy.level
+end
+
 local function autoCopyRun(role, vipstatus, now)
     if not autoCopyReady() then return end
     local target = autoCopyTarget()
@@ -174,7 +180,7 @@ local function autoCopyRun(role, vipstatus, now)
             AutoCopyStop("挂机已停止：尚未解锁此关卡批量扫荡"); return
         end
     end
-    autoCopyLabel(autoCopyModes[autoCopy.mode].." "..map.."-"..point)
+    autoCopyLabel(autoCopyModes[autoCopy.mode].." Lv."..autoCopyLevel(role))
     local shortStamina = role.stamina < config.physical
     local shortChallenge = (data.kill or 0) >= config.challenge
     if shortChallenge and not autoCopy.reset then AutoCopyStop("挂机已停止：挑战次数不足"); return end
@@ -267,7 +273,7 @@ function AutoCopyStart(mode, buy, reset)
         autoCopy.startMap = layer.data.id
         autoCopy.target, autoCopy.visited = nil, {}
         autoCopy.active = true
-        autoCopyLabel("准备"..autoCopyModes[mode])
+        autoCopyLabel("准备"..autoCopyModes[mode]..(autoCopy.level and (" Lv."..autoCopy.level) or ""))
         autoCopyContinue()
     end)
 end
@@ -300,7 +306,7 @@ function AutoCopyAttach(layer, toppos)
     layer.autoCopyButton:setTouchPriority(-102)
     layer.autoCopyButton:setSwallowsTouch(true)
     layer.rootNode:addChild(layer.autoCopyButton)
-    autoCopyLabel(autoCopy.pending and "等待操作结果" or "")
+    autoCopyLabel(autoCopy.pending and "等待操作结果" or (autoCopyLevel(GameScene.roleinfo) and ("Lv."..autoCopy.level) or ""))
 end
 
 function AutoCopyDetach(layer)
