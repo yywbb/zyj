@@ -39,6 +39,13 @@ for _,entry in ipairs({{"UIGeneralBreak","resetPage_tupo"},{"UIGeneralAwaken","r
     _G[name]=function(t)
         if t.partnerIgnored then return end
         for _,id in ipairs({10021,10023,10024,1200,1012}) do GameScene:addUpdate(id) end
+        if name=="UIPartnerFeiSheng" and t.isLead==1 then
+            -- 主角飞升不走伙伴页：缓存已由 gamedata:Generals 更新，这里把新境界同步到主角页，
+            -- 缺了这一步页面会一直停在旧境界名（如白莲境0级），但战力已按新等级显示。
+            local lead=GameScene.layers["lead"]
+            if lead and lead.show then return lead.module:pageDataCallback("feisheng","feiShengCallback",t.general) end
+            return
+        end
         local page=LocalPartnerGrowthPage(t.partnerView)
         if page then
             if t.partnerView.kind=="generalInfo" then return page:reloaddata(t) end

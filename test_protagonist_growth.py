@@ -712,6 +712,26 @@ class ProtagonistGrowthTests(unittest.TestCase):
             assert(awaken.rootNode==nil)
         ''')
 
+    def test_actual_lead_feisheng_reply_reaches_lead_page_and_refreshes_realm_display(self):
+        # 回归：7001 isLead 回包曾只走伙伴页分发，主角页永远停在旧境界名（白莲境0级）但战力已涨。
+        lua = self.growth_ui_lua()
+        lua.execute(self.client_scripts()["assets/scripts/UIGenerals.so"].decode())
+        lua.execute('''
+            lead:init(node(),0,{page="feisheng"})
+            received={}
+            lead.modules.feisheng.feiShengCallback=function(self,t) received[#received+1]=t end
+            UIPartnerFeiSheng({type=7001,isLead=1,general={iid=GameScene.protagonist.iid,level8=1}})
+            assert(#received==1 and received[1].level8==1)
+            UIPartnerFeiSheng({type=7001,isLead=1,general={iid=GameScene.protagonist.iid,level8=2}})
+            assert(#received==2 and received[2].level8==2)
+            GameScene.layers.lead.show=false
+            UIPartnerFeiSheng({type=7001,isLead=1,general={iid=GameScene.protagonist.iid,level8=3}})
+            assert(#received==2)
+            GameScene.layers.lead.show=true
+            UIPartnerFeiSheng({type=7001,partnerIgnored=true})
+            assert(#received==2)
+        ''')
+
     def test_actual_game_break_animation_queries_authoritative_progress_and_closed_callbacks_stop(self):
         lua = self.growth_ui_lua()
         lua.execute('''
