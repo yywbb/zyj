@@ -1179,6 +1179,10 @@ end''',
     if window.show and window.module.data.general.iid == t.general.iid then window.module:reloaddata(t) end
 end''',
         "UIGeneralFosterAutomatic": '''function UIGeneralFosterAutomatic(t)
+    if t.localFosterBatch then
+        if LocalFosterAutoReply and LocalFosterAutoReply(t) then UIGeneralFosterConfirm(t) end
+        return
+    end
     UIGeneralFosterConfirm(t)
     local window = gameWindows.windows["generalcultivate"]
     if window.show and window.module.iid == t.general.iid then window.module:reloadData(t) end
@@ -1189,12 +1193,55 @@ end'''}
         code = code[:start] + replacement + code[end:]
     patched["UIGenerals"] = code
     code = read_script("window_generalcultivateAuto").decode("utf-8").replace("\r\n", "\n")
+    marker = '''    ui.creatInputEditBoxForNum(self.rootItems.inputNumNode,self.rootItems.donum,self.touchPriority,function (num)
+        self.donum = 0
+        self:numchange(num)
+    end)'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''    local view = self.localFosterView
+    self.localFosterInput = ui.creatInputEditBoxByNode(self.rootItems.inputNumNode,kEditBoxInputModePhoneNumber,
+        function() if self.localFosterView == view and self.rootItems and not self.localFosterRun then self.rootItems.donum:setString("") end end,
+        function(text,edit)
+            edit:setText("")
+            if self.localFosterView ~= view or not self.rootNode then return end
+            local num = tonumber(text)
+            if num and num >= 1 and num < 2147483648 and num % 1 == 0 then self:numchange(num-self.donum)
+            else runGamePrompt({msg="请输入现有培养丹、元宝可支付的正整数次数"}) end
+            self.rootItems.donum:setString(self.donum)
+        end,
+        {fontSize=33,fontColor=self.rootItems.donum:getColor(),PlaceHolder="",length=10})
+    self.localFosterInput:setTouchPriority(self.touchPriority)''')
+    marker = "    if donum > 200 then return end"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    if donum >= 2147483648 or donum % 1 ~= 0 then return end")
+    marker = "    self.rootItems.doButton:addHandleOfControlEvent(function()\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '        if self.localFosterRun then self:localFosterStop("已停止后续培养，当前批次仍会结算") return end\n')
+    marker = "UIRequest({type = 1126,iid = self.iid,method = self.method,xlnum = self.donum,status1 = self.status1,status2 = self.status2,status3 = self.status3})"
+    assert code.count(marker) == 2
+    code = code.replace(marker, "self:localFosterStart()")
+    for seconds, count in ((1, 1), (2, 2)):
+        marker = f"gameTouch:clickprofbytime({seconds})"
+        assert code.count(marker) == count
+        code = code.replace(marker, "")
+    marker = 'gamedata.config.system_intro["8"].intro'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '"输入现有培养丹、元宝可支付的总次数，按小批连续结算。次数栏显示剩余次数；点击停止或关闭窗口可停止后续批次。列表只显示最近一批，失败或结果未知不自动重试。"')
     marker = 'gameConfig.strings:generalPeiyang(a1+1)'
     assert code.count(marker) == 1
     code = code.replace(marker, 'string.format("第%d组（实际%d次）",a1+1,data.count)')
     start = code.index('                if data["potential"] and data["potential"] > 0 then')
     end = code.index('\n            else\n                ccbDocumentControler["stop"]:setVisible(false)', start)
     code = code[:start] + '                ccbDocumentControler["stop"]:setString("培养已停止，仅扣实际执行次数")' + code[end:]
+    start = code.index("function generalcultivate.reloadData(")
+    end = code.index("function generalcultivate.close(", start)
+    code = code[:start] + code[end:]
+    marker = "elseif (self.costcid == 1001) and (needcostnum > GameScene.roleinfo.gold) then"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "elseif self.method == 2 and (self.costcid == 1001) and (needcostnum > GameScene.roleinfo.gold) then")
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "general_foster_auto.lua"), encoding="utf-8") as stream:
+        assert code.count("return generalcultivate") == 1
+        code = code.replace("return generalcultivate", stream.read() + "\nreturn generalcultivate")
     patched["window_generalcultivateAuto"] = code
     return patched
 
@@ -3394,7 +3441,7 @@ end"""
 ''')
     marker = "    return { type = 9999, errornum = error.ids[2], msg = cnMessage }"
     assert code.count(marker) == 1
-    code = code.replace(marker, "    return { type = 9999, errornum = error.ids[2], msg = cnMessage, request_opcode = error.ids[1], localAutoCopy = localAutoError and localAutoError.local_auto_copy }")
+    code = code.replace(marker, "    return { type = 9999, errornum = error.ids[2], msg = cnMessage, request_opcode = error.ids[1], localAutoCopy = localAutoError and localAutoError.local_auto_copy, localFosterBatch = localFosterError and localFosterError.batch }")
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    local localAutoError = LocalAutoCopyError and LocalAutoCopyError(error.ids[1])
@@ -3439,9 +3486,10 @@ end"""
     if error.ids[1] == 1118 or error.ids[1] == 1119 or error.ids[1] == 1210 then
         gamedata.ext.localTreasureBusy = false
     end
-    if error.ids[1] == 1013 or error.ids[1] == 1014 or error.ids[1] == 1126 then
+    local localFosterError = gamedata and gamedata.ext and gamedata.ext.localFosterBusy
+    if localFosterError and localFosterError.opcode == error.ids[1] then
         gamedata.ext.localFosterBusy = nil
-    end
+    else localFosterError = nil end
     if gamedata and gamedata.ext and gamedata.ext.localMagicBusy and gamedata.ext.localMagicBusy.opcode == error.ids[1] then
         gamedata.ext.localMagicBusy = nil
     end
@@ -3460,7 +3508,7 @@ end"""
     code = read_script("UIErrorMessage").decode("utf-8").replace("\r\n", "\n")
     marker = "function UIErrorMessage(t)\n"
     assert code.count(marker) == 1
-    code = code.replace(marker, marker + "    if AutoCopyServerError then AutoCopyServerError(t) end\n    if LocalWorldBossError then LocalWorldBossError(t) end\n")
+    code = code.replace(marker, marker + "    if AutoCopyServerError then AutoCopyServerError(t) end\n    if LocalWorldBossError then LocalWorldBossError(t) end\n    if LocalFosterAutoError then LocalFosterAutoError(t) end\n")
     marker = "function UIErrorMessage7(t)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + '''    if t.local_login_failed then
@@ -3472,7 +3520,7 @@ end"""
     code = read_script("UIPrompt").decode("utf-8").replace("\r\n", "\n")
     marker = "function UIPrompt(t)\n"
     assert code.count(marker) == 1
-    code = code.replace(marker, marker + "    if AutoCopyLocalReject and AutoCopyLocalReject(t) then return end\n    if LocalWorldBossError then LocalWorldBossError(t) end\n")
+    code = code.replace(marker, marker + "    if AutoCopyLocalReject and AutoCopyLocalReject(t) then return end\n    if LocalWorldBossError then LocalWorldBossError(t) end\n    if LocalFosterAutoError then LocalFosterAutoError(t) end\n")
     for name in ("UIPromptTimeOut", "UIPromptNoSignal"):
         marker = "function " + name + "()\n"
         assert code.count(marker) == 1
@@ -3481,6 +3529,7 @@ end"""
         return 0, nil
     end
     if AutoCopyStop then AutoCopyStop("自动推图已停止：网络连接异常") end
+    if LocalFosterAutoStop then LocalFosterAutoStop("自动培养已停止：网络异常，当前批次结果未知时请重进游戏") end
 ''')
     patched["assets/scripts/UIPrompt.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     print("  [Lua] Patched native login form, credential handoff and login rejection handling")

@@ -405,6 +405,263 @@ class GeneralFosterTests(unittest.TestCase):
         self.assertTrue(any(min(row[b"num1"], row[b"num2"]) < 0 for row in result[b"status"].values()))
         self.assertEqual(lua.globals().gamedata[b"cache"][b"props"][20009][b"num"], self.props(20009))
 
+    def automatic_ui(self, speed=1, method=2):
+        from lupa.lua51 import LuaRuntime
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.globals().gamedata = lua.table_from({"config": self.config}, recursive=True)
+        with zipfile.ZipFile(test_penglai.ROOT / "configs_sec5.zip") as archive:
+            lua.globals().gamedata.config.system_intro = lua.table_from(json.loads(archive.read("5/system_intro.json")), recursive=True)
+        lua.globals().speed = speed
+        lua.execute('''
+            requests={}; prompts={}; actions={}; now=0
+            os.time=function() return math.floor(now) end
+            print=function() end; printT=print; CCControlEventTouchUpInside=1; kEditBoxInputModePhoneNumber=1
+            table.getTableLength=function(t) local n=0; for _ in pairs(t) do n=n+1 end; return n end
+            UIRequest=function(t) requests[#requests+1]=t end
+            runGamePrompt=function(t) prompts[#prompts+1]=t.msg end
+            function node()
+                return setmetatable({enabled=true,generation=0}, {__index=function(t,k)
+                    if k=='setString' then return function(self,v) self.text=v end end
+                    if k=='getString' then return function(self) return self.text end end
+                    if k=='setEnabled' then return function(self,v) self.enabled=v end end
+                    if k=='addHandleOfControlEvent' then return function(self,f) self.callback=f end end
+                    if k=='getContentSize' then return function() return {width=900,height=800} end end
+                    if k=='getColor' then return function() return {} end end
+                    if k=='stopAllActions' then return function(self) self.generation=self.generation+1 end end
+                    if k=='runAction' then return function(self,a)
+                        actions[#actions+1]={at=now+a.delay/speed,callback=a.callback,node=self,generation=self.generation}
+                    end end
+                    return function() end
+                end})
+            end
+            function items() return setmetatable({}, {__index=function(t,k) local n=node();rawset(t,k,n);return n end}) end
+            CCBReaderLoad=function() return node(),items() end
+            CCNode={create=node}; CCDelayTime={create=function(_,n) return {delay=n} end}
+            CCCallFunc={create=function(_,f) return {callback=f} end}
+            CCSequence={createWithTwoActions=function(_,a,b) return {delay=a.delay,callback=b.callback} end}
+            LuaEventHandler={create=function(_,f) return f end}
+            ui={setLabelString=function(n,v) if v~=nil then n:setString(v) end end,
+                getIDandNUMs=function() return {{cid=5,num=1}} end,
+                creatInputEditBoxForNum=function(n,label,priority,callback)
+                    inputArgs={length=3}; inputEnd=function(text) callback(tonumber(text)) end
+                end,
+                creatInputEditBoxByNode=function(n,mode,begin,finish,args)
+                    inputBegin=begin; inputEnd=finish; inputArgs=args; return node()
+                end,
+                creatDelayButton=function(n,priority,f) n.repeatCallback=f end,
+                createLuaTableView=node,createRichLabel=function() end,IDconfig=function() return {name='培养丹'} end}
+            gameConfig={strings={string_common=function() return '培养' end,nameBuzu=function() return '培养丹不足' end}}
+            gameTouch={clickprofbytime=function() end}
+            GameScene={roleinfo={gold=100000},presentLayer='generalup',layers={generalup={show=false}},addUpdate=function() end}
+            gameWindows={windows={generalInfo={show=false}}}
+            function advance(seconds)
+                local target=now+seconds
+                for _=1,10000 do
+                    local index,first
+                    for i,a in ipairs(actions) do if a.at<=target and (not first or a.at<first.at) then index,first=i,a end end
+                    if not first then now=target;return end
+                    table.remove(actions,index); now=first.at
+                    if first.generation==first.node.generation then first.callback() end
+                end
+                error('timer did not yield')
+            end
+        ''')
+        scripts = self.client_scripts()
+        window = lua.execute(scripts["assets/scripts/window_generalcultivateAuto.so"].decode())
+        lua.globals().gameWindows.windows.generalcultivate = lua.table_from({"show": True, "module": window})
+        lua.execute(scripts["assets/scripts/UIGenerals.so"].decode())
+        raw = self.generals()[self.iid]
+        data = {"iid": self.iid, "method": method, "extGeneralData": {"iid": self.iid, "potential": protocol.pb_get_varint(raw, 17),
+                "atk": protocol.pb_get_varint(raw, 6), "hp": protocol.pb_get_varint(raw, 8), "defense": protocol.pb_get_varint(raw, 7)}}
+        window.open(window, -100, lua.table_from(data, recursive=True), None)
+        window.setpropNum(window, lua.table_from({"20009": self.props(20009)}))
+        return lua, window, data
+
+    def automatic_reply(self, ui, net, request, sequence):
+        request = net.table_from({key.encode(): value for key, value in request.items()})
+        remote, opcode, body = net.globals().UIGeneralAutoTrainCallBack(request)
+        self.assertEqual((remote, opcode), (1, 1126))
+        values = protocol.parse_ids_pb(body)
+        self.assertLessEqual(values[2], 200)
+        with patch("random.getrandbits", return_value=0):
+            packets = self.session.handle(opcode, sequence, body)
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1126)
+        result = net.globals().NetGeneralAutoTrainCallBack(net.table_from({b"rbuf": packets[0][16:]}))
+        def plain(value):
+            if hasattr(value, "items"):
+                return {plain(key): plain(item) for key, item in value.items()}
+            return value.decode() if isinstance(value, bytes) else value
+        result = ui.table_from(plain(result), recursive=True)
+        ui.globals().GameScene.roleinfo.gold = self.session.save["role_state"]["gold"]
+        ui.globals().UIGeneralFosterAutomatic(result)
+        self.assertEqual(net.globals().gamedata[b"cache"][b"props"][20009][b"num"], self.props(20009))
+        self.assertEqual(net.globals().gamedata[b"cache"][b"role"][b"gold"], self.session.save["role_state"]["gold"])
+        return result, values[2]
+
+    def test_actual_automatic_input_accepts_over_2000_without_changing_shared_input_helper(self):
+        self.give(20009, 10000)
+        lua, window, _ = self.automatic_ui()
+        self.assertEqual(lua.globals().inputArgs.length, 10)
+        lua.globals().inputEnd("2501", lua.globals().node())
+        self.assertEqual(window.donum, 2501)
+        for value in ("0", "-1", "1.5", "nan", "2147483648", str(self.props(20009)+1), "20001"):
+            with self.subTest(value=value):
+                lua.globals().inputEnd(value, lua.globals().node())
+                self.assertEqual(window.donum, 2501)
+        self.assertIn(b"length = 3", builder.read_script("ui", "common_lua"))
+
+    def test_actual_automatic_unbounded_total_uses_bounded_batches_and_exact_persistent_costs(self):
+        self.give(20009, 3000)
+        ui, window, _ = self.automatic_ui()
+        net = self.network_lua()
+        pills, gold = self.props(20009), self.session.save["role_state"]["gold"]
+        window.numchange(window, 2201)
+        window.localFosterStart(window)
+        cursor, batches, last = 1, [], None
+        for batch in range(12):
+            requests = ui.globals().requests
+            queued = [requests[i] for i in range(cursor, len(requests)+1) if requests[i].type == 1126]
+            cursor = len(requests)+1
+            self.assertEqual(len(queued), 1)
+            last, count = self.automatic_reply(ui, net, queued[0], 10000+batch)
+            batches.append(count)
+            self.assertLessEqual(ui.globals().table.getTableLength(window.status), 200)
+            ui.globals().advance(0.2)
+        self.assertEqual(batches, [200]*11+[1])
+        self.assertEqual((pills-self.props(20009), gold-self.session.save["role_state"]["gold"]), (2201, 11005))
+        self.assertEqual(self.session.save["activity_state"]["liveness_counts"]["22"], self.config["liveness"]["22"]["num"])
+        self.assertEqual(window.donum, 0)
+        self.assertIsNone(window.localFosterRun)
+        before = len(ui.globals().requests)
+        ui.globals().UIGeneralFosterAutomatic(last)
+        ui.globals().advance(2)
+        self.assertEqual(len(ui.globals().requests), before)
+        world, foster = copy.deepcopy(self.session.save["world_state"]), copy.deepcopy(self.session.save["general_foster_state"])
+        self.session = self.reconnect()
+        self.assertEqual((self.session.save["world_state"], self.session.save["general_foster_state"]), (world, foster))
+        self.call(1035, [self.iid])
+        self.assertEqual(self.props(20009), pills)
+
+    def test_actual_automatic_unknown_results_stop_at_real_deadline_and_errors_match_batch(self):
+        for speed in (1, 3, 10):
+            with self.subTest(speed=speed):
+                ui, window, _ = self.automatic_ui(speed)
+                net = self.network_lua()
+                window.numchange(window, 500)
+                window.localFosterStart(window)
+                request = ui.globals().requests[len(ui.globals().requests)]
+                remote, _, _ = net.globals().UIGeneralAutoTrainCallBack(net.table_from({key.encode(): value for key, value in request.items()}))
+                self.assertEqual(remote, 1)
+                ui.globals().advance(19)
+                self.assertIsNotNone(window.localFosterRun)
+                ui.globals().advance(3)
+                self.assertIsNone(window.localFosterRun)
+                before = len(ui.globals().requests)
+                window.localFosterStart(window)
+                self.assertEqual(len(ui.globals().requests), before)
+                wrong = net.globals().NetErrorMessageCallback9(net.table_from({b"rbuf": recharge.ids([1013, 0])}))
+                self.assertIsNotNone(net.globals().gamedata[b"ext"][b"localFosterBusy"])
+                self.assertIsNone(wrong[b"localFosterBatch"])
+                error = net.globals().NetErrorMessageCallback9(net.table_from({b"rbuf": recharge.ids([1126, 0])}))
+                ui.globals().LocalFosterAutoError(ui.table_from({"request_opcode": 1126, "localFosterBatch": error[b"localFosterBatch"]}))
+                self.assertIsNone(net.globals().gamedata[b"ext"][b"localFosterBusy"])
+                window.localFosterStart(window)
+                self.assertEqual(len(ui.globals().requests), before+1)
+
+    def test_actual_automatic_stop_target_changes_and_reopened_windows_never_continue_old_batch(self):
+        self.give(20009, 2000)
+        for index, mode in enumerate(("stop", "between", "close", "target", "filter", "page")):
+            with self.subTest(mode=mode):
+                ui, window, data = self.automatic_ui()
+                net = self.network_lua()
+                window.numchange(window, 500)
+                window.localFosterStart(window)
+                request = ui.globals().requests[len(ui.globals().requests)]
+                old_begin, old_end = ui.globals().inputBegin, ui.globals().inputEnd
+                if mode == "stop": window.rootItems.doButton.callback()
+                elif mode == "close":
+                    window.close(window)
+                    old_begin()
+                    old_end("999", ui.globals().node())
+                    window.open(window, -100, ui.table_from(data, recursive=True), None)
+                elif mode == "target": window.iid = self.iid+1
+                elif mode == "filter": window.status1 = 1
+                elif mode == "page": ui.globals().GameScene.presentLayer = "city"
+                before = len(ui.globals().requests)
+                self.automatic_reply(ui, net, request, 11000+index)
+                if mode == "between": window.rootItems.doButton.callback()
+                ui.globals().advance(25)
+                self.assertEqual(len(ui.globals().requests), before)
+                self.assertIsNone(window.localFosterRun)
+                if mode == "close": self.assertEqual(window.donum, 0)
+
+    def test_actual_automatic_preflights_full_budget_and_stops_on_partial_batch(self):
+        net = self.network_lua()
+        pills, gold = self.props(20009), self.session.save["role_state"]["gold"]
+        for resource, total in (("pills", pills+1), ("gold", gold//5+1)):
+            net.globals().gamedata[b"cache"][b"props"][20009][b"num"] = max(pills,total) if resource == "gold" else pills
+            request = net.table_from({b"iid": self.iid, b"method": 2, b"xlnum": 200, b"localFosterTotal": total, b"localFosterBatch": 42})
+            remote, opcode, error = net.globals().UIGeneralAutoTrainCallBack(request)
+            self.assertEqual((remote, opcode, error[b"localFosterBatch"]), (0, 503, 42))
+            self.assertIsNone(net.globals().gamedata[b"ext"][b"localFosterBusy"])
+            if resource == "gold": self.assertEqual(error[b"msgtype"], b"shortgold")
+        net.globals().gamedata[b"cache"][b"props"][20009][b"num"] = pills
+        self.assertEqual((self.props(20009), self.session.save["role_state"]["gold"]), (pills, gold))
+        self.set_raw(protocol.pb_set_varint(self.generals()[self.iid], 17, 1))
+        ui, window, _ = self.automatic_ui()
+        window.numchange(window, 500)
+        window.status1, window.status2, window.status3 = 1, 1, 1
+        window.rootItems.doButton.callback()
+        request = ui.globals().requests[len(ui.globals().requests)]
+        result, _ = self.automatic_reply(ui, net, request, 12000)
+        self.assertEqual((result.actual, result.stop, pills-self.props(20009), gold-self.session.save["role_state"]["gold"]), (1, 1, 1, 5))
+        before = len(ui.globals().requests)
+        ui.globals().advance(25)
+        self.assertEqual(len(ui.globals().requests), before)
+        self.assertIsNone(window.localFosterRun)
+
+    def test_actual_automatic_save_failure_keeps_paid_prior_batch_and_never_retries_unknown_batch(self):
+        self.give(20009, 2000)
+        pills = self.props(20009)
+        ui, window, _ = self.automatic_ui()
+        net = self.network_lua()
+        window.numchange(window, 500)
+        window.localFosterStart(window)
+        self.automatic_reply(ui, net, ui.globals().requests[len(ui.globals().requests)], 13000)
+        ui.globals().advance(0.2)
+        request = ui.globals().requests[len(ui.globals().requests)]
+        remote, opcode, body = net.globals().UIGeneralAutoTrainCallBack(net.table_from({key.encode(): value for key, value in request.items()}))
+        self.assertEqual((remote, opcode), (1, 1126))
+        memory, disk = copy.deepcopy(self.session.save), self.path.read_bytes()
+        with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.session.handle(opcode, 13001, body)
+        self.assertEqual((self.session.save, self.path.read_bytes()), (memory, disk))
+        self.assertEqual(self.props(20009), pills-200)
+        before = len(ui.globals().requests)
+        ui.globals().advance(22)
+        self.assertIsNone(window.localFosterRun)
+        window.localFosterStart(window)
+        self.assertEqual(len(ui.globals().requests), before)
+        self.assertIsNotNone(net.globals().gamedata[b"ext"][b"localFosterBusy"])
+
+    def test_actual_automatic_ordinary_large_total_never_requires_or_charges_gold(self):
+        self.give(20009, 3000)
+        self.session.save["role_state"]["gold"] = 0
+        pills = self.props(20009)
+        ui, window, _ = self.automatic_ui(method=1)
+        ui.globals().GameScene.roleinfo.gold = 0
+        net = self.network_lua()
+        window.numchange(window, 2201)
+        window.setpropNum(window, ui.table_from({"20009": pills}))
+        self.assertEqual(window.donum, 2201)
+        window.localFosterStart(window)
+        self.automatic_reply(ui, net, ui.globals().requests[len(ui.globals().requests)], 14000)
+        window.rootItems.doButton.callback()
+        before = len(ui.globals().requests)
+        ui.globals().advance(2)
+        self.assertEqual(len(ui.globals().requests), before)
+        self.assertEqual((self.props(20009), self.session.save["role_state"]["gold"]), (pills-200, 0))
+
     def test_both_actual_training_pages_bind_own_token_ignore_late_targets_and_restore_on_entry(self):
         try:
             from lupa.lua51 import LuaRuntime

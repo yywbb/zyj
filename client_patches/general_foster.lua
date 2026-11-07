@@ -83,21 +83,26 @@ function NetGeneralFosterConfirmCallBack(fd)
 end
 
 function UIGeneralAutoTrainCallBack(req)
-    if gamedata.ext.localFosterBusy then return busy() end
-    if not req.xlnum or req.xlnum < 1 or req.xlnum > 2000 or req.xlnum % 1 ~= 0 then
-        return 0,503,{type=503,msg="自动培养次数须为1至2000的整数"}
+    local function reject(msg,msgtype)
+        return 0,503,{type=503,msg=msg,msgtype=msgtype,localFosterBatch=req.localFosterBatch}
     end
-    if not gamedata.cache.props[20009] or gamedata.cache.props[20009].num < req.xlnum then
-        return 0,503,{type=503,msg="培养丹不足"}
+    if gamedata.ext.localFosterBusy then return reject("培养正在结算，请等待回复；超时请重进游戏") end
+    local total = req.localFosterTotal or req.xlnum
+    if not req.xlnum or req.xlnum < 1 or req.xlnum > 200 or req.xlnum % 1 ~= 0
+        or not total or total < req.xlnum or total >= 2147483648 or total % 1 ~= 0 then
+        return reject("自动培养总次数须为正整数，每批最多200次")
     end
-    if req.method == 2 and gamedata.cache.role.gold < req.xlnum*5 then
-        return 0,503,{type=503,msgtype="shortgold"}
+    if not gamedata.cache.props[20009] or gamedata.cache.props[20009].num < total then
+        return reject("培养丹不足")
+    end
+    if req.method == 2 and gamedata.cache.role.gold < total*5 then
+        return reject(nil,"shortgold")
     end
     local data = ids_pb.Ids()
     for _,value in ipairs({req.iid,req.method,req.xlnum,req.status1 or 0,req.status2 or 0,req.status3 or 0}) do
         table.insert(data.ids,value)
     end
-    gamedata.ext.localFosterBusy = {opcode=1126,id=req.iid,method=req.method,count=req.xlnum}
+    gamedata.ext.localFosterBusy = {opcode=1126,id=req.iid,method=req.method,count=req.xlnum,batch=req.localFosterBatch}
     return 1,1126,data:SerializeToString()
 end
 
@@ -109,14 +114,17 @@ function NetGeneralAutoTrainCallBack(fd)
     assert(value.iid == req.id and #rows == #counts*6, "Invalid automatic cultivation result")
     local status, total = {},0
     for i,count in ipairs(counts) do
+        assert(count >= 1 and count <= 10, "Invalid automatic cultivation count")
         local n = (i-1)*6
         status[tostring(i)] = {status=rows[n+1],attribute1=rows[n+2],num1=rows[n+3],
             attribute2=rows[n+4],num2=rows[n+5],potential=rows[n+6],count=count}
         total = total+count
     end
+    assert(total > 0 and total <= req.count, "Automatic cultivation exceeded request")
     gamedata:updateprops({cid=20009,num=-total})
     if req.method == 2 then gamedata:updateRoleGold(-total*5,"伙伴培养",1) end
     gamedata:Generals({value})
     gamedata.ext.localFosterBusy = nil
-    return {type=1126,general=gamedata:generalData(value),status=status,stop=total < req.count and 1 or 0,actual=total}
+    return {type=1126,general=gamedata:generalData(value),status=status,stop=total < req.count and 1 or 0,actual=total,
+        localFosterBatch=req.batch,remaining=gamedata.cache.props[20009].num}
 end
