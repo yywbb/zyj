@@ -9,6 +9,13 @@
 - 每批必须校验配置费用/奖励/限制、真实所有权、整组原子保存、重复请求、保存失败、非法请求和断点续接。未实现的操作继续明确报错，不返回空成功、不直接标记引导完成。
 - 不改正式存档、不擅自启用关闭的配置、不自动部署。涉及客户端补丁必须在 `build_local_apk.py` 中实现，不能只改 `scripts_clean/`。
 
+### 2026-11-08 主角彩金进阶24–26阶
+
+- 起因：实机“进阶”提示无效请求，服务端日志确认23阶后客户端自动发送`1057 Ids[scope]`（goldtype 1/2/3）被“普通主角进阶只接受方式0”拒绝。本批接通主角彩金进阶（`protagonist_grow`24–26阶），不是只改报错文案。
+- `development.py`：1057按`gold_stage=stage+1−23`分普通/彩金两路；彩金校验scope∈本阶`gold_will_skills`三选一、飞升等级`soaring_limit`（10/20/30）、游戏厅通关`game_limit`（`gamestar_state.stage−1`≥5/10/15，沿用illusion/achievements先例）、培养完成度与形态一致性；真实材料／银币同笔原子扣除，坏scope/缺门槛/形态篡改/落盘失败拒绝且不留痕。g_score字段35–37记录各阶选择，`jinjiangkezhiguanxi[packed].camp`写字段40（1天/2地/3人），金属性（`gold_will_attribute`）叠加在飞升仙属性同名字段24/25/26，仙战力字段34=防+攻+血//10；`lead_soaring`只替换仙属性部分、保留金属性（本批修复了进阶后再飞升吞金属性的真实bug）。1056预览刻意仍只到24阶（客户端金阶UI直读growconfig，避免任意scope预览显示风险）。
+- `partner_growth.skills()`／战斗`allowed`基准按actor区分（主角passive_breakthrough_limit=23），怪物无actor键不拒绝；战斗advance上限主角26、其余维持23。`battle.py`主角分支投影`partner_skills`与`gold_camp`，新增7族9000517–9000523（密集打击/冷静护甲/魔王震击/心有灵犀/天神威/地祇佑/人魂雄；神圣清算、坚不可摧沿既有9000001/9000015）及金将单人合体：cid2=0的343个单人合体仅quality≥7的lead（162001–3）发动，低阶主角形态与其余222名引用武将维持不发动。自研口径、时序与边界详见`battle_rules.md`本批章节，不当作官服还原。
+- 定向回归全部通过：36项test_protagonist_growth（uv run --no-project --with lupa；含3项新流程测试与7项金将战斗新测试，均有对照组与assert_replays）、51项test_partner_growth、28项test_illusion、18项test_hades_battle、11项test_mock_server -k development；不跑全量，早期失败不计通过。无客户端补丁改动，纯服务端行为变化，推送后经auto_sync.sh自动同步重启即生效；原生触控与长期平衡待实机。
+
 ### 2026-11-07 进修成功后刷新空值修复
 
 - 实际打包的`Layer_generalup.setPage_xiulian`曾在每次刷新时清空进修快照，随后`ReloadData→getXiulianProp`的材料刷新阶段0／1读取空表并报错，打断连续进修。新增实际Lua5.1回归先复现此错误；现仅在进入／切页／切换伙伴时失效旧数据和材料刷新标记，成功后的同目标刷新保留新快照，缺缓存才查询5511／5512。

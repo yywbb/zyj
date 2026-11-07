@@ -15,6 +15,8 @@ QUEENS = (10595, 10817)
 MAX_ROUNDS = 30
 # shortcut: 已接玉鼎、元始、通天，其他彩金技能须实现并回归后才允许付费转换。
 PARTNER_EFFECTS = {*range(9000742, 9000748), *range(9000547, 9000553), *range(9000678, 9000684)}
+# 主角彩金进阶24–26的天/地/人突破技能效果。
+LEAD_GOLD_EFFECTS = set(range(9000517, 9000524))
 HADES_EFFECTS = {9000022, 9000034, 9000306, 9000307, 9000309, 9000314, 9000315, 9000316, 9000318,
                  9000322, 9000323, 9000403, 9000414, 9000415, 9000416, *range(9000418, 9000429),
                  *range(9000431, 9000436), *range(9000437, 9000445),
@@ -122,12 +124,14 @@ def rosters(save, point, config, *, illusion_mode="pve", now=None):
             else:
                 from . import development
                 soaring = development.lead_fairy(raw, config)[0]
-                # 主角飞升仙属性按同比例折算进战斗面板，与伙伴一致。
+                # 主角飞升仙属性按同比例折算进战斗面板，与伙伴一致；彩金属性同字段叠加。
                 if soaring:
                     factor = Fraction(config["global_kv"]["fairy_turn_every"]["value"])
                     for name, field in (("hp", 24), ("def", 25), ("atk", 26)):
                         unit[name] += int((pb_get_varint(raw, field) or 0)*factor)
                     unit["fei_sheng_level"] = soaring
+                if unit["advance"] > development.gold_limit(config):
+                    unit.update(partner_skills=partner_growth.skills(raw, config), gold_camp=pb_get_varint(raw, 40) or 0)
         if index > config["role_exp"][str(save["role_state"]["level"])]["slotnum"]:
             raise ValueError("阵位尚未解锁")
         if POSITIONS[index - 1] in attack or any(u["iid"] == iid for u in attack.values()):
@@ -309,7 +313,7 @@ def _prepare_teams(teams, config):
                9000026, 9000027, 9000028, 9000029, 9000030, 9000031, 9000032, 9000036,
                9000037, 9000038, 9000039, 9000040, 9000062, 9000400, 9000401, 9000412, 9000413, 9000429, 9000430, 9000483, 9000489,
                9000496, 9000501, 9000502, 9000506, 9000528, 9000583, 9000674, 9000789, 9000791, 9000803,
-               9000324, 9000327, 9000328, 9000329} | HADES_EFFECTS | PARTNER_EFFECTS
+               9000324, 9000327, 9000328, 9000329} | HADES_EFFECTS | PARTNER_EFFECTS | LEAD_GOLD_EFFECTS
     flat_defense = {9000047, 9000049, 9000072, 9000078, 9000082}
     stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
     lead_basis = {}
@@ -319,9 +323,11 @@ def _prepare_teams(teams, config):
         for pos, unit in sorted(team.items()):
             if pos not in POSITIONS or any(unit[k] <= 0 for k in ("hp", "atk", "speed")) or unit["def"] < 0:
                 raise ValueError("战斗属性或阵位无效")
-            if not 0 <= unit["advance"] <= 23 or not 0 <= unit.get("skilllevel", 0) <= 300:
-                raise ValueError("战斗突破或技能等级无效")
             general = config["general"][str(unit["cid"])]
+            advance_limit = (int(config["global_kv"]["passive_breakthrough_limit"]["value"]) + 3
+                             if general.get("actor") == "lead" else 23)
+            if not 0 <= unit["advance"] <= advance_limit or not 0 <= unit.get("skilllevel", 0) <= 300:
+                raise ValueError("战斗突破或技能等级无效")
             skill = config["skill"].get(str(unit["skill"]))
             if "boss_cycle" in unit:
                 if (not unit.get("npc") or str(unit["cid"]) not in config.get("personalboss_att", {})
@@ -340,8 +346,9 @@ def _prepare_teams(teams, config):
                 raise ValueError("尚不支持该武将的技能效果")
             ids = {general.get(f"break{i}", 0) for i in range(1, unit["advance"] + 1)} - {0}
             partner_ids = unit.get("partner_skills", ())
+            basis = int(config["global_kv"]["passive_breakthrough_limit" if general.get("actor") == "lead" else "partner_breakthrough_limit"]["value"])
             allowed = {general.get(f"gold{i}_will_skills_{choice}", 0)
-                       for i in range(1, max(0, unit["advance"]-13)+1) for choice in (1, 2, 3)}-{0}
+                       for i in range(1, max(0, unit["advance"]-basis)+1) for choice in (1, 2, 3)}-{0}
             if not isinstance(partner_ids, (list, tuple)) or len(partner_ids) > 3 or any(pid not in allowed for pid in partner_ids):
                 raise ValueError("彩金突破技能与当前伙伴不一致")
             ids.update(partner_ids)
@@ -771,6 +778,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             extra += effect(unit, 9000486) * len(alive)
             extra += effect(unit, 9000771) * len(alive) + effect(unit, 9000771, "value2") * sum(region(u) == "14" for u in living(allies))
             extra += max((effect(u, 9000498) for u in living(allies) if region(unit) == "9"), default=0)
+            # 天神威：每名存活天属性（scope1）友方含自身加 value 攻击，上限 value2。
+            extra += min(effect(unit, 9000521, "value2"),
+                         effect(unit, 9000521) * sum(u.get("gold_camp") == 1 for u in living(allies)))
             value += unit["atk"] * extra
         if name in ("critical", "criticaldmg"):
             value += max((effect(u, 9000584) if name == "critical" else effect(u, 9000584, "value2") * 100 for u in living(allies)), default=0)
@@ -948,6 +958,13 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 event([passive_buff(target, target, 9000439, "def", target["def"] * value, MAX_ROUNDS + 1)])
             if kind == "basic" and not reaction and 9000426 in target["effects"]:
                 event([change_ap(attacker, -rng.choices((2, 4), weights=(60, 40))[0])])
+            # 冷静护甲：受普通攻击时按 value 概率减怒气最高的敌人 value2 点怒气，每回合最多2次。
+            if (kind == "basic" and not reaction and 9000518 in target["effects"]
+                    and roll(effect(target, 9000518)) and trigger(target, 9000518, 2)):
+                rivals = [u for u in living(teams[not target["direct"]]) if not u["hidden"]]
+                if rivals:
+                    top = max(rivals, key=lambda u: (u["ap"], -u["pos"]))
+                    passive_event(target, 9000518, [change_ap(top, -int(effect(target, 9000518, "value2")), provider=target)])
             if 9000606 in target["effects"]:
                 ally = min(living(teams[target["direct"]]), key=lambda u: (u["ap"], u["pos"]))
                 passive_event(target, 9000606, [change_ap(ally, int(effect(target, 9000606, "value2")), provider=target)])
@@ -1048,6 +1065,15 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     if code != 9000432:
                         changes.append(change_ap(target, (4 - target["ap"]) if code == 9000414 else 2, provider=unit))
                 passive_event(unit, code, changes)
+            # 地祇佑：死亡时为随机3个己方地属性（scope2）角色恢复 value 生命和 value2 点怒气。
+            if 9000522 in unit["effects"]:
+                allies = [u for u in living(friends) if u.get("gold_camp") == 2]
+                allies = sorted(rng.sample(allies, min(3, len(allies))), key=lambda u: u["pos"])
+                changes = []
+                for target in allies:
+                    changes.append(change_hp(target, -int(target["maxhp"] * effect(unit, 9000522)), healing=True, healer=unit))
+                    changes.append(change_ap(target, int(effect(unit, 9000522, "value2")), provider=unit))
+                passive_event(unit, 9000522, changes)
             for team in teams.values():
                 for provider in living(team):
                     if provider is not unit and 9000482 in provider["effects"] and trigger(provider, 9000482, 2):
@@ -1214,8 +1240,18 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
     def choose_combo(actor, friends, enemies):
         general = config["general"][str(actor["cid"])]
         skill = config["combskill"].get(str(general["combskillid"]))
-        if not skill or not skill["cid2"]:
+        if not skill:
             return None
+        if not skill["cid2"]:
+            # 本地规则：只有彩金主角（quality7的lead）使用无伙伴位的单人合体技，
+            # 其他武将的同类配置维持不发动，避免改变既有战斗。
+            if general.get("actor") != "lead" or general["quality"] < 7:
+                return None
+            if actor["ap"] < skill["ap"]:
+                return None
+            chance = config["combskillprobability"][str(skill["id"])][f"bout{min(10, round_number)}"]
+            chance += effect(actor, 9000520)  # 心有灵犀：合体技能几率提升 value。
+            return (skill, [actor["pos"]]) if roll(chance) else None
         if skill["id"] not in MULTI_COMBOS:
             raise ValueError(f"尚不支持该合体技能 {skill['id']}")
         free_combo = actor.get("free_combo", False)
@@ -1247,6 +1283,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             chance = 1 if actor.pop("certain_combo", False) else max(chance, effect(actor, 9000422))
         if round_number <= actor.get("chan_combo_until", 0):
             chance = 1
+        chance += effect(actor, 9000520)  # 心有灵犀：合体技能几率提升 value。
         return (skill, participants) if candidates and roll(chance) else None
 
     def passive_after(actor, skill, combined, hits, slain, reaction, base_skill):
@@ -1607,6 +1644,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             targeting = skill
             if skill and not combined and 9000679 in actor["effects"]:
                 targeting = {**skill, "randnum": skill["randnum"] + rng.randint(0, int(effect(actor, 9000679, "value2")))}
+            # 密集打击：个人技能目标减少2个（主角金技能180001–3为random范围）。
+            if skill and not combined and targeting.get("range") == "random" and 9000517 in actor["effects"]:
+                targeting = {**targeting, "randnum": max(1, targeting["randnum"] - 2)}
             selected = [forced_target] if forced_target else targets(actor, enemies, targeting, rng)
             if skill and not combined and 9000743 in actor["effects"] and len(living(enemies)) > effect(actor, 9000743):
                 selected = [u for u in living(enemies) if not u["hidden"]]
@@ -1696,6 +1736,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 coefficient, growth = map(Fraction, skill["atk-param"].split(";")[:2])
                 if not combined:
                     multiplier *= (coefficient + growth * max(0, actor.get("skilllevel", 0) - 1)) / coefficient
+                    # 密集打击：释放个人技能时伤害增加 value。
+                    multiplier *= 1 + effect(actor, 9000517)
                 if combo_id == 12629:
                     multiplier *= 1 + Fraction(target["hp"] * 5 // target["maxhp"], 5)
                 elif combo_id == 13076:
@@ -1743,7 +1785,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     destinations.extend(set_state(target, "close", rng.randint(1, 2)))
                 dizzy = (combo_id == 12622 and target["hp"] * 5 < target["maxhp"]
                          or combo_id == 12618 and target["pos"] > 7 and roll(.35)
-                         or skill and skill.get("effect") == "dizzy" and roll(Fraction(str(skill["effect-trigger"])) + (effect(actor, 9000679) if not combined else 0))
+                         or skill and skill.get("effect") == "dizzy"
+                         and roll(Fraction(str(skill["effect-trigger"])) * (2 if combined and 9000519 in actor["effects"] else 1)
+                                  + (effect(actor, 9000679) if not combined else 0))
+                         # 魔王震击：合体技本身无眩晕时，按配置基础概率翻倍附加眩晕。
+                         or combined and skill.get("effect") != "dizzy" and 9000519 in actor["effects"] and roll(effect(actor, 9000519) * 2)
                          or not skill and 9100002 in actor["effects"] and roll(.3))
                 dizzy = dizzy or target["firing"] and roll(effect(actor, 9000483))
                 dizzy = dizzy or not skill and (roll(effect(actor, 9000687)) or target["firing"] and roll(effect(actor, 9000805)))
@@ -1815,6 +1861,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             allies = sorted((u for u in living(friends) if u is not actor), key=lambda u: (u["ap"], u["pos"]))
             if allies:
                 event([change_ap(allies[0], int(effect(actor, 9000062)), provider=actor)])
+        # 人魂雄：人属性（scope3）友方释放怒气技能时恢复自身 value 点怒气。
+        if skill and not followup and actor.get("gold_camp") == 3:
+            for provider in living(friends):
+                if provider is not actor and 9000523 in provider["effects"]:
+                    passive_event(provider, 9000523, [change_ap(provider, int(effect(provider, 9000523)), provider=actor)])
         if skill and skill.get("effect") == "suck" and dealt and actor["hp"] > 0:
             amount = min(actor["maxhp"] - actor["hp"], int(dealt * Fraction(skill["effect-param"])))
             if amount:

@@ -99,10 +99,17 @@ def fairy(raw, config):
     return result
 
 
-def skills(raw, config):
+def gold_stages(raw, config):
+    """彩金阶数：伙伴从 partner_breakthrough_limit(13)、主角从 passive_breakthrough_limit(23) 起算。"""
     row = config["general"][str(pb_get_varint(raw, 1))]
+    basis = int(config["global_kv"]["passive_breakthrough_limit" if row["actor"] == "lead" else "partner_breakthrough_limit"]["value"])
+    return row, max(0, (pb_get_varint(raw, 4) or 0) - basis)
+
+
+def skills(raw, config):
+    row, stages = gold_stages(raw, config)
     return [row[f'gold{i}_will_skills_{pb_get_varint(raw, 34+i)}']
-            for i in range(1, max(0, (pb_get_varint(raw, 4) or 0)-13)+1)]
+            for i in range(1, stages+1)]
 
 
 def check_combat(raw, config):

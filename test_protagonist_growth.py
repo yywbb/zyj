@@ -9,6 +9,7 @@ import zipfile
 from unittest.mock import patch
 
 import build_local_apk as builder
+import test_hades_battle
 import test_soul
 from zyj_server import battle, cup, development, formation, gamestar, guild_war, player, protocol, recharge, single_boss, training
 
@@ -445,8 +446,128 @@ class ProtagonistGrowthTests(unittest.TestCase):
         for stage in range(1, level + 1):
             self.pay_materials(self.config["passive_soaring"][str(stage)]["consume"])
             self.success(1, 7001, values=[iid, stage-1])
-        self.refresh()
+            self.refresh()
         return iid
+
+    def gold_hero(self, scopes=(1,)):
+        """把默认23阶主角按真实顺序推进彩金：每阶先飞升10级再进阶，返回主角IID。"""
+        self.save["gamestar_state"] = {"stage": 16, "step": 0, "checked_at": 0}
+        iid = protocol.pb_get_varint(self.gen(), 2)
+        soared = 0
+        for stage, scope in enumerate(scopes, 1):
+            for level in range(soared + 1, 10 * stage + 1):
+                self.pay_materials(self.config["passive_soaring"][str(level)]["consume"])
+                self.success(1, 7001, values=[iid, level - 1])
+                self.refresh()
+            soared = 10 * stage
+            self.pay_materials(self.config["protagonist_grow"][str(23 + stage)]["consume"])
+            self.success(1, 1057, values=[scope])
+            self.refresh()
+        return iid
+
+    def gold_fields(self, stages):
+        """按金将配置与飞升等级计算24/25/26字段与阵营的期望值。"""
+        soar = self.config["passive_soaring"][str(10 * len(stages))]
+        fairy = {24: soar["xianhp"], 25: soar["xiandef"], 26: soar["xianadk"]}
+        general = self.config["general"][str(protocol.pb_get_varint(self.gen(), 1))]
+        for stage in range(1, len(stages) + 1):
+            for entry in general[f"gold{stage}_will_attribute"].split(";"):
+                if entry:
+                    name, amount = entry.split(",")
+                    fairy[development.GOLD_ATTR[name]] += int(amount)
+        packed = sum((stages[i] if i < len(stages) else 0) * 10 ** (2 - i) for i in range(3))
+        camp = self.config["jinjiangkezhiguanxi"][str(packed)]["camp"] if stages else 0
+        return fairy, camp
+
+    def test_gold_advance_chain_uses_real_gates_costs_fields_and_battle_projection(self):
+        self.save["gamestar_state"] = {"stage": 16, "step": 0, "checked_at": 0}
+        iid = protocol.pb_get_varint(self.gen(), 2)
+        choice = self.save["selected_general_id"]
+        scopes = (1, 2, 3)
+        for stage, scope in enumerate(scopes, 1):
+            with self.subTest(stage=stage, scope=scope):
+                target = 23 + stage
+                for level in range(10 * (stage - 1) + 1, 10 * stage + 1):
+                    self.pay_materials(self.config["passive_soaring"][str(level)]["consume"])
+                    self.success(1, 7001, values=[iid, level - 1])
+                    self.refresh()
+                row = self.config["protagonist_grow"][str(target)]
+                self.pay_materials(row["consume"])
+                # 飞升同样消耗银币，需在本阶进阶前即时取值。
+                coin = self.save["role_state"]["coin"]
+                costs = development.partner_growth.pairs(row["consume"])
+                props_before = {cid: self.props(cid) for cid, count in costs if cid not in (1000, 1001)}
+                self.success(1, 1057, values=[scope]); self.refresh()
+                raw = self.gen()
+                self.assertEqual((protocol.pb_get_varint(raw, 1), protocol.pb_get_varint(raw, 4)),
+                                 (row[f"general{choice}"], target))
+                for i, selected in enumerate(scopes[:stage], 1):
+                    self.assertEqual(protocol.pb_get_varint(raw, 34 + i), selected)
+                fairy, camp = self.gold_fields(scopes[:stage])
+                self.assertEqual(protocol.pb_get_varint(raw, 40), camp)
+                for field, value in fairy.items():
+                    self.assertEqual(protocol.pb_get_varint(raw, field), value)
+                self.assertEqual(protocol.pb_get_varint(raw, 34), fairy[25] + fairy[26] + fairy[24] // 10)
+                snapshot = bytes.fromhex(self.save["protagonist_snapshot"])
+                self.assertEqual([protocol.pb_get_varint(snapshot, n) for n in (3, 4, 5, 6)], [target, 0, 0, 0])
+                self.assertEqual(next(v for n, w, v in protocol.iter_pb_fields(snapshot) if (n, w) == (10, 2)), raw)
+                for cid, count in costs:
+                    if cid == 1000:
+                        coin -= count
+                    elif cid != 1001:
+                        self.assertEqual(self.props(cid), props_before[cid] - count)
+                self.assertEqual(self.save["role_state"]["coin"], coin)
+        attack, _ = battle.rosters(self.save, self.config["copy"]["42101"]["1"], self.config)
+        unit = next(u for u in attack.values() if u["iid"] == iid)
+        raw = self.gen()
+        factor = Fraction(self.config["global_kv"]["fairy_turn_every"]["value"])
+        self.assertEqual(unit["partner_skills"], [9001001, 9001005, 9001009])
+        self.assertEqual(unit["gold_camp"], camp)
+        self.assertEqual(unit["atk"], protocol.pb_get_varint(raw, 6) + int(protocol.pb_get_varint(raw, 26) * factor))
+        self.assertEqual(unit["hp"], protocol.pb_get_varint(raw, 8) + int(protocol.pb_get_varint(raw, 24) * factor))
+        self.reconnect(); self.refresh()
+        self.assertEqual(protocol.pb_get_varint(self.gen(), 4), 26)
+        # 彩金满阶后只能停在26阶。
+        self.assert_rejected(1057, values=[1])
+
+    def test_gold_soaring_after_advance_preserves_gold_attributes(self):
+        iid = self.gold_hero((1,))
+        fairy, _ = self.gold_fields((1,))
+        step = self.config["passive_soaring"]["11"]
+        self.pay_materials(step["consume"])
+        self.success(1, 7001, values=[iid, 10]); self.refresh()
+        raw = self.gen()
+        for field, name in ((24, "xianhp"), (25, "xiandef"), (26, "xianadk")):
+            gold = fairy[field] - self.config["passive_soaring"]["10"][name]
+            self.assertEqual(protocol.pb_get_varint(raw, field), step[name] + gold)
+        total = {f: protocol.pb_get_varint(raw, f) for f in (24, 25, 26)}
+        self.assertEqual(protocol.pb_get_varint(raw, 34), total[25] + total[26] + total[24] // 10)
+        self.assertEqual((protocol.pb_get_varint(raw, 35), protocol.pb_get_varint(raw, 40)), (1, 1))
+
+    def test_gold_advance_rejects_bad_scope_missing_gates_and_is_atomic(self):
+        iid = protocol.pb_get_varint(self.gen(), 2)
+        # 默认主角飞升0级，24阶要求10级飞升。
+        for values in ([0], [1], [2], [3], [4], [1, 2], []):
+            self.assert_rejected(1057, values=values)
+        self.save["gamestar_state"] = {"stage": 5, "step": 0, "checked_at": 0}
+        self.soar_lead(10)
+        # 游戏厅通关4关，不足24阶要求的5关。
+        self.assert_rejected(1057, values=[1])
+        self.save["gamestar_state"] = {"stage": 16, "step": 0, "checked_at": 0}
+        row = self.config["protagonist_grow"]["24"]
+        self.assert_rejected(1057, values=[2])
+        with patch.dict(self.config["protagonist_grow"], {"24": {**row, "gold_will_skills": "4,9001001;"}}):
+            self.assert_rejected(1057, values=[1])
+        # 材料不足与落盘失败都不产生任何状态变化。
+        self.pay_materials(row["consume"])
+        before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 1057, values=[1])
+        self.assertEqual((self.save, self.store.path(1).read_bytes()), (before, disk))
+        # 形态被篡改时拒绝进阶。
+        raw = self.gen()
+        player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, protocol.pb_set_varint(raw, 1, 10998)))
+        self.assert_rejected(1057, values=[1])
 
     def test_lead_soaring_charges_real_costs_and_projects_fairy_into_battle(self):
         self.set_hero(growth=21, level=300)
@@ -749,3 +870,138 @@ class ProtagonistGrowthTests(unittest.TestCase):
             assert(game.m_iRunCellIndex==31 and not game.rootItems.m_oDownNode.visible)
             for _,req in ipairs(requests) do assert(req.type~=3721 and req.type~=3722 and req.type~=1001) end
         ''')
+
+
+class LeadGoldBattleTests(unittest.TestCase):
+    """主角金将（162001-3）的七个彩金被动与单人合体：真实配置、确定性结算。"""
+
+    unit = test_hades_battle.HadesBattleTests.unit
+    hits = test_hades_battle.HadesBattleTests.hits
+    assert_replays = test_hades_battle.HadesBattleTests.assert_replays
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = player.load_role_config("configs_sec5.zip")
+
+    def isolated(self, breakskill_values=None):
+        row = {**self.config["general"]["162001"], **{f"break{i}": 0 for i in range(1, 27)}}
+        config = {**self.config, "general": {**self.config["general"], "162001": row}}
+        # 默认关闭金将单人合体的随机发动，合体用例自行设定概率。
+        probability = copy.deepcopy(config["combskillprobability"])
+        for sid in ("13019", "13020", "13021"):
+            probability[sid] = {**probability[sid], **{f"bout{i}": 0 for i in range(1, 11)}}
+        config["combskillprobability"] = probability
+        if breakskill_values:
+            config["breakskill"] = dict(config["breakskill"])
+        for pid, values in (breakskill_values or {}).items():
+            config["breakskill"][str(pid)] = {**config["breakskill"][str(pid)], **values}
+        return config
+
+    def gold(self, pid, **values):
+        return self.unit(162001, iid=700, advance=26, partner_skills=[pid], **values)
+
+    def combo_chance(self, config, sid, bout1):
+        config["combskillprobability"][str(sid)] = {**config["combskillprobability"][str(sid)], "bout1": bout1}
+        return config
+
+    def test_focused_strike_reduces_personal_skill_targets_and_doubles_damage(self):
+        config = self.isolated()
+        enemies = {p: self.unit(iid=i + 1, hp=1000000, speed=1, atk=1) for i, p in enumerate(battle.POSITIONS[:6])}
+        caster = dict(iid=700, advance=26, initial_ap=4, speed=300, atk=1000)
+        control = battle.simulate({2: self.unit(162001, **caster)}, enemies, config, 7, max_rounds=1)
+        self.assertEqual(self.hits(control), [800] * 6)
+        report = battle.simulate({2: self.unit(162001, partner_skills=[9001001], **caster)}, enemies, config, 7, max_rounds=1)
+        self.assertEqual(self.hits(report), [1600] * 4)
+        self.assert_replays(report)
+
+    def test_cold_armor_drains_highest_ap_enemy_twice_per_round_on_basic_hits(self):
+        config = self.isolated({9001002: {"value": 1.0}})
+        attackers = {p: self.unit(iid=i + 1, speed=speed, atk=1, initial_ap=0)
+                     for i, (p, speed) in enumerate(zip(battle.POSITIONS[:3], (500, 400, 300)))}
+        defense = {2: self.gold(9001002, hp=1000000, speed=1, atk=1)}
+        report = battle.simulate(attackers, defense, config, 7, max_rounds=1)
+        # 前两名攻击者各被扣2点怒气，第三次受击超出每回合2次上限。
+        self.assertEqual([report["endmeta"]["attack"][str(p)]["ap"] for p in battle.POSITIONS[:3]], [0, 0, 2])
+        self.assert_replays(report)
+        control = battle.simulate(attackers, {2: self.unit(10201, iid=700, hp=1000000, speed=1, atk=1)}, config, 7, max_rounds=1)
+        self.assertEqual([control["endmeta"]["attack"][str(p)]["ap"] for p in battle.POSITIONS[:3]], [2, 2, 2])
+
+    def test_demon_king_combo_without_builtin_dizzy_adds_doubled_roll(self):
+        config = self.combo_chance(self.isolated({9001003: {"value": 0.5}}), 13019, 1)
+        enemies = {p: self.unit(iid=i + 1, hp=1000000, speed=1, atk=1) for i, p in enumerate(battle.POSITIONS[:2])}
+        attack = {2: self.gold(9001003, speed=300, atk=1000, initial_ap=4)}
+        report = battle.simulate(attack, enemies, config, 7, max_rounds=1)
+        combo = next(a for a in report["b"]["a"] if a["s"].get("S") == 13019)
+        # value改为0.5后翻倍为必中：合体技本身无眩晕配置，按本地规则附加眩晕。
+        self.assertTrue(combo["e"])
+        self.assertTrue(all(d.get("u", {}).get("u") == "dizzy" for d in combo["e"] if isinstance(d.get("m"), dict)))
+        control = battle.simulate({2: self.unit(162001, iid=700, advance=26, speed=300, atk=1000, initial_ap=4)},
+                                  enemies, config, 7, max_rounds=1)
+        combo = next(a for a in control["b"]["a"] if a["s"].get("S") == 13019)
+        self.assertFalse(any(d.get("u", {}).get("u") == "dizzy" for d in combo["e"]))
+        self.assert_replays(report)
+
+    def test_heart_link_adds_combo_chance_and_solo_combo_is_gold_lead_only(self):
+        config = self.isolated({9001006: {"value": 1.0}})
+        enemies = {2: self.unit(iid=1, hp=1000000, speed=1, atk=1)}
+        # 基础概率为0时，心有灵犀（value改为1.0）仍让金将主角发动单人合体。
+        report = battle.simulate({2: self.gold(9001006, speed=300, atk=1000, initial_ap=4)}, enemies, config, 7, max_rounds=1)
+        self.assertTrue(any(a["s"].get("S") == 13019 for a in report["b"]["a"]))
+        self.assert_replays(report)
+        # 没有该被动时概率为0，只释放个人技能。
+        control = battle.simulate({2: self.unit(162001, iid=700, advance=26, speed=300, atk=1000, initial_ap=4)},
+                                  enemies, config, 7, max_rounds=1)
+        self.assertFalse(any(a["s"].get("S") == 13019 for a in control["b"]["a"]))
+        self.assertTrue(any(a["s"].get("S") == 180001 for a in control["b"]["a"]))
+        # 本地规则：低阶主角形态（actor=lead但quality<7）引用单人合体也不发动。
+        config = self.combo_chance(config, 12611, 1)
+        legacy = battle.simulate({2: self.unit(10105, iid=700, speed=300, atk=1000, initial_ap=4)}, enemies, config, 7, max_rounds=1)
+        self.assertFalse(any(a["s"].get("S") == 12611 for a in legacy["b"]["a"]))
+        self.assertTrue(any(a["s"].get("S") == 12105 for a in legacy["b"]["a"]))
+
+    def test_god_might_scales_with_living_heaven_allies_and_caps_at_value2(self):
+        config = self.isolated()
+        for heaven_allies, expected in ((0, 1150), (3, 1600), (5, 1600)):
+            with self.subTest(heaven_allies=heaven_allies):
+                team = {2: self.gold(9001007, gold_camp=1, speed=300, atk=1000)}
+                for i in range(5):
+                    team[battle.POSITIONS[i + 1]] = self.unit(iid=701 + i, gold_camp=1 if i < heaven_allies else 2,
+                                                              speed=1, atk=1)
+                report = battle.simulate(team, {2: self.unit(iid=1, hp=10000000, speed=1, atk=1)}, config, 7, max_rounds=1)
+                self.assertEqual(self.hits(report), [expected])
+                self.assert_replays(report)
+
+    def test_earth_blessing_heals_three_earth_allies_and_grants_ap_on_death(self):
+        config = self.isolated()
+        killer = self.unit(162001, iid=1, advance=0, initial_ap=4, speed=600, atk=50000)
+        team = {2: self.gold(9001008, hp=100, speed=1, atk=1)}
+        for i, p in enumerate((8, 10, 12)):
+            team[p] = self.unit(iid=701 + i, gold_camp=2, hp=100000, speed=1, atk=1, initial_ap=0)
+        team[4] = self.unit(iid=704, gold_camp=1, hp=100000, speed=1, atk=1, initial_ap=0)
+        team[6] = self.unit(iid=705, gold_camp=3, hp=100000, speed=1, atk=1, initial_ap=0)
+        report = battle.simulate(team, {2: killer}, config, 7, max_rounds=1)
+        end = report["endmeta"]["attack"]
+        self.assertEqual(end["2"]["h"], 0)
+        # 地属性友方各恢复30%生命与2点怒气，其他阵营不享受。
+        for p in ("8", "10", "12"):
+            self.assertEqual((end[p]["h"], end[p]["ap"]), (90000, 4))
+        for p in ("4", "6"):
+            self.assertEqual((end[p]["h"], end[p]["ap"]), (60000, 2))
+        self.assert_replays(report)
+
+    def test_human_soul_restores_ap_when_human_allies_cast_skills(self):
+        config = self.isolated()
+        enemy = {2: self.unit(iid=1, hp=10000000, speed=1, atk=1)}
+        team = {2: self.gold(9001009, speed=1, atk=1, initial_ap=0),
+                8: self.unit(iid=701, gold_camp=3, initial_ap=4, speed=300, atk=100),
+                10: self.unit(iid=702, gold_camp=2, initial_ap=4, speed=200, atk=100)}
+        report = battle.simulate(team, enemy, config, 7, max_rounds=1)
+        # 人属性友方放技能回1怒，地属性友方不回；主角随后普攻+2怒。
+        self.assertEqual(report["endmeta"]["attack"]["2"]["ap"], 3)
+        self.assert_replays(report)
+        team[10] = self.unit(iid=702, gold_camp=3, initial_ap=4, speed=200, atk=100)
+        report = battle.simulate(team, enemy, config, 7, max_rounds=1)
+        self.assertEqual(report["endmeta"]["attack"]["2"]["ap"], 4)
+        control = battle.simulate({2: self.unit(10201, iid=700, speed=1, atk=1, initial_ap=0),
+                                   8: team[8], 10: team[10]}, enemy, config, 7, max_rounds=1)
+        self.assertEqual(control["endmeta"]["attack"]["2"]["ap"], 2)

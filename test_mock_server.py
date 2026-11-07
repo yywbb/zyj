@@ -2808,7 +2808,8 @@ class ReplayRoutingTests(unittest.TestCase):
                     self.assertEqual([protocol.pb_get_varint(snapshot, n) for n in (3, 4, 5, 6)], [target, 0, 0, 0])
                     self.assertIn((50, 2, b"keep"), list(protocol.iter_pb_fields(snapshot)))
                     raw = changed
-            with self.assertRaisesRegex(ValueError, "高级进阶"):
+            # 23阶之后进入彩金进阶：方式0不再接受，必须选择天/地/人分支。
+            with self.assertRaisesRegex(ValueError, "天/地/人分支"):
                 development.prepare(1057, saved, b"\x08\x00", self.role_config)
 
     def seed_break_account(self):

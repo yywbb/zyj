@@ -5,8 +5,13 @@ from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_fie
 
 QUERIES = (1023, 1056)
 MUTATIONS = (1017, 1055, 1057, 1058)
-# shortcut: 主角只接通了飞升族字段；彩金进阶24–26与技能选择须实现后另批接入。
 LEAD_SOARING_FIELDS = (23, 24, 25, 26, 34)
+GOLD_ATTR = {"g_hp": 24, "g_def": 25, "g_atk": 26}
+
+
+def gold_limit(config):
+    """主角彩金进阶起始等阶（passive_breakthrough_limit，配置为23）。"""
+    return int(config["global_kv"]["passive_breakthrough_limit"]["value"])
 
 
 def ids(body):
@@ -17,21 +22,63 @@ def ids(body):
 
 
 def lead_fairy(raw, config):
-    """校验主角飞升字段：仙属性只来自 passive_soaring，高级字段仅限飞升族。"""
+    """校验主角飞升/彩金字段：仙与金属性只来自 passive_soaring 与 general 金将配置。"""
     level = pb_get_varint(raw, 23) or 0
-    if (any(pb_get_varint(raw, n) for n in range(21, 41) if n not in LEAD_SOARING_FIELDS)
+    advance = pb_get_varint(raw, 4) or 0
+    gold = max(0, advance - gold_limit(config))
+    if gold > 3:
+        raise ValueError("主角彩金进阶阶数无效")
+    allowed = {*LEAD_SOARING_FIELDS, *range(35, 35 + gold), *({40} if gold else ())}
+    if (any(pb_get_varint(raw, n) for n in range(21, 41) if n not in allowed)
             or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))
-            or any(not 0 <= (pb_get_varint(raw, n) or 0) < (1 << 31) for n in LEAD_SOARING_FIELDS)):
+            or any(not 0 <= (pb_get_varint(raw, n) or 0) < (1 << 31) for n in allowed)):
         raise ValueError("暂不支持此主角的高级属性")
     row = config["passive_soaring"].get(str(level))
     if row is None:
         raise ValueError("主角飞升等级无效")
     fairy = {f: row[name] for name, f in (("xianhp", 24), ("xiandef", 25), ("xianadk", 26))}
+    general = config["general"][str(pb_get_varint(raw, 1))]
+    for stage in range(1, gold + 1):
+        choice = pb_get_varint(raw, 34 + stage) or 0
+        if choice not in (1, 2, 3) or not general.get(f"gold{stage}_will_skills_{choice}"):
+            raise ValueError("主角彩金技能记录无效")
+        for entry in general[f"gold{stage}_will_attribute"].split(";"):
+            if entry:
+                name, amount = entry.split(",")
+                fairy[GOLD_ATTR[name]] += int(amount)
     if any((pb_get_varint(raw, f) or 0) != value for f, value in fairy.items()):
         raise ValueError("主角仙属性与飞升等级不一致，请重新登录")
+    packed = sum((pb_get_varint(raw, 35 + i) or 0) * 10 ** (2 - i) for i in range(3))
+    camp = config["jinjiangkezhiguanxi"].get(str(packed), {}).get("camp", 0) if gold else 0
+    if (pb_get_varint(raw, 40) or 0) != camp:
+        raise ValueError("主角彩金阵营与技能记录不一致，请重新登录")
     if (pb_get_varint(raw, 34) or 0) != fairy[25] + fairy[26] + fairy[24] // 10:
         raise ValueError("主角仙战力与飞升等级不一致，请重新登录")
     return level, fairy
+
+
+def gold_choices(row):
+    """解析 protagonist_grow 的 gold_will_skills：{分支: 突破技能ID}。"""
+    options = {}
+    for entry in row["gold_will_skills"].split(";"):
+        if entry:
+            key, skill = entry.split(",")
+            options[int(key)] = int(skill)
+    return options
+
+
+def apply_gold(raw, row, gold_stage, choice, config):
+    """写入一阶彩金：g_score、阵营、金属性与仙战力；不改变主属性面板。"""
+    raw = pb_set_varint(raw, 34 + gold_stage, choice)
+    packed = sum((pb_get_varint(raw, 35 + i) or 0) * 10 ** (2 - i) for i in range(3))
+    raw = pb_set_varint(raw, 40, config["jinjiangkezhiguanxi"][str(packed)]["camp"])
+    for entry in row["gold_will_attribute"].split(";"):
+        if entry:
+            name, amount = entry.split(",")
+            field = GOLD_ATTR[name]
+            raw = pb_set_varint(raw, field, (pb_get_varint(raw, field) or 0) + int(amount))
+    total = {f: pb_get_varint(raw, f) or 0 for f in (24, 25, 26)}
+    return pb_set_varint(raw, 34, total[25] + total[26] + total[24] // 10)
 
 
 def lead_soaring(save, raw, values, config):
@@ -47,9 +94,13 @@ def lead_soaring(save, raw, values, config):
         raise ValueError("主角进阶等级不足以飞升")
     costs = partner_growth.pairs(step["consume"])
     changed = pb_set_varint(raw, 23, level + 1)
-    for field, value in ((24, step["xianhp"]), (25, step["xiandef"]), (26, step["xianadk"])):
-        changed = pb_set_varint(changed, field, value)
-    changed = pb_set_varint(changed, 34, step["xiandef"] + step["xianadk"] + step["xianhp"] // 10)
+    # 金属性叠在仙属性之上共存于24–26字段，飞升只替换仙属性部分。
+    current = config["passive_soaring"][str(level)]
+    for field, name in ((24, "xianhp"), (25, "xiandef"), (26, "xianadk")):
+        gold = (pb_get_varint(raw, field) or 0) - current[name]
+        changed = pb_set_varint(changed, field, step[name] + gold)
+    total = {f: pb_get_varint(changed, f) or 0 for f in (24, 25, 26)}
+    changed = pb_set_varint(changed, 34, total[25] + total[26] + total[24] // 10)
     previous = config["passive_soaring"][str(level)]["speed"]
     changed = adjust(changed, {9: step["speed"] - previous})[0]
     changed = partner_growth.power(save, raw, changed)
@@ -164,14 +215,25 @@ def prepare(opcode, save, body, config):
                     trained = {}
                     previews.append(encode_pb_field(1, 2, raw))
                 return b"".join(previews), costs, update
-            if values != [0]:
-                raise ValueError("普通主角进阶只接受方式0")
-            # shortcut: 普通进阶至23阶；金将分支需彩金进阶业务后接入。
-            if (not 1 <= stage < 23 or not row or row["soaring_limit"] or row["game_limit"]
-                    or any(pb_get_varint(raw, n) for n in range(21, 41) if n not in LEAD_SOARING_FIELDS)
-                    or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
-                raise ValueError("尚不支持此主角的高级进阶")
-            lead_fairy(raw, config)
+            limit = gold_limit(config)
+            gold_stage = stage + 1 - limit  # >0：彩金进阶24–26，客户端scope即天/地/人分支。
+            if gold_stage > 0:
+                if gold_stage > 3 or not row or not row.get("gold_will_skills"):
+                    raise ValueError("主角已达彩金进阶上限")
+                if len(values) != 1 or values[0] not in gold_choices(row):
+                    raise ValueError("彩金进阶需要选择有效的天/地/人分支")
+                lead_fairy(raw, config)
+                if row["soaring_limit"] > (pb_get_varint(raw, 23) or 0):
+                    raise ValueError("飞升等级不足")
+                from . import gamestar
+                if row["game_limit"] > gamestar.get_state(save, config)["stage"] - 1:
+                    raise ValueError("游戏厅关卡等级不足")
+            else:
+                if values != [0]:
+                    raise ValueError("普通主角进阶只接受方式0")
+                if not 1 <= stage < limit or not row or row["soaring_limit"] or row["game_limit"]:
+                    raise ValueError("尚不支持此主角的高级进阶")
+                lead_fairy(raw, config)
             if any(trained[field] != row[name] for field, name in ((6, "atk"), (7, "def"), (8, "hp"))):
                 raise ValueError("请先完成本阶全部魔晶培养")
             current = config["protagonist_grow"][str(stage)][f"general{choice}"]
@@ -185,6 +247,9 @@ def prepare(opcode, save, body, config):
             if pb_get_varint(raw, 1) != current:
                 raise ValueError("主角形态与当前进阶不一致，请重新登录")
             raw, increase, relations = grow_protagonist(raw, row, cid, trained, slots.get(iid, b""), members, equips, config, cheer_tiers=cheer.tiers(save, config), wing_state=save.get("wing_state"))
+            if gold_stage > 0:
+                raw = apply_gold(raw, row, gold_stage, values[0], config)
+                partner_growth.check_combat(raw, config)
             snapshot = pb_set_varint(snapshot, 3, stage + 1)
             for field in (4, 5, 6):
                 snapshot = pb_set_varint(snapshot, field, 0)
