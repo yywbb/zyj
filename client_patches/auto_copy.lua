@@ -1,6 +1,7 @@
 -- 普通副本挂机仅在本次页面运行，所有战斗、扫荡和费用仍由服务器结算。
 local autoCopy = {active = false, pending = nil, layer = nil, page = 0, serial = 0}
-local autoCopyInterval = 3.1  -- 1306/1307限流要求跨越3个整秒。
+-- 本地服务端不限流，原生1306/1307三秒闸门已在gameloop2解除；仅留一帧避免同帧重入。
+local autoCopyInterval = 0.05
 local autoCopyModes = {progress = "自动推图", stars = "扫描补星", sweep = "循环扫荡"}
 
 local function autoCopyLabel(text)
@@ -147,6 +148,13 @@ local function autoCopyRefresh()
     autoCopySend({type = 1300, update = true})
 end
 
+local function autoCopyContinue()
+    local timer = autoCopy.layer and autoCopy.layer.autoCopyTimer
+    if not timer then return end
+    timer:stopAllActions()
+    timer:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(autoCopyInterval), CCCallFunc:create(autoCopyRefresh)))
+end
+
 local function autoCopyRun(role, vipstatus, now)
     if not autoCopyReady() then return end
     local target = autoCopyTarget()
@@ -237,7 +245,7 @@ function AutoCopyHandle(t)
         if target then data, section, map = autoCopyPoint(t.copy, target.map, target.point) end
         layer:reloadnormalData(t.copy, data and {datatype = "normal", section = section, map = map, point = data.id} or nil)
     end
-    autoCopySchedule(autoCopyInterval, autoCopyRefresh)
+    autoCopyContinue()
     return true
 end
 
@@ -260,7 +268,7 @@ function AutoCopyStart(mode, buy, reset)
         autoCopy.target, autoCopy.visited = nil, {}
         autoCopy.active = true
         autoCopyLabel("准备"..autoCopyModes[mode])
-        autoCopySchedule(autoCopyInterval, autoCopyRefresh)
+        autoCopyContinue()
     end)
 end
 

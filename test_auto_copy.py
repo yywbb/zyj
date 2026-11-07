@@ -357,7 +357,7 @@ class AutoCopyTests(unittest.TestCase):
                 local began=wallClock;local count=#requests
                 for i=1,1000 do tickSeconds=layer.autoCopyTimer.action.delay/speed;layer.autoCopyTimer:fire(tickSeconds)
                     if #requests>count then break end end
-                assert(wallClock-began>=3.1 and requests[#requests].type==1300)
+                assert(wallClock-began<1 and requests[#requests].type==1300)
                 respond();assert(requests[#requests].type==(mode=='sweep' and 1307 or 1306))
                 began=wallClock;count=#requests
                 for i=1,1000 do layer.autoCopyTimer:fire(layer.autoCopyTimer.action.delay/speed)

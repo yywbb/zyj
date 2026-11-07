@@ -3637,6 +3637,11 @@ function http_entergame._old_entergame(self,params)
 
     # 网络线程直接结束认证失败；重连清队列时不能丢掉 UI 的停止请求。
     code = read_script("gameloop2").decode("utf-8").replace("\r\n", "\n")
+    # 本地服务端不限流；解除 1306/1307 的原生三秒闸门，循环扫荡才能连续发送。
+    marker = 'if nil ~= uireq and (not timeinteval[uireq["type"]]  or (os.time() > timeinteval[uireq["type"]]+2)) then'
+    assert code.count(marker) == 1
+    code = code.replace(marker, 'if nil ~= uireq and (not timeinteval[uireq["type"]] or tonumber(uireq["type"]) == 1306'
+                              ' or tonumber(uireq["type"]) == 1307 or (os.time() > timeinteval[uireq["type"]]+2)) then')
     marker = "                    UIReqeustClear()\n                    UIRequest_({ type = 1000 })"
     assert code.count(marker) == 1
     code = code.replace(marker, '''                    local request = uiqueue.getrequestfromui()
