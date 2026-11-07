@@ -20,7 +20,7 @@ ACTIONS = {"grant": "GM 调整与发放", "register": "创建登录账号", "bac
 TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"grant": {"resources", "items"}, "inventory": {"cid", "count"},
                   "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
-COMMON_ITEMS = (20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
+COMMON_ITEMS = (20081, 20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
 
 
 def catalog(config):

@@ -64,7 +64,7 @@
               <legend class="sr-only">资源与物品</legend>
               <section class="panel"><div class="panel-heading"><h2>资源调整</h2><span class="muted">正数增加，负数扣除，留空不变</span></div><div id="gm-resources" class="resource-inputs"></div><p class="help">元宝调整不计入充值或消费活动；体力会同时结算离线恢复。</p></section>
               <div class="gm-grid">
-                <section class="panel"><h2>选择物品</h2><p class="help">常用道具 · 点击加入本次发放</p><div id="common-items" class="actions"></div><div class="filters"><div class="grow"><label for="catalog-query">名称 / 配置 ID</label><input id="catalog-query" type="search" maxlength="100" placeholder="体力丹、招募令、武将…"></div><div><label for="catalog-kind">类型</label><select id="catalog-kind"><option value="">全部类型</option><option>道具</option><option>战宠</option><option>战宠碎片</option><option>专属装备</option><option>武将</option><option>武将碎片</option><option>普通装备</option><option>装备碎片</option><option>宝物碎片</option><option>战魂</option><option>魔符</option></select></div><button id="catalog-search" type="button">搜索</button></div><div id="catalog-rows"></div><div class="pager"><span id="catalog-count"></span><button id="catalog-previous" type="button">上一页</button><button id="catalog-next" type="button">下一页</button></div><p class="help">目录按运行中的配置读取。道具入库不代表其使用功能已实现；武将限已接入招募池，重复武将转碎片。</p></section>
+                <section class="panel"><h2>选择物品</h2><p class="help">常用道具 · 点击加入本次发放</p><div id="common-items" class="actions"></div><div class="actions"><button id="gm-bundle-skytoken" type="button" class="button primary" title="一键加入全套24种天机令各7个 + 金木水火精华各8120个（共28种，满配全阵7人）">🎁 一键填入：天机令满配材料包（28种材料直接入包）</button></div><div class="filters"><div class="grow"><label for="catalog-query">名称 / 配置 ID</label><input id="catalog-query" type="search" maxlength="100" placeholder="体力丹、招募令、武将…"></div><div><label for="catalog-kind">类型</label><select id="catalog-kind"><option value="">全部类型</option><option>道具</option><option>战宠</option><option>战宠碎片</option><option>专属装备</option><option>武将</option><option>武将碎片</option><option>普通装备</option><option>装备碎片</option><option>宝物碎片</option><option>战魂</option><option>魔符</option></select></div><button id="catalog-search" type="button">搜索</button></div><div id="catalog-rows"></div><div class="pager"><span id="catalog-count"></span><button id="catalog-previous" type="button">上一页</button><button id="catalog-next" type="button">下一页</button></div><p class="help">目录按运行中的配置读取。道具入库不代表其使用功能已实现；武将限已接入招募池，重复武将转碎片。</p></section>
                 <section class="panel"><div class="panel-heading"><h2>本次发放</h2><span id="cart-count" class="muted">0 种</span></div><div id="gm-cart"></div><p class="help">最多 32 种物品，装备和武将合计最多 100 个。武将发放需先完成新手引导。</p></section>
               </div>
               <section class="panel"><h2>操作说明</h2><label for="gm-reason">原因</label><textarea id="gm-reason" required maxlength="200" placeholder="例如：测试招募阵容、补偿道具"></textarea><div id="gm-preview"></div></section>
@@ -198,7 +198,9 @@
                       </button>
                     </div>
                   </div>
-                  <div id="mail-common-items" class="actions compact-actions"></div>
+                  <div id="mail-common-items" class="actions compact-actions">
+                    <button id="mail-bundle-skytoken" type="button" class="button primary" title="一键填入全套24种天机令各7个 + 金木水火精华各8120个（满配7阵位）">🎁 一键填入：天机令满配材料包</button>
+                  </div>
                   <div class="filters compact-filters">
                     <div class="grow">
                       <input id="mail-catalog-query" type="search" placeholder="输入名称或编号搜索…">

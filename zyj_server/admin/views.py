@@ -38,7 +38,15 @@ def detail(snapshot, step_counts, role_config):
         def number(raw, field):
             return protocol.pb_get_varint(raw, field) or 0
         def name(table, cid):
-            return role_config.get(table, {}).get(str(cid), {}).get("name") or str(cid)
+            row = role_config.get(table, {}).get(str(cid), {})
+            if row.get("name"):
+                return row["name"]
+            if table == "props":
+                for sub in ("token", "token_fragment", "pet3_fragment", "exclusive", "redl_awake_item"):
+                    sub_row = role_config.get(sub, {}).get(str(cid), {})
+                    if sub_row.get("name") or sub_row.get("desc"):
+                        return sub_row.get("name") or sub_row.get("desc")
+            return str(cid)
         positions = {number(row, 2): number(row, 1) for row in rows(1002, 4)}
         cheers = {number(row, 2): number(row, 1) for row in rows(1002, 5)}
         protagonist = number(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)

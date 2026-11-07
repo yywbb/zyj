@@ -97,6 +97,23 @@ def apply_overrides(name, data, overrides):
     if name == "treasure2_fragment":
         for row in data.values():
             row["default"] = 1
+    if name == "props":
+        # 天机令大礼包：包含全套24种天机令与金木水火精华激活材料（单次开启足够激活1个阵位全部6套，7个可满配全阵7人）。
+        tokens_spec = ";".join(f"{cid},1" for cid in range(201901, 201925))
+        essences_spec = ";".join(f"{cid},1160" for cid in range(192596, 192600))
+        if "20081" in data:
+            data["20081"].update(
+                name="天机令大礼包",
+                desc="开启后获得全套24种天机令各1个，以及金、木、水、火之精华各1160个（开启1个可满配1名伙伴全部6套天机令，7个可满配全阵7人）。",
+                type="box",
+                function="box1",
+                param1=f"{tokens_spec};{essences_spec};",
+                icon="vip22libao",
+                quality=6,
+                classification=1,
+                priority=100,
+                backpack_display=0,
+            )
     if name == "exchange_shop":
         # 本地常驻入口复用treasure_discount_x2/8原配方，不改招募概率。
         data["5"] = {"1": dict(data["1"]["1"], type=5, name="伙伴兑换", generals="11511,5;", target="11598,1;")}
@@ -123,7 +140,7 @@ def iter_config_bytes(config_path):
             if name.startswith("._"):
                 continue
             raw = archive.read(entry)
-            if name in overrides or name in ("continue7_X1", "activity_time", "build", "treasure2_fragment", "exchange_shop"):
+            if name in overrides or name in ("continue7_X1", "activity_time", "build", "treasure2_fragment", "props", "exchange_shop"):
                 raw = json.dumps(apply_overrides(name, json.loads(raw), overrides), ensure_ascii=False).encode("utf-8")
             yield name + ".json", raw
 

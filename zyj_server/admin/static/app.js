@@ -748,8 +748,62 @@ async function loadMailCatalog(offset = 0) {
   updateCatalogBatchBar();
 }
 
+const SKYTOKEN_BUNDLE = [
+  { cid: 201901, name: "皇天后土-紫薇令", count: 7 },
+  { cid: 201902, name: "皇天后土-长生令", count: 7 },
+  { cid: 201903, name: "皇天后土-天皇令", count: 7 },
+  { cid: 201904, name: "皇天后土-皇地令", count: 7 },
+  { cid: 201905, name: "穷凶极恶-混沌令", count: 7 },
+  { cid: 201906, name: "穷凶极恶-穷奇令", count: 7 },
+  { cid: 201907, name: "穷凶极恶-梼杌令", count: 7 },
+  { cid: 201908, name: "穷凶极恶-饕餮令", count: 7 },
+  { cid: 201909, name: "镇守四方-青龙令", count: 7 },
+  { cid: 201910, name: "镇守四方-白虎令", count: 7 },
+  { cid: 201911, name: "镇守四方-朱雀令", count: 7 },
+  { cid: 201912, name: "镇守四方-玄武令", count: 7 },
+  { cid: 201913, name: "修罗降世-夜叉令", count: 7 },
+  { cid: 201914, name: "修罗降世-罗刹令", count: 7 },
+  { cid: 201915, name: "修罗降世-修罗令", count: 7 },
+  { cid: 201916, name: "修罗降世-梵天令", count: 7 },
+  { cid: 201917, name: "僵尸始祖-将臣令", count: 7 },
+  { cid: 201918, name: "僵尸始祖-赢勾令", count: 7 },
+  { cid: 201919, name: "僵尸始祖-旱魃令", count: 7 },
+  { cid: 201920, name: "僵尸始祖-后卿令", count: 7 },
+  { cid: 201921, name: "九幽冥府-幽魂令", count: 7 },
+  { cid: 201922, name: "九幽冥府-判官令", count: 7 },
+  { cid: 201923, name: "九幽冥府-阎罗令", count: 7 },
+  { cid: 201924, name: "九幽冥府-地藏令", count: 7 },
+  { cid: 192596, name: "金之精华", count: 8120 },
+  { cid: 192597, name: "木之精华", count: 8120 },
+  { cid: 192598, name: "水之精华", count: 8120 },
+  { cid: 192599, name: "火之精华", count: 8120 }
+];
+
+function fillGmSkyTokenBundle() {
+  for (const item of SKYTOKEN_BUNDLE) {
+    const existing = cart.find((r) => r.cid === item.cid);
+    if (existing) existing.count = item.count;
+    else cart.push({ ...item, kind: "道具", max: 1000000 });
+  }
+  if (!$("gm-reason").value.trim()) $("gm-reason").value = "GM发放天机令大礼包全套激活材料";
+  renderCart();
+  message("已一键填入全套天机令（24种各7个）及金木水火精华（各8120个），可满配全阵7名伙伴！");
+}
+
+function fillMailSkyTokenBundle() {
+  for (const item of SKYTOKEN_BUNDLE) {
+    const existing = mailCart.find((r) => r.cid === item.cid);
+    if (existing) existing.count = item.count;
+    else mailCart.push({ ...item, kind: "道具", max: 1000000 });
+  }
+  if ($("mail-title").value === "GM系统福利发放") $("mail-title").value = "天机令满配大礼包福利";
+  renderMailCart();
+  message("已一键将天机令大礼包全套28种激活材料填入邮件附件清单（满配全阵7人）！");
+}
+
 function renderMailCommonItems() {
-  if (!info || !info.common_items || $("mail-common-items").children.length) return;
+  if (!info || !info.common_items || $("mail-common-items").dataset.loaded) return;
+  $("mail-common-items").dataset.loaded = "1";
   for (const item of info.common_items) {
     $("mail-common-items").append(button(item.name, () => addMailItem(item)));
   }
@@ -989,6 +1043,8 @@ $("mail-recharge-preset").onchange = () => {
 };
 $("mail-tab-compose").onclick = () => switchMailTab("compose");
 $("mail-tab-history").onclick = () => switchMailTab("history");
+if ($("gm-bundle-skytoken")) $("gm-bundle-skytoken").onclick = fillGmSkyTokenBundle;
+if ($("mail-bundle-skytoken")) $("mail-bundle-skytoken").onclick = fillMailSkyTokenBundle;
 $("mail-catalog-add-selected").onclick = addSelectedCatalogItems;
 $("mail-apply-batch-qty").onclick = () => applyBatchQuantity();
 document.querySelectorAll(".quick-preset-pills .pill-btn").forEach((btn) => {
