@@ -69,17 +69,43 @@ class WingTests(unittest.TestCase):
         before = self.props(20334)
         values = protocol.parse_ids_pb(self.success(1, 3741)); self.refresh()
         self.assertEqual(values[1], 1)
-        self.assertTrue(1 <= len(values[5:]) <= 100)
+        self.assertTrue(1 <= len(values[5:]) <= 45)  # 450 点经验 / 最小 10 点每次
         self.assertEqual(self.props(20334), before - len(values[5:]))
         self.assertEqual(values[2], sum(values[5:]) - self.config["wing_uplv"]["1"]["1"]["lv_exp"])
         self.reconnect(); self.refresh()
         self.assertEqual(self.save["wing_state"]["stars"], 1)
         self.seed_wing(13)
-        material = self.config["wing_uplv"]["13"]["1"]["cost"]
+        row = self.config["wing_uplv"]["13"]["1"]
+        material = row["cost"]
         before = self.props(material)
         values = protocol.parse_ids_pb(self.success(1, 3741)); self.refresh()
-        self.assertEqual((values[1], len(values[5:])), (0, 100))
-        self.assertEqual(self.props(material), before - 100)
+        self.assertEqual(values[1], 1)  # 旧上限 100 下无法一次升星，现在可以
+        self.assertGreater(len(values[5:]), 100)
+        self.assertLessEqual(len(values[5:]), wing.MAX_STAR_ROLLS)
+        self.assertTrue(set(values[5:]) <= {int(e.split(",")[0]) for e in row["weights"].split(";") if e})
+        self.assertEqual(self.props(material), before - len(values[5:]))
+        self.assertEqual(values[2], sum(values[5:]) - row["lv_exp"])
+
+    def test_request_exhausts_all_feathers_and_rejects_broken_experience_config(self):
+        self.success(1, 3742, values=[0]); self.refresh()
+        # 精确留下 7 个羽毛：本阶最小 450 经验，最多 7*40=280，必然无法升星。
+        player.change_item_count(self.save, 20334, -self.props(20334), self.config, self.now)
+        self.give(20334, 7)
+        before = self.props(20334)
+        values = protocol.parse_ids_pb(self.success(1, 3741)); self.refresh()
+        self.assertEqual(len(values[5:]), before)
+        self.assertEqual(self.props(20334), 0)
+        self.assertEqual(values[1], 0)
+        self.assertEqual(self.save["wing_state"]["exp"], sum(values[5:]))
+        self.assertEqual(self.save["wing_state"]["stars"], 0)
+        self.assert_rejected(3741)
+        # 经验配置异常时，须在扣料前拒绝，不能生成超大应答或消耗羽毛。
+        row = self.config["wing_uplv"]["1"]["1"]
+        with patch.dict(row, lv_exp=40 * (wing.MAX_STAR_ROLLS + 1)):
+            self.give(20334, 7)
+            snapshot = copy.deepcopy(self.save)
+            self.assert_rejected(3741)
+            self.assertEqual(self.sessions[1].save, snapshot)
 
     def test_stage_failure_loses_one_star_insurance_protects_it_and_pity_is_real(self):
         for insurance, stars in ((0, 9), (1, 10)):
@@ -311,4 +337,38 @@ class WingTests(unittest.TestCase):
             page.poptimes=1;page.oldexp=0;page:showNumAction()
             page.localWingGeneration=2;page.rootNode=nil;pending()
             assert(page.oldexp==0 and page.poptimes==1)
+        ''')
+
+    def test_bulk_feathers_collapse_star_animation_into_one_prompt(self):
+        try:
+            from lupa.lua51 import LuaRuntime
+        except ImportError:
+            self.skipTest("翅膀批量动画验证需 lupa.lua51")
+        scripts = self.client_scripts()
+        source = scripts["assets/scripts/Layer_wing_main.so"]
+        self.assertIn(b"self.poptimes > 20", source)
+        lua = LuaRuntime()
+        page = lua.execute(source.decode())
+        lua.globals().page = page
+        lua.globals().gamedata = lua.table_from({"config": self.config}, recursive=True)
+        lua.execute('''
+            print=function() end;printT=print
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            ui={setLabelString=function() end,getIDandNUMs=function(s) local t={}
+                for c,n in s:gmatch("(%d+),(%d+)") do t[#t+1]={cid=tonumber(c),num=tonumber(n)} end return t end}
+            gameConfig={strings={string_common=function() return "label" end}}
+            prompts=0;runGamePrompt=function() prompts=prompts+1 end
+            ccc3=function() return {} end
+            CCDelayTime={create=function() return 0 end}
+            CCCallFunc={create=function(_,f) return f end}
+            CCSequence={createWithTwoActions=function(_,a,b) return b end}
+            CCProgressFromTo={create=function() return {} end}
+            page.rootNode={};page.localWingGeneration=1
+            page.rootItems={starupBtn={runAction=function() end},expbarprogress={runAction=function() end}}
+            page.wingdata={stagenum=1,starnum=0,expnumtable={}}
+            for i=1,25 do page.wingdata.expnumtable[i]=10 end
+            page.poptimes=25;page.starupNum=0;page.oldexp=0;page.firstnum=0;page.labnum=2
+            page:showNumAction()
+            assert(page.poptimes==0 and prompts==1)
+            assert(page.oldexp==250 and page.firstnum==100*(250/450))
         ''')

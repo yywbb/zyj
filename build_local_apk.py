@@ -2256,7 +2256,30 @@ def patch_wing_scripts(patched):
             code = code.replace(marker, '''        local needed = gamedata.config.wing_stage["1"].battle_lv
         if GameScene.roleinfo.level < needed then runGamePrompt({msg="激活需要队伍"..needed.."级"});return end
 ''' + marker)
-            code = code.replace('gameConfig.strings:string_common("fixedString","wing",11)', '"升星（每次最多100羽毛，升1星即停）"')
+            code = code.replace('gameConfig.strings:string_common("fixedString","wing",11)', '"升星（一次用完羽毛，升1星即停）"')
+            # 取消每次 100 羽毛上限后，一次升星可能返回上千次经验抽取；
+            # 超过 20 次时合并为一次结算，避免逐次弹窗／动画拖长到数分钟。
+            marker = "function wing_main.showNumAction(self)\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + '''    if self.poptimes > 20 then
+        local used, total = self.poptimes, 0
+        for i = 1, used do
+            total = total + (self.wingdata.expnumtable[i] or 0)
+        end
+        local nowstagenum, nowstarnum = self.wingdata.stagenum, self.wingdata.starnum
+        if nowstagenum == 0 then nowstagenum, nowstarnum = 1, 0 end
+        if self.starupNum == 0 then nowstarnum = nowstarnum + 1 end
+        local stage = gamedata.config.wing_uplv[tostring(nowstagenum)] or {}
+        local nextrow = stage[tostring(nowstarnum)] or {}
+        local nextexp = nextrow["lv_exp"] or 100
+        self.oldexp = self.oldexp + total
+        if self.oldexp > nextexp then self.oldexp = nextexp end
+        self.firstnum = 100 * (self.oldexp / nextexp)
+        ui.setLabelString(self.rootItems.expnumsLab, self.oldexp.."/"..nextexp, 14)
+        runGamePrompt({msg = "本次共使用"..used.."个羽毛，获得经验"..total})
+        self.poptimes = 0
+    end
+''')
             matches = list(re.finditer(r"^function wing_main\.[^(]+\(self[^\n]*\n", code, re.M))
             for index in range(len(matches)-1, -1, -1):
                 start = matches[index].start()

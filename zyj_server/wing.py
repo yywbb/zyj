@@ -9,6 +9,10 @@ QUERIES = (3740, 3744)
 MUTATIONS = (3741, 3742, 3743)
 OPCODES = QUERIES + MUTATIONS
 
+# 现版配置单次升星最多约 3794 次经验抽取（13 阶 9→10 星，最小权重 10 点）。
+# 该阈值仅拦截异常配置造成的超大应答，不是每次使用羽毛的数量上限。
+MAX_STAR_ROLLS = 10000
+
 
 def get_state(save, config):
     state = save.get("wing_state", {"stage": 0, "stars": 0, "exp": 0, "color": 0, "failures": 0, "colors": [], "checked_at": 0})
@@ -95,7 +99,13 @@ def prepare(opcode, save, body, config, now, seed):
         deck = [tuple(map(int, entry.split(","))) for entry in row["weights"].split(";") if entry]
         if not deck or any(value <= 0 or weight <= 0 for value, weight in deck):
             raise ValueError("翅膀经验权重配置无效")
-        for _ in range(min(100, available)):
+        # 一次请求用尽当前羽毛：升 1 星即停，或羽毛用光为止，不再限制每次最多使用数量。
+        # 每次至少获得最小档经验，故达到 lv_exp 所需的抽取次数是天然上界，应答长度有界。
+        minimum = min(value for value, _ in deck)
+        needed = (row["lv_exp"] - state["exp"] + minimum - 1) // minimum
+        if not 0 < needed <= MAX_STAR_ROLLS:
+            raise ValueError("翅膀升星经验配置无效")
+        for _ in range(min(available, needed)):
             gain = rng.choices([p[0] for p in deck], [p[1] for p in deck])[0]
             rolls.append(gain)
             state["exp"] += gain
