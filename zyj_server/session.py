@@ -198,6 +198,9 @@ class Session:
         if opcode in (5520, 8204):
             return unavailable_response(opcode, seq, body, "此高级养成没有完整消耗记录，安全保护：未扣款、未重生。")
 
+        if opcode == 8301:
+            return unavailable_response(opcode, seq, body, "伙伴升星重生尚未接通，未扣费、未重置星级。")
+
         if opcode in (6211, 6212):
             try:
                 return game_helper.handle(self, opcode, seq, body)

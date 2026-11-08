@@ -126,7 +126,8 @@ local function send(req,opcode)
     end
     local view=req.partnerView
     local hero=view and gamedata.cache.generals[view.iid]
-    if not hero or hero.cid~=view.cid or hero.level2~=view.advance or hero.skilllevel~=view.awake or hero.level8~=view.soar then
+    if not hero or hero.cid~=view.cid or hero.level2~=view.advance or hero.skilllevel~=view.awake or hero.level8~=view.soar
+        or (view.star and (hero.level5 or 0)~=view.star) then
         return fail("伙伴或显示进度已变化，请重新打开页面")
     end
     if req.iid and req.iid~=hero.iid or opcode==1017 and (req.ids[1] or req.ids["1"])~=hero.cid then

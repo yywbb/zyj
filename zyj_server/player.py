@@ -61,7 +61,7 @@ def load_role_config(config_path):
                              "equip_evolve", "equip_evolveconsume", "equip_evolvesuffix", "equip_evolvelv", "equip_star", "suit",
                              "equip_forgingConsume", "equip_foringlv",
                               "fashion_gift_bag", "fashioncoat", "fashionintentify", "online_reward", "wing_stage", "wing_uplv", "wing_coler",
-                               "hoshimiya_break", "hoshimiya_jihuo", "protagonist_awaken", "passive_soaring", "general_awaken", "general_awakenattr", "partner_soaring", "Immortal_type", "Immortal_level", "Immortal_probability", "jinjiangkezhiguanxi",
+                               "hoshimiya_break", "hoshimiya_jihuo", "protagonist_awaken", "passive_soaring", "general_awaken", "general_awakenattr", "partner_soaring", "general_star", "Immortal_type", "Immortal_level", "Immortal_probability", "jinjiangkezhiguanxi",
                                "lingzhentu_zhenfa", "lingzhentu_cond", "lingzhentu_lv", "lingzhentu_jihuo", "lingzhentu_add",
                               "mozhao_evolve", "mozhao_soaring", "mozhao_liandan", "mozhao_shop", "mozhao_shoptype",
                              "continue7_X1", "mammon", "luxurysign", "vip_welfare", "week_month_gift",

@@ -2565,11 +2565,15 @@ class ReplayRoutingTests(unittest.TestCase):
     def test_unimplemented_training_returns_error_instead_of_empty_success(self):
         self.replay(self.requests)
         before = self.save_path.read_bytes()
-        for opcode in (1026, 1028, 1029, 1102, 1105, 1106):
+        for opcode in (1026, 1028, 1102, 1105, 1106):
             with self.subTest(opcode=opcode):
                 request = self.activity_request(opcode, [7060])
                 self.assert_unavailable_response(self.replay([request]), opcode, 20000, "尚未实现")
                 self.assertEqual(self.save_path.read_bytes(), before)
+        # 1029 已接入伙伴升星本地事务；非法 IID 仍明确拒绝且不改存档。
+        request = self.activity_request(1029, [7060])
+        self.assert_unavailable_response(self.replay([request]), 1029, 20000, "培养伙伴")
+        self.assertEqual(self.save_path.read_bytes(), before)
 
     def test_exp_pills_update_general_and_inventory_after_reconnect(self):
         self.replay(self.requests)

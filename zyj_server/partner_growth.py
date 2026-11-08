@@ -1,11 +1,13 @@
-"""伙伴觉醒、进修和飞升；只在玩家事务副本上准备变化。"""
+"""伙伴觉醒、进修、飞升和升星；只在玩家事务副本上准备变化。"""
 
 import random
 
 from .protocol import encode_pb_field, pb_get_varint, pb_set_varint
 
 QUERIES = (5511, 5512)
-MUTATIONS = (1025, 5513, 7001)
+MUTATIONS = (1025, 5513, 7001, 1029)
+# 伙伴升星等级在 General_Property.level5，与 level4(21)、g_score4/5(38/39) 的未知高级字段分开。
+STAR_FIELD = 22
 FAIRY = {"g_hp": 24, "g_def": 25, "g_atk": 26, "g_critical": 27, "g_dodge": 28,
          "g_parry": 29, "g_resilience": 30, "g_hit": 31, "g_arp": 32, "g_criticaldmg": 33}
 
@@ -51,8 +53,11 @@ def validate(raw, config):
     if (not row.get("battle") or not row.get("init_cid") or row.get("actor") == "lead"
             or row.get("partner_id") or row.get("quality") not in range(3, 8)
             or not 0 <= (pb_get_varint(raw, 4) or 0) <= min(16, row.get("breach_upper_limit", 10))
-            or any(pb_get_varint(raw, n) for n in (21, 22, 38, 39))):
-        raise ValueError("此伙伴包含尚未接通的升星、幻化或高级属性")
+            or any(pb_get_varint(raw, n) for n in (21, 38, 39))):
+        raise ValueError("此伙伴包含尚未接通的幻化或高级属性")
+    star = pb_get_varint(raw, STAR_FIELD) or 0
+    if star and (not row.get("rising_star") or str(star) not in config["general_star"]):
+        raise ValueError("伙伴升星等级或资格无效")
     awake = pb_get_varint(raw, 18) or 0
     if awake and (str(awake) not in config["general_awaken"] or not row.get("awaken")):
         raise ValueError("伙伴觉醒等级无效")
@@ -88,6 +93,14 @@ def fairy(raw, config):
             raise ValueError("伙伴飞升等级无效")
         for name, f in (("xianhp", 24), ("xiandef", 25), ("xianadk", 26)):
             result[f] += data[str(origin["basic"])+name]
+    star = pb_get_varint(raw, STAR_FIELD) or 0
+    if star:
+        data = config["general_star"].get(str(star))
+        if not data or not row.get("rising_star"):
+            raise ValueError("伙伴升星等级或资格无效")
+        # general_star 的 g_* 是该星档的最终值（非逐星增量），与飞升/彩金同名字段叠加。
+        for name in ("g_hp", "g_def", "g_atk"):
+            result[FAIRY[name]] += data[name]
     for stage in range(1, max(0, (pb_get_varint(raw, 4) or 0)-13)+1):
         choice = pb_get_varint(raw, 34+stage) or 0
         if choice not in (1, 2, 3) or not row.get(f"gold{stage}_will_skills_{choice}"):
@@ -245,6 +258,8 @@ def prepare(opcode, save, body, config, now, seed):
     if not save.get("has_role") or not values or values[0] not in generals:
         raise ValueError("伙伴不存在或不属于当前账号")
     iid, raw = values[0], generals[values[0]]
+    if opcode == 1029 and config["general"][str(pb_get_varint(raw, 1))].get("actor") == "lead":
+        raise ValueError("主角不支持伙伴升星")
     if config["general"][str(pb_get_varint(raw, 1))].get("actor") == "lead":
         return development.lead_soaring(save, raw, values, config)
     row = validate(raw, config)
@@ -326,6 +341,40 @@ def prepare(opcode, save, body, config, now, seed):
         changed = development.adjust(raw, changes)[0]
         changed = pb_set_varint(changed, 20, (pb_get_varint(changed, 20) or 0)+sum(after[n]-before[n] for n in ("adddmg", "subdmg")))
         current["research"][str(iid)] = progress
+    elif opcode == 1029:
+        star = pb_get_varint(raw, STAR_FIELD) or 0
+        soar = pb_get_varint(raw, 23) or 0
+        advance = pb_get_varint(raw, 4) or 0
+        cid = pb_get_varint(raw, 1)
+        # Ids 带完整显示进度：旧页面、跨伙伴或已结算的重复点击一律拒绝。
+        if len(values) != 5 or values[1:] != [cid, star, soar, advance]:
+            raise ValueError("伙伴升星目标已变化，请重新打开页面")
+        gate = config["build"]["572"]
+        if gate.get("switch") != 1 or save["role_state"]["level"] < gate["level"] or not row.get("rising_star"):
+            raise ValueError("伙伴升星尚未开放或该伙伴不能升星")
+        if advance <= 13:
+            raise ValueError("伙伴升星需要彩金突破14阶以上")
+        step = config["general_star"].get(str(star + 1))
+        if not step:
+            raise ValueError("伙伴升星已满级")
+        if soar < step["limitlv"]:
+            raise ValueError("伙伴飞升等级不足以升星")
+        costs = pairs(step["consume"])
+        if (not costs or len({item for item, _ in costs}) != len(costs)
+                or any(not 0 < item < 1 << 31 or not 0 < count < 1 << 31 for item, count in costs)):
+            raise ValueError("伙伴升星消耗配置无效")
+        changed = pb_set_varint(raw, STAR_FIELD, star + 1)
+        attributes = fairy(changed, config)
+        if any(not 0 <= value < 1 << 31 for value in attributes.values()):
+            raise ValueError("伙伴升星仙属性超出范围")
+        for f, value in attributes.items():
+            changed = pb_set_varint(changed, f, value)
+        score = attributes[25] + attributes[26] + attributes[24] // 10
+        if not 0 <= score < 1 << 31:
+            raise ValueError("伙伴升星仙战力超出范围")
+        changed = pb_set_varint(changed, 34, score)
+        validate(changed, config)
+        check_combat(changed, config)
     if opcode == 5513:
         current["serial"] += 1
     current["checked_at"] = now

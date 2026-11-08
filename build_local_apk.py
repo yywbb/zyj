@@ -2509,14 +2509,22 @@ def patch_partner_growth_scripts(patched):
     for name, filename in (("GameGeneralBreak", "partner_growth_network.lua"), ("UIGenerals", "partner_growth_ui.lua")):
         code = load(name)
         if name == "UIGenerals":
-            for callback in ("UIGeneralBreak", "UIGeneralAwaken", "UIGeneralXiuLian", "UIPartnerFeiSheng"):
+            for callback in ("UIGeneralBreak", "UIGeneralAwaken", "UIGeneralXiuLian", "UIPartnerFeiSheng", "UIGeneralUpStar"):
                 start = code.index(f"function {callback}(t)")
                 end = code.index("\nend", start)+len("\nend")
                 block = code[start:end].replace('    UIRequest({type = 10322, param = {"generals"}})', "")
                 block = block.replace("    UIRequest({type = 1001})", "")
                 code = code[:start]+block+code[end:]
         with open(os.path.join(os.path.dirname(__file__), "client_patches", filename), encoding="utf-8") as stream:
-            put(name, code+"\n"+stream.read())
+            code = code+"\n"+stream.read()
+        if name == "UIGenerals":
+            with open(os.path.join(os.path.dirname(__file__), "client_patches", "partner_star_ui.lua"), encoding="utf-8") as stream:
+                code = code+"\n"+stream.read()
+        put(name, code)
+    # GameGeneralUp 在 GameGeneralBreak 之后加载，升星网络补丁必须追加在这里才能覆盖原生 1029 回调。
+    code = load("GameGeneralUp")
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "partner_star_network.lua"), encoding="utf-8") as stream:
+        put("GameGeneralUp", code+"\n"+stream.read())
     for name, prefix, methods in (("Layer_generalup", "generalup", ("init", "clear", "shiftPage")),
                                    ("window_generalup", "generalInfo", ("open", "close", "shiftPage")),
                                    ("window_generalInfo", "generalInfo", ("open", "close", "showPage"))):
@@ -2563,7 +2571,7 @@ def patch_partner_growth_scripts(patched):
             guard = "\n        if generation~=self.localPartnerGeneration or not self.data.general or iid~=self.data.general.iid or soar~=self.data.general.level8 then return end\n"
             block = block.replace("function()", "function()"+guard)
             code = code[:start]+block+code[end:]
-        for method in (("resetPage_tupo", "resetPage_Awaken", "setXiuLianPropShow", "xiuLianSuccess", "feiShengCallback", "feishengUpStage") if name == "Layer_generalup" else ("resetPage_tupo",) if name == "window_generalup" else ()):
+        for method in (("resetPage_tupo", "resetPage_Awaken", "setXiuLianPropShow", "xiuLianSuccess", "feiShengCallback", "feishengUpStage", "upStarCallback") if name == "Layer_generalup" else ("resetPage_tupo",) if name == "window_generalup" else ()):
             start = code.index(f"function {prefix}.{method}(")
             end = code.index("\nend", start)+len("\nend")
             block = code[start:end]
@@ -2587,6 +2595,8 @@ def patch_partner_growth_scripts(patched):
         page.autoJuexing=false;page.autoXiulian=false
         if page.ReloadData then page:ReloadData() end
     end
+    local starPage=LocalPartnerGrowthPage and LocalPartnerGrowthPage(t.partnerStarErrorView)
+    if starPage and starPage.ReloadData then starPage:ReloadData() end
 ''')
     put("UIErrorMessage", code)
     code = load("GameErrorMessage", "common_lua")
