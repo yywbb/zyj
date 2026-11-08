@@ -2547,6 +2547,13 @@ def patch_partner_growth_scripts(patched):
             marker = "function generalup.setPage_feisheng(self)\n"
             assert code.count(marker) == 1
             code = code.replace(marker, marker+"    UIRequest({type=5511,update=true})\n")
+            # 原版自动进修在升学那次把 levelUp 置真，定时回调据此关掉 autoXiulian，
+            # 升一级就停住要玩家再点一次。升学后继续自动抽取/升学；材料不足、
+            # 等级不足、满级、手动取消与关页/换伙伴的停止与世代保护都保持原样。
+            marker = '            if self.selectpage == "xiulian" and self.autoXiulian and (not self.levelUp) then\n'
+            assert code.count(marker) == 1
+            code = code.replace(marker, '            if self.selectpage == "xiulian" and self.autoXiulian then\n'
+                                        '                self.levelUp=false\n')
         for method in methods:
             marker = f"function {prefix}.{method}("
             assert code.count(marker) == 1

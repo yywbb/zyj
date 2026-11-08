@@ -526,6 +526,19 @@ class PartnerGrowthTests(unittest.TestCase):
             self.assertEqual(result[b"generalXiuLian"][key], stats[name])
         self.assertGreater(protocol.pb_get_varint(self.gen(self.iid), 20), before)
         self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.save["role_state"]["coin"])
+        # 升学后自动进修不再停下：下一笔按新档继续普通抽取，服务端照常接受并增长心性。
+        request = lua.table_from({b"iid": self.iid, b"xiuLian": 1, b"isBreak": 0, b"partnerView": view()})
+        mode, mid, raw = lua.globals().UIGeneralXiuLianCallBack(request)
+        self.assertEqual((mode, mid, protocol.parse_ids_pb(raw)[:5]), (1, 5513, [self.iid, 1, 0, 1, cap]))
+        before = protocol.pb_get_varint(self.gen(self.iid), 20)
+        result = lua.globals().NetGeneralXiuLianCallBack(lua.table_from({b"rbuf": self.success(1, mid, raw=raw), b"ser": 6}))
+        self.refresh()
+        after = partner_growth.research(self.save, self.iid, self.config)
+        self.assertEqual(after[0], 1)
+        self.assertGreater(after[4], cap)
+        self.assertEqual(result[b"generalXiuLian"][b"heart1"], after[4])
+        self.assertGreater(protocol.pb_get_varint(self.gen(self.iid), 20), before)
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.save["role_state"]["coin"])
 
     def test_actual_ui_context_rejects_closed_reopened_or_switched_partner(self):
         from lupa.lua51 import LuaRuntime
@@ -617,6 +630,41 @@ class PartnerGrowthTests(unittest.TestCase):
                 lua.execute(change+f';delayed[{phase}]()')
                 self.assertIsNone(lua.globals().executed)
                 self.assertIsNone(lua.globals().refreshed)
+
+    def test_native_auto_research_continues_through_level_up(self):
+        from lupa.lua51 import LuaRuntime
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        self.assertNotIn("(not self.levelUp)", code)
+        self.assertIn('if self.selectpage == "xiulian" and self.autoXiulian then', code)
+        start = code.index("function generalup.setXiuLianPropShow(")
+        block = code[start:code.index("\nend", start)+len("\nend")]
+        for level_up, auto in product((False, True), (True, False)):
+            with self.subTest(level_up=level_up, auto=auto):
+                lua = LuaRuntime()
+                lua.execute('''generalup={};printT=function() end;print=function() end
+                    gameConfig={strings={string_common=function() return "" end}};ui={setLabelString=function() end}
+                    CCControlEventTouchUpInside=1;CCDelayTime={create=function() return {} end}
+                    CCCallFunc={create=function(_,fn) return fn end}
+                    CCSequence={createWithTwoActions=function(_,delay,fn) return fn end}
+                    delayed={};local node=setmetatable({runAction=function(self,fn) delayed[#delayed+1]=fn end},
+                        {__index=function() return function() end end})
+                    page=setmetatable({data={general={iid=7}},localPartnerGeneration=3,selectpage="xiulian",
+                        autoXiulian=%s,levelUp=%s,xiuLianProps={},xiuLianAddData={[7]={}},
+                        rootItems=setmetatable({}, {__index=function() return node end}),
+                        executeXiulian=function() executed=(executed or 0)+1 end,
+                        setXiuLianData=function() refreshed=(refreshed or 0)+1 end,
+                        setXiuLianStateShow=function() refreshed=(refreshed or 0)+1 end}, {__index=generalup})''' % (
+                        'true' if auto else 'false', 'true' if level_up else 'false'))
+                lua.execute(block)
+                lua.execute('page:setXiuLianPropShow({})')
+                self.assertEqual(lua.eval('#delayed'), 1 if auto else 0)
+                if auto:
+                    lua.execute('delayed[1]()')
+                self.assertEqual(lua.globals().executed, 1 if auto else None)
+                self.assertEqual(bool(lua.globals().page.autoXiulian), auto)
+                if auto:
+                    self.assertFalse(lua.globals().page.levelUp)
+                    self.assertIsNone(lua.globals().refreshed)
 
     def test_native_soaring_animation_completion_never_touches_closed_generation(self):
         from lupa.lua51 import LuaRuntime
