@@ -13,12 +13,17 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
 QUEENS = (10595, 10817)
 MAX_ROUNDS = 30
-# shortcut: 已接玉鼎、元始、通天、广成子，其他彩金技能须实现并回归后才允许付费转换。
+# shortcut: 已接玉鼎、元始、通天、广成子、太乙，其他彩金技能须实现并回归后才允许付费转换。
 PARTNER_EFFECTS = {*range(9000742, 9000748), *range(9000547, 9000553), *range(9000678, 9000684),
-                   *range(9000688, 9000694)}
+                   *range(9000688, 9000694), *range(9000598, 9000604)}
 # 广成子彩金技能 9001142–9001147：诅咒/守护印记比例取自配置描述，配置无独立字段。
 # 9000692 同时是「专属神器S1」的行ID（type=0、code 回退到自身ID），仙命加成只认这两行。
 GUANGCHENGZI_AURA_SKILLS = (9001146, 9001147)
+# 太乙真人彩金技能 9001070–9001075：效果号 9000598–9000603 同时是「傲骨 I–VI」的行 ID，
+# 但引擎按 type_param 判定（傲骨族实际为 9000481），不会误放行；9000600 亦是无当圣母
+# 9001231「过载」的效果号，两行 value/value2/描述完全一致，共享同一实现。
+TAIYI_AURA_SKILLS = (9001074, 9001075)
+TAIYI_HEAL_SHARING = 9000602
 CURSE_ATTACK = Fraction(1, 10)
 CURSE_DEFENSE = Fraction(1, 5)
 CURSE_DAMAGE = Fraction(2, 5)
@@ -527,6 +532,13 @@ def _prepare_teams(teams, config):
                     for target in team.values():
                         if config["general"][str(target["cid"])]["quality"] == 7:
                             add(target, "hp", Fraction(str(row["value2"])))
+                elif row["id"] in TAIYI_AURA_SKILLS and (direct, row["id"]) not in applied:
+                    # 强心剂+/纳米科技：开场给己方彩金将加仙防。沿用广成子口径取 value2=32000
+                    # （描述 320000 的 0.1 折算值），不取 value2_n=320000；按技能行去重、两技能叠加。
+                    applied.add((direct, row["id"]))
+                    for target in team.values():
+                        if config["general"][str(target["cid"])]["quality"] == 7:
+                            add(target, "def", Fraction(str(row["value2"])))
                 elif code == 9000008:
                     add(provider, "reduction", value)
                 elif code == 9000028 and provider.get("npc"):
@@ -757,6 +769,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             amount = unit["hp"] - 1
             # 先发本次扣血，再在伤害后发布保命状态和绝对怒气。
             unit["last_stand_pending"] = True
+        if healing and healer and amount < 0 and TAIYI_HEAL_SHARING in healer["effects"]:
+            # 强心剂+：记录被太乙真人恢复的最大单次生命值，供该角色的后续伤害加成使用。
+            unit["taiyi_heal_bonus"] = max(unit.get("taiyi_heal_bonus", 0), -amount)
+            unit["taiyi_heal_row"] = healer["effects"][TAIYI_HEAL_SHARING]
         previous = unit["hp"]
         unit["hp"] -= amount
         if attacker is not None and amount + absorbed + unit["last_heal_absorbed"] > 0:
@@ -1160,7 +1176,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         unit["states"][kind] = max(unit["states"].get(kind, 0), round_number + duration)
         return [state_event(unit, kind, True)]
 
-    def change_ap(unit, amount, provider=None, *, pet=False):
+    def change_ap(unit, amount, provider=None, *, pet=False, supply=True):
         if amount < 0 and immune(unit) and not pet:
             amount = 0
         previous = unit["ap"]
@@ -1183,6 +1199,17 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if gained > 0 and provider and provider is not unit and 9000785 in provider["effects"]:
             provider["ap_self_guard"] = min(Fraction(4, 5), provider["ap_self_guard"] + effect(provider, 9000785) * gained)
             unit["ap_received_guard"] = min(Fraction(9, 20), unit["ap_received_guard"] + Fraction(3, 20) * gained)
+        if (gained > 0 and supply and 9000600 in unit["effects"] and unit["hp"] > 0
+                and previous < effect(unit, 9000600) <= unit["ap"]):
+            # 过量补给：自身怒气从 <value 跨到 >=value 时，给己方怒气最低的其他角色 +value2 怒。
+            # 递归传 supply=False 避免同队多名携带者连锁放大。
+            allies = [u for u in living(teams[unit["direct"]]) if u is not unit]
+            if allies:
+                lowest = min(allies, key=lambda u: (u["ap"], u["pos"]))
+                granted = int(effect(unit, 9000600, "value2"))
+                if granted:
+                    # 不新增 break 动画源：原包该族资源是否可用未确认，只发怒气状态变更。
+                    event([change_ap(lowest, granted, provider=unit, supply=False)])
         if unit["ap"] >= 4 and 9000499 in unit["effects"]:
             changes = []
             if unit["dizzy"]:
@@ -1273,6 +1300,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                         act(actor, selected[0], reaction=True)
 
     def choose_combo(actor, friends, enemies):
+        # 前线机型：自身处于前排（阵位 < 8）时无法使用合体技能。
+        if 9000599 in actor["effects"] and actor["pos"] < 8:
+            return None
         general = config["general"][str(actor["cid"])]
         skill = config["combskill"].get(str(general["combskillid"]))
         if not skill:
@@ -1286,6 +1316,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 return None
             chance = config["combskillprobability"][str(skill["id"])][f"bout{min(10, round_number)}"]
             chance += effect(actor, 9000520)  # 心有灵犀：合体技能几率提升 value。
+            if 9000599 in actor["effects"]:
+                chance *= Fraction(1, 2)  # 前线机型：合体技能概率降低一半（按描述；value2=0.2 未采用）。
             return (skill, [actor["pos"]]) if roll(chance) else None
         if skill["id"] not in MULTI_COMBOS:
             raise ValueError(f"尚不支持该合体技能 {skill['id']}")
@@ -1319,6 +1351,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if round_number <= actor.get("chan_combo_until", 0):
             chance = 1
         chance += effect(actor, 9000520)  # 心有灵犀：合体技能几率提升 value。
+        if 9000599 in actor["effects"]:
+            chance *= Fraction(1, 2)  # 前线机型：合体技能概率降低一半（按描述；value2=0.2 未采用）。
         return (skill, participants) if candidates and roll(chance) else None
 
     def passive_after(actor, skill, combined, hits, slain, reaction, base_skill):
@@ -1696,6 +1730,13 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             extra = sorted((u for u in candidates.values() if u["hp"] > 0 and not u["hidden"] and u not in selected),
                            key=lambda u: (Fraction(u["hp"], u["maxhp"]) if skill["kind"] == "gain" else 0, u["pos"]))
             selected += extra[:int(effect(actor, 9000528))]
+        if (skill and not combined and 9000598 in actor["effects"] and actor["pos"] > 7
+                and effect(actor, 9000598, "value2")):
+            # 后援机型：自身处于后排（阵位 > 7）时，个人技能目标增加 value2 个。
+            candidates = friends if skill["kind"] == "gain" else enemies
+            extra = sorted((u for u in candidates.values() if u["hp"] > 0 and not u["hidden"] and u not in selected),
+                           key=lambda u: (Fraction(u["hp"], u["maxhp"]) if skill["kind"] == "gain" else 0, u["pos"]))
+            selected += extra[:int(effect(actor, 9000598, "value2"))]
         if not skill and not forced_target and 9000688 in actor["effects"] and roll(effect(actor, 9000688)):
             # 进击：普通攻击有 value 概率多打 value2 个目标，反击/续击不重复触发。
             extra = sorted((u for u in enemies.values() if u["hp"] > 0 and not u["hidden"] and u not in selected),
@@ -1724,6 +1765,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         tongtian = bool(skill) and not combined and (config["general"][str(actor["cid"])]["init_cid"] or actor["cid"]) == 10839
         lowest = min((u for u in living(enemies) if not u["hidden"]), key=lambda u: (Fraction(u["hp"], u["maxhp"]), u["pos"]), default=None)
         slain = []
+        # 强心剂+：被太乙真人恢复过的角色，伤害增加「最大单次恢复量 ÷ (敌方存活数 + value)」。
+        heal_row = actor.get("taiyi_heal_row")
+        taiyi_bonus = (int(Fraction(actor["taiyi_heal_bonus"], len(living(enemies)) + int(heal_row["value"])))
+                       if heal_row and actor.get("taiyi_heal_bonus") else 0)
         if combo_id == 13077:
             critical_targets = {u["pos"] for u in rng.sample(selected, min(4, len(selected)))}
         male_count = sum(config["general"][str(u["cid"])]["sex"] == "nan" and config["general"][str(u["cid"])]["name"] != "主角"
@@ -1738,6 +1783,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 coefficient, growth = map(Fraction, skill["atk-param"].split(";")[:2])
                 multiplier = 1 + max(0, old_ap - skill["ap"]) * Fraction(str(skill["ap_up"]))
                 amount = int(stat(actor, "atk") * (coefficient + (0 if combined else growth * max(0, actor.get("skilllevel", 0) - 1))) * multiplier)
+                if not combined and 9000599 in actor["effects"]:
+                    # 前线机型：个人技能（非合体）生命恢复效果增加 value。
+                    amount = int(amount * (1 + effect(actor, 9000599)))
                 destinations.append(change_hp(target, -amount, healing=True, healer=actor))
                 if 9000500 in actor["effects"] and target["ap"] < effect(actor, 9000500) and roll(effect(actor, 9000500, "value2")):
                     destinations.append(change_ap(target, 2, provider=actor))
@@ -1795,7 +1843,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     and target["states"].get("invincible", 0) <= round_number):
                 shared = [u for u in living(enemies) if u is target or config["general"][str(u["cid"])]["region"] == "13"]
             amount = damage(attacker, defender, config, skill_id, critical, multiplier=multiplier, combo=combined,
-                            flat=actor["flat_out"] - target["flat_in"],
+                            flat=actor["flat_out"] - target["flat_in"] + taiyi_bonus,
                              critical_multiplier=Fraction(3, 2) + Fraction(stat(actor, "criticaldmg"), 100)
                              + (Fraction(1, 10) if combo_id == 12627 else 0), clip=False)
             portion, remainder = divmod(amount, len(shared))
@@ -1888,6 +1936,37 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             destinations.append(hit)
         if hit_targets:
             actor["strikes"] += 1
+        if combined and 9000598 in actor["effects"] and actor["hp"] > 0:
+            # 后援机型：本地把「合体技能的眩晕目标数量+1」解释为发动合体技时额外眩晕
+            # 1 个尚未眩晕的存活敌人（太乙自身合体技 12988 的 effect 为空，严格要求
+            # 自带眩晕会让该技能永不生效）。按阵位取，不新增 break 动画源。
+            for enemy in living(enemies):
+                if not enemy["dizzy"] and not enemy.get("hidden") and stun(enemy):
+                    event([dest(enemy, u={"u": "dizzy", "w": True})])
+                    break
+        if (hit_targets and not reaction and not followup and 9000601 in actor["effects"]
+                and actor["hp"] > 0 and trigger(actor, 9000601)):
+            # 精准支援：攻击时敌方怒气最高者 >= value2 则（仅 PVP）降至 value；
+            # 未实际降怒则把己方怒气最低的其他角色恢复到 value2 点。每回合最多 1 次。
+            changes, reduced = [], False
+            threshold = int(effect(actor, 9000601, "value2"))
+            target_ap = int(effect(actor, 9000601))
+            if pvp:
+                top = max((u["ap"] for u in living(enemies) if not u.get("hidden")), default=0)
+                if top >= threshold:
+                    for enemy in living(enemies):
+                        if enemy["ap"] == top and enemy["ap"] > target_ap:
+                            before = enemy["ap"]
+                            changes.append(change_ap(enemy, target_ap - before, provider=actor))
+                            reduced = reduced or enemy["ap"] < before
+            if not reduced:
+                allies = [u for u in living(friends) if u is not actor]
+                if allies:
+                    lowest_ally = min(allies, key=lambda u: (u["ap"], u["pos"]))
+                    if lowest_ally["ap"] < threshold:
+                        changes.append(change_ap(lowest_ally, threshold - lowest_ally["ap"], provider=actor))
+            if changes:
+                event(changes)
         if skill and not reaction and actor["hp"] > 0:
             # 无限光波/能量防护：释放技能按 value 概率附加印记。诅咒印记持续 1 回合，
             # 守护印记按层数免疫后续攻击；印记只改内部状态，不伪造原生动画资源。
@@ -1903,6 +1982,22 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 change = status_damage(target, "firing", min(actor["maxhp"], int(target["maxhp"] * effect(actor, 9000803))), 2, actor)
                 if change:
                     destinations.append(change)
+        if (skill and not reaction and not followup and 9000603 in actor["effects"]
+                and actor["hp"] > 0):
+            # 纳米科技：释放怒气技能后，若自身生命低于敌方生命最高者则交换。
+            # PVE 怪物减少量不超过太乙真人生命上限的 value 倍；交换按状态变更入同一战报事件。
+            candidates = [u for u in living(enemies) if not u.get("hidden")]
+            if candidates:
+                richest = max(candidates, key=lambda u: (u["hp"], -u["pos"]))
+                gap = richest["hp"] - actor["hp"]
+                if gap > 0:
+                    delta = min(gap, actor["maxhp"] * int(effect(actor, 9000603))) if not pvp else gap
+                    drain = change_hp(richest, delta, kind="other", shield=False, bypass_barrier=True)
+                    actual = drain["m"]["m"] + drain["m"].get("M", 0)
+                    destinations.append(drain)
+                    if actual > 0:
+                        # 只按敌人实际减少的生命值回复，避免无敌/减伤挡下时凭空加血。
+                        destinations.append(change_hp(actor, -actual, healing=True, healer=actor, kind="other"))
         destinations.append(dest(actor, ap=actor["ap"], E=False))
         if skill and not free_combo and skill["ap_give"] and (not followup or not combined):
             destinations.append(change_ap(actor, skill["ap_give"]))
