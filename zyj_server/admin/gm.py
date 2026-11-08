@@ -34,6 +34,10 @@ def catalog(config):
     rows = []
     seen = set()
 
+    # 0. 仙元：作为资源存放在角色数据里，不在 props 表中，这里补进物品库，邮件/发放与普通道具一样添加。
+    seen.add(1025)
+    rows.append({"cid": 1025, "name": "仙元", "kind": "道具", "description": "仙界货币，用于仙界相关功能", "max": 1000000})
+
     # 1. 道具 (props)
     if "props" in config:
         for key, row in config["props"].items():
@@ -199,6 +203,8 @@ def validate(data, items):
         if any(type(data[key]) is not int or not (0 if key in ("count", "position") else 1) <= data[key] < (1 << 31)
                for key in PLAYER_ACTIONS[action]):
             raise ValueError("物品、武将或数量参数无效")
+        if action == "inventory" and data["cid"] == 1025:
+            raise ValueError("仙元是角色资源，请通过发放物品或邮件调整")
         if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片", "战宠碎片", "宝物碎片", "装备碎片"):
             raise ValueError("只能修正目录中的道具或碎片数量")
         if action == "formation" and data["position"] > 7:

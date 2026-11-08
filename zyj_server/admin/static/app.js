@@ -833,7 +833,7 @@ async function loadMails(offset = 0) {
       if (r.attachments) {
         for (const [cid, cnt] of Object.entries(r.attachments)) {
           const item = info?.common_items?.find((it) => it.cid === Number(cid)) || {
-            name: cid === "1001" ? "元宝" : cid === "1000" ? "银币" : cid === "1002" ? "体力" : cid === "1003" ? "精力" : cid === "1008" ? "贵族经验" : `物品${cid}`
+            name: cid === "1001" ? "元宝" : cid === "1000" ? "银币" : cid === "1002" ? "体力" : cid === "1003" ? "精力" : cid === "1025" ? "仙元" : cid === "1008" ? "贵族经验" : `物品${cid}`
           };
           parts.push(`${item.name || cid} x${number(cnt)}`);
         }
