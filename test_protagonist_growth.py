@@ -530,6 +530,105 @@ class ProtagonistGrowthTests(unittest.TestCase):
         # 彩金满阶后只能停在26阶。
         self.assert_rejected(1057, values=[1])
 
+    def gold_awaken(self, scopes):
+        """把主角推进到指定彩金阶并完成一级觉醒，返回 (IID, 觉醒前raw, 觉醒配置行)。"""
+        iid = self.gold_hero(scopes)
+        row = self.config["protagonist_awaken"]["1"]
+        self.pay_materials(row["consume"])
+        before = self.gen()
+        self.success(1, 1058, values=[iid, 0]); self.refresh()
+        return iid, before, row
+
+    def assert_gold_awakening_keeps_fields(self, scopes):
+        iid, before, row = self.gold_awaken(scopes)
+        after = self.gen()
+        stage = development.gold_limit(self.config) + len(scopes)
+        self.assertEqual((protocol.pb_get_varint(before, 4), protocol.pb_get_varint(after, 4)), (stage, stage))
+        self.assertEqual(protocol.pb_get_varint(after, 18), 1)
+        for name, field in (("atk", 6), ("def", 7), ("hp", 8)):
+            self.assertEqual(protocol.pb_get_varint(after, field),
+                             protocol.pb_get_varint(before, field) + row[name], name)
+        # 觉醒只写18与主属性/战力；飞升、仙/金属性、彩金技能与阵营全部原样保留。
+        for field in (1, 3, 4, 9, 23, 24, 25, 26, 34, 35, 36, 37, 40):
+            self.assertEqual(protocol.pb_get_varint(after, field),
+                             protocol.pb_get_varint(before, field), field)
+        fairy, camp = self.gold_fields(scopes)
+        self.assertEqual(protocol.pb_get_varint(after, 40), camp)
+        for field, value in fairy.items():
+            self.assertEqual(protocol.pb_get_varint(after, field), value)
+        self.assertEqual(protocol.pb_get_varint(after, 34), fairy[25] + fairy[26] + fairy[24] // 10)
+        attack, _ = battle.rosters(self.save, self.config["copy"]["42101"]["1"], self.config)
+        unit = next(u for u in attack.values() if u["iid"] == iid)
+        self.assertEqual(unit["awakening"], 1)
+        self.assertEqual(unit["partner_skills"], [self.config["general"][str(protocol.pb_get_varint(before, 1))]
+                                                  [f"gold{i}_will_skills_{scopes[i-1]}"] for i in range(1, len(scopes) + 1)])
+        self.reconnect(); self.refresh()
+        self.assertEqual((protocol.pb_get_varint(self.gen(), 4), protocol.pb_get_varint(self.gen(), 18)), (stage, 1))
+        return iid, after
+
+    def test_gold_stage_24_lead_awakening_keeps_gold_fields_and_reconnects(self):
+        """+24（彩金一阶）不再被「暂不支持此主角的高级觉醒属性」拒绝。"""
+        self.assert_gold_awakening_keeps_fields((1,))
+
+    def test_gold_stage_25_lead_awakening_keeps_gold_fields_and_reconnects(self):
+        """+25（彩金二阶）同样可觉醒，两阶技能记录与阵营不变。"""
+        self.assert_gold_awakening_keeps_fields((1, 2))
+
+    def test_gold_max_lead_awakening_keeps_gold_fields_and_battle_stats(self):
+        """+26彩金满阶主角仍可继续觉醒，觉醒只改主属性与18字段。"""
+        iid, after = self.assert_gold_awakening_keeps_fields((1, 2, 3))
+        self.assertEqual(protocol.pb_get_varint(after, 4), 26)
+        # 满阶彩金与最高觉醒档并存时，战斗侧仍读到正确的增减伤与三阶彩金技能。
+        raw = protocol.pb_set_varint(self.gen(), 18, 130)
+        player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+        snapshot = protocol.pb_set_field(bytes.fromhex(self.save["protagonist_snapshot"]), 10, 2, raw)
+        self.save["protagonist_snapshot"] = snapshot.hex()
+        attack, _ = battle.rosters(self.save, self.config["copy"]["42101"]["1"], self.config)
+        unit = next(u for u in attack.values() if u["iid"] == iid)
+        self.assertEqual((unit["awakening"], unit["skilllevel"]), (130, 0))
+        self.assertEqual(unit["adddmgpct"], Fraction(57, 100))
+        self.assertEqual(unit["partner_skills"], [9001001, 9001005, 9001009])
+        self.assert_rejected(1058, values=[iid, 130])
+
+    def test_gold_lead_awakening_charges_real_costs_and_rejects_tampered_fields(self):
+        iid = self.gold_hero((1, 2, 3))
+        row = self.config["protagonist_awaken"]["1"]
+        # 材料不足：整笔拒绝且存档不变。
+        self.assert_rejected(1058, values=[iid, 0])
+        self.pay_materials(row["consume"])
+        before = copy.deepcopy(self.save)
+        coin = self.save["role_state"]["coin"]
+        original = self.gen()
+        cases = (
+            ("未知高级字段38", protocol.pb_set_varint(original, 38, 1)),
+            ("仙属性被篡改", protocol.pb_set_varint(original, 24, (protocol.pb_get_varint(original, 24) or 0) + 1)),
+            ("彩金技能记录无效", protocol.pb_set_varint(original, 35, 9)),
+            ("彩金阵营不一致", protocol.pb_set_varint(original, 40, 9)),
+            ("进阶超过彩金上限", protocol.pb_set_varint(original, 4, 27)),
+            ("非彩金阶却带彩金技能", protocol.pb_set_varint(protocol.pb_set_varint(original, 4, 23), 35, 1)),
+            ("field41嵌入未知字段", protocol.pb_set_field(original, 41, 2, protocol.encode_pb_field(1, 0, 7))),
+        )
+        for label, raw in cases:
+            with self.subTest(case=label):
+                player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+                unchanged = copy.deepcopy(self.sessions[1].save)
+                disk = self.store.path(1).read_bytes()
+                frames = self.request(1, 1058, values=[iid, 0])
+                self.assertEqual([mid for mid, _ in frames], [999999, 1999])
+                message = next(v for n, w, v in protocol.iter_pb_fields(frames[1][1]) if (n, w) == (1, 2)).decode()
+                self.assertIn("主角", message, (label, message))
+                self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (unchanged, disk))
+        player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, original))
+        # 保存失败时整笔回滚，之后仍可正常觉醒。
+        disk = self.store.path(1).read_bytes()
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.request(1, 1058, values=[iid, 0])
+        self.assertEqual((self.save, self.store.path(1).read_bytes()), (before, disk))
+        self.success(1, 1058, values=[iid, 0]); self.refresh()
+        self.assertEqual(protocol.pb_get_varint(self.gen(), 18), 1)
+        self.assertEqual(self.save["role_state"]["coin"], coin - 50000)
+        self.assertEqual((self.props(20278), self.props(20200)), (0, 0))
+
     def test_gold_soaring_after_advance_preserves_gold_attributes(self):
         iid = self.gold_hero((1,))
         fairy, _ = self.gold_fields((1,))

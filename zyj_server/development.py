@@ -281,10 +281,9 @@ def prepare(opcode, save, body, config):
         raw = generals.get(iid)
         if not raw or config["general"][str(pb_get_varint(raw, 1))]["actor"] != "lead":
             raise ValueError("主角觉醒状态缺失")
-        if ((pb_get_varint(raw, 4) or 0) > 23
-                or any(pb_get_varint(raw, n) for n in range(21, 41) if n not in LEAD_SOARING_FIELDS)
-                or any(any(ids(v)) for n, w, v in iter_pb_fields(raw) if (n, w) == (41, 2))):
-            raise ValueError("暂不支持此主角的高级觉醒属性")
+        # 彩金 +24~+26 主角同样要能继续觉醒：飞升等级、仙/金属性、彩金技能与阵营
+        # 由 lead_fairy 按真实阶数严格校验；旧版「进阶>23 一律拒绝」会把满阶彩金
+        # 必需的 35/36/37/40 字段误判为不支持的高级觉醒属性。
         lead_fairy(raw, config)
         current = pb_get_varint(raw, 18) or 0
         row = config["protagonist_awaken"].get(str(current + 1))
