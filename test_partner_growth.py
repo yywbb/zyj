@@ -165,8 +165,117 @@ class PartnerGrowthTests(unittest.TestCase):
         growth = self.save["partner_growth_state"]
         cap = self.config["Immortal_level"]["1"]["0"]["character"]
         growth["research"][str(self.iid)] = [0, cap, 0, 0, cap]+[0]*5
+        before = self.gen(self.iid)
         self.paid(5513, [self.iid, 1, 1, 0, cap, growth["serial"]])
-        self.assertEqual(partner_growth.research(self.save, self.iid, self.config), [1, 0, 0, 0, 0]+[0]*5)
+        # 升学是纯增益：本档点数保留，只追加已完成档的阶段属性。
+        self.assertEqual(partner_growth.research(self.save, self.iid, self.config), [1, cap, 0, 0, cap]+[0]*5)
+        changed = self.gen(self.iid)
+        row = self.config["Immortal_level"]["1"]["0"]
+        self.assertEqual(protocol.pb_get_varint(changed, 8)-protocol.pb_get_varint(before, 8),
+                         int(row["stageAttr1"].split(",")[1]))
+        self.assertEqual(protocol.pb_get_varint(changed, 6)-protocol.pb_get_varint(before, 6),
+                         int(row["stageAttr2"].split(",")[1]))
+        self.assertGreater(protocol.pb_get_varint(changed, 20), protocol.pb_get_varint(before, 20))
+
+    def level_up(self, kind, level, split):
+        """在存档副本上走一次真实 5513 升学；把伙伴置为主阵以校验角色战力同步。"""
+        config = self.config
+        row = config["Immortal_level"][str(kind)][str(level)]
+        cap = row["character"]
+        progress = [0]*10
+        offset = (kind-1)*5
+        progress[offset:offset+5] = [level, *split, cap]
+        working = copy.deepcopy(self.save)
+        working["partner_growth_state"] = {"research": {str(self.iid): progress}, "serial": 0, "checked_at": 0}
+        body = b"".join(protocol.encode_pb_field(1, 0, v) for v in (self.iid, kind, 1, level, cap, 0))
+        original = formation.records
+
+        def active(world, kind_, sub):
+            return {self.iid: b""} if (kind_, sub) == (4, 2) else original(world, kind_, sub)
+
+        with patch.object(formation, "records", side_effect=active):
+            _, costs, update = partner_growth.prepare(5513, working, body, config, self.now, 7)
+        changed = next(data for _, wire, data in protocol.iter_pb_fields(update) if wire == 2)
+        return working, progress, changed, costs, row
+
+    def test_research_level_up_keeps_points_and_never_lowers_stats_or_power(self):
+        weights = {1: (59012, 81708, 90000), 2: (49934, 90786, 90000)}
+        for kind, shares in weights.items():
+            total = sum(shares)
+            for level in (0, 5, 20, 33):
+                cap = self.config["Immortal_level"][str(kind)][str(level)]["character"]
+                balanced = [cap*x//total for x in shares]
+                balanced[2] = cap-balanced[0]-balanced[1]
+                for split in (balanced, [0, cap, 0], [cap, 0, 0], [0, 0, cap]):
+                    with self.subTest(kind=kind, level=level, split=split):
+                        working, progress, changed, costs, row = self.level_up(kind, level, split)
+                        offset = (kind-1)*5
+                        after = partner_growth.research(working, self.iid, self.config)
+                        self.assertEqual(after[offset:offset+5], [level+1, *split, sum(split)])
+                        stage = {}
+                        for i in (1, 2, 3):
+                            name, amount = row[f"stageAttr{i}"].split(",")
+                            stage[name] = stage.get(name, 0)+int(amount)
+                        before_stats = partner_growth.research_stats(progress, self.config)
+                        after_stats = partner_growth.research_stats(after, self.config)
+                        for name, value in before_stats.items():
+                            self.assertEqual(after_stats[name]-value, stage.get(name, 0), name)
+                        raw = self.gen(self.iid)
+                        delta = protocol.pb_get_varint(changed, 20)-protocol.pb_get_varint(raw, 20)
+                        expected = (stage.get("hp", 0)//10+stage.get("atk", 0)+stage.get("def", 0)
+                                    +stage.get("adddmg", 0)+stage.get("subdmg", 0))
+                        # HP 按整十分计战力，增量允许因旧值余量多 1 分，但不能为负。
+                        self.assertIn(delta, (expected, expected+1))
+                        self.assertGreater(delta, 0)
+                        self.assertEqual(working["role_state"]["power"]-self.save["role_state"]["power"], delta)
+                        self.assertEqual(working["role_state"]["power_all"]-self.save["role_state"]["power_all"], delta)
+                        self.assertEqual(costs, partner_growth.pairs(row["extraConsume"]))
+
+    def test_research_level_up_chain_keeps_serial_gates_and_rejects_bad_next_cap(self):
+        config = self.config
+        cap = config["Immortal_level"]["1"]["0"]["character"]
+        next_cap = config["Immortal_level"]["1"]["1"]["character"]
+        self.assertGreater(next_cap, cap)
+        working = copy.deepcopy(self.save)
+        working["partner_growth_state"] = {"research": {str(self.iid): [0, cap, 0, 0, cap]+[0]*5},
+                                            "serial": 0, "checked_at": 0}
+
+        def call(values, seed=7):
+            body = b"".join(protocol.encode_pb_field(1, 0, v) for v in values)
+            return partner_growth.prepare(5513, working, body, config, self.now, seed)
+
+        state = working["partner_growth_state"]
+        call([self.iid, 1, 1, 0, cap, 0])
+        self.assertEqual((state["research"][str(self.iid)][:5], state["serial"]), ([1, cap, 0, 0, cap], 1))
+        # 新档上限更高，旧心性保留但不满，不能连点升学；普通进修继续累计。
+        with self.assertRaisesRegex(ValueError, "进修条件不足"):
+            call([self.iid, 1, 1, 1, cap, 1])
+        call([self.iid, 1, 0, 1, cap, 1], seed=11)
+        grown = state["research"][str(self.iid)]
+        self.assertGreater(grown[4], cap)
+        self.assertEqual(grown[4], sum(grown[1:4]))
+        self.assertEqual(state["serial"], 2)
+        grown[1] += next_cap-grown[4]
+        grown[4] = next_cap
+        call([self.iid, 1, 1, 1, next_cap, 2])
+        final = state["research"][str(self.iid)]
+        self.assertEqual(final[:5], [2, final[1], final[2], final[3], next_cap])
+        self.assertEqual(final[4], sum(final[1:4]))
+        self.assertEqual(state["serial"], 3)
+        partner_growth.state(working, config)
+        # 满级不再收费升学；新档上限异常时扣费前拒绝。
+        top = len(config["Immortal_level"]["1"])-1
+        top_cap = config["Immortal_level"]["1"][str(top)]["character"]
+        working["partner_growth_state"] = {"research": {str(self.iid): [top, top_cap, 0, 0, top_cap]+[0]*5},
+                                            "serial": 0, "checked_at": 0}
+        with self.assertRaisesRegex(ValueError, "已满级"):
+            call([self.iid, 1, 1, top, top_cap, 0])
+        working["partner_growth_state"] = {"research": {str(self.iid): [0, cap, 0, 0, cap]+[0]*5},
+                                            "serial": 0, "checked_at": 0}
+        shrunk = {**config["Immortal_level"]["1"]["1"], "character": cap-1}
+        with patch.dict(config["Immortal_level"]["1"], {"1": shrunk}):
+            with self.assertRaisesRegex(ValueError, "超出新档上限"):
+                call([self.iid, 1, 1, 0, cap, 0])
 
     def test_missing_gates_insufficient_materials_and_save_failure_are_atomic(self):
         self.put_hero(awake=0)
@@ -366,7 +475,7 @@ class PartnerGrowthTests(unittest.TestCase):
 
     def test_actual_packaged_awakening_and_research_callbacks_use_server_bound_snapshots(self):
         self.put_hero(awake=0)
-        for cid in (20278, 20017, 20661):
+        for cid in (20278, 20017, 20661, 20662):
             self.grant(cid, 10000)
         lua = self.network_lua(native_protobuf=True)
         code = self.client_scripts()["assets/scripts/gamedata.so"].decode()
@@ -396,6 +505,26 @@ class PartnerGrowthTests(unittest.TestCase):
         result = lua.globals().NetGeneralXiuLianCallBack(lua.table_from({b"rbuf": self.success(1, mid, raw=raw), b"ser": 3}))
         self.refresh()
         self.assertEqual(result[b"generalXiuLian"][b"heart1"], partner_growth.research(self.save, self.iid, self.config)[4])
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.save["role_state"]["coin"])
+        # 升学走同一套打包回调：本档点数保留，客户端把点数与累计阶段属性一起显示，战力上涨。
+        cap = self.config["Immortal_level"]["1"]["0"]["character"]
+        state = self.save["partner_growth_state"]
+        state["research"][str(self.iid)] = [0, cap, 0, 0, cap]+[0]*5
+        _, mid, raw = lua.globals().UIGeneralXiuLianInfoCallBack(query)
+        lua.globals().NetGeneralXiuLianInfoCallBack(lua.table_from({b"rbuf": self.success(1, mid, raw=raw), b"ser": 4}))
+        request = lua.table_from({b"iid": self.iid, b"xiuLian": 1, b"isBreak": 1, b"partnerView": view()})
+        mode, mid, raw = lua.globals().UIGeneralXiuLianCallBack(request)
+        self.assertEqual((mode, mid, protocol.parse_ids_pb(raw)[:3]), (1, 5513, [self.iid, 1, 1]))
+        before = protocol.pb_get_varint(self.gen(self.iid), 20)
+        result = lua.globals().NetGeneralXiuLianCallBack(lua.table_from({b"rbuf": self.success(1, mid, raw=raw), b"ser": 5}))
+        self.refresh()
+        after = partner_growth.research(self.save, self.iid, self.config)
+        self.assertEqual(after[:5], [1, cap, 0, 0, cap])
+        self.assertEqual(result[b"generalXiuLian"][b"heart1"], cap)
+        stats = partner_growth.research_stats(after, self.config)
+        for key, name in ((b"attr1", "hp"), (b"attr2", "atk"), (b"attr3", "adddmg")):
+            self.assertEqual(result[b"generalXiuLian"][key], stats[name])
+        self.assertGreater(protocol.pb_get_varint(self.gen(self.iid), 20), before)
         self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.save["role_state"]["coin"])
 
     def test_actual_ui_context_rejects_closed_reopened_or_switched_partner(self):

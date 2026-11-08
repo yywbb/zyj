@@ -195,6 +195,10 @@ def breakthrough(save, raw, scope, config, *, preview=False):
 
 
 def research_stats(values, config):
+    """累计属性 = 当前三类心性点数 × 配置倍率 + 所有已完成档的 stageAttr。
+
+    升学只递增等级、保留点数，因此本函数对升学的结果必然单调不降。
+    """
     stats = {"hp": 0, "atk": 0, "def": 0, "adddmg": 0, "subdmg": 0}
     for offset, kind in ((0, "1"), (5, "2")):
         for i in range(1, 4):
@@ -297,9 +301,15 @@ def prepare(opcode, save, body, config, now, seed):
         before = research_stats(progress, config)
         costs = pairs(step["extraConsume"] if method else step["consumeEveryTimes"])
         if method:
-            if str(level+1) not in config["Immortal_level"][str(kind)]:
+            next_step = config["Immortal_level"][str(kind)].get(str(level+1))
+            if not next_step:
                 raise ValueError("伙伴进修已满级")
-            progress[offset:offset+5] = [level+1, 0, 0, 0, 0]
+            # 升学是纯增益：保留本档心性点数，只追加已完成档的 stageAttr。
+            # 旧实现把本档点数整组清零再按 stageAttr 折算，而配置里的阶段属性
+            # 战力价值只有被清掉点数的约 2/3，会让三围／固定增减伤／战力一起倒退。
+            if heart > next_step["character"]:
+                raise ValueError("伙伴进修心性超出新档上限")
+            progress[offset] = level+1
         else:
             rng = random.Random(seed)
             attributes = config["Immortal_type"][str(kind)]
