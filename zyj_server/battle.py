@@ -13,9 +13,10 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
 QUEENS = (10595, 10817)
 MAX_ROUNDS = 30
-# shortcut: 已接玉鼎、元始、通天、广成子、太乙，其他彩金技能须实现并回归后才允许付费转换。
+# shortcut: 已接玉鼎、元始、通天、广成子、太乙、魔吕布、如来，其他彩金技能须实现并回归后才允许付费转换。
 PARTNER_EFFECTS = {*range(9000742, 9000748), *range(9000547, 9000553), *range(9000678, 9000684),
-                   *range(9000688, 9000694), *range(9000598, 9000604)}
+                   *range(9000688, 9000694), *range(9000598, 9000604),
+                   *range(9000571, 9000577), *range(9000604, 9000610)}
 # 广成子彩金技能 9001142–9001147：诅咒/守护印记比例取自配置描述，配置无独立字段。
 # 9000692 同时是「专属神器S1」的行ID（type=0、code 回退到自身ID），仙命加成只认这两行。
 GUANGCHENGZI_AURA_SKILLS = (9001146, 9001147)
@@ -24,6 +25,11 @@ GUANGCHENGZI_AURA_SKILLS = (9001146, 9001147)
 # 9001231「过载」的效果号，两行 value/value2/描述完全一致，共享同一实现。
 TAIYI_AURA_SKILLS = (9001074, 9001075)
 TAIYI_HEAL_SHARING = 9000602
+# 魔吕布 9001058–9001063（族 9000571–9000576）与如来 9001076–9001081（族 9000604–9000609）。
+# 9000606 同时是「无相」9000671 的效果号：按 effects[code]["id"] 区分十善业道与无相，
+# 前者按 value2 概率回 1 怒、后者必定回 value2 怒，不能混用。
+# 9001081「妙法莲华」把 9000604–9000607 的触发概率统一提高到 100%（boosted()）。
+RULAI_LOTUS = 9000609
 CURSE_ATTACK = Fraction(1, 10)
 CURSE_DEFENSE = Fraction(1, 5)
 CURSE_DAMAGE = Fraction(2, 5)
@@ -377,8 +383,13 @@ def _prepare_teams(teams, config):
             unit.update(pos=pos, direct=direct, ap=initial_ap, dizzy=False, dot=None, firing=None, buffs={}, states={},
                         emergency=False, strikes=0, guard=0, effects={}, passive_rows=rows,
                         flat_out=unit.get("flat_out", 0), flat_in=unit.get("flat_in", 0), cover_d=unit.get("cover_d", 0))
+            # 下列战斗中间状态允许从 unit 传入（定向回归可精确构造），默认全为未触发。
             unit.update(passive_buffs={}, trigger_counts={}, received_hits=0, casts=0, fire_seeds=0,
-                        hidden=False, heal_shield=0, ap_self_guard=0, ap_received_guard=0)
+                        hidden=False, heal_shield=0, ap_self_guard=0, ap_received_guard=0,
+                        combo_casts=unit.get("combo_casts", 0), buddha_seal=unit.get("buddha_seal"),
+                        war_god_until=unit.get("war_god_until", 0),
+                        mercy_until=unit.get("mercy_until", 0),
+                        nirvana_pending=unit.get("nirvana_pending", False))
             unit["cover_d2"] = unit["cover_d"]
             added, reduced = unit.get("adddmgpct", 0), unit.get("subdmgpct", 0)
             if added <= -1 or min(reduced, unit["cover_d"]) < 0 or not 0 <= unit.get("cover_p", 0) <= 100:
@@ -526,6 +537,16 @@ def _prepare_teams(teams, config):
                     for target in team.values():
                         if config["general"][str(target["cid"])]["quality"] == 7:
                             add(target, "atk", Fraction(str(row["value2"])))
+                elif code in (9000575, 9000576, 9000608, RULAI_LOTUS):
+                    # 战神血统/封印巨戟 +40000 普通攻击、大涅槃/妙法莲华 +32000 普通防御：
+                    # 配置描述 400000/320000 仙属性，按既有 0.1 折算取 value2；同英雄两种选择共用一份。
+                    group = 9000575 if code in (9000575, 9000576) else 9000608
+                    if (direct, group) in applied:
+                        continue
+                    applied.add((direct, group))
+                    for target in team.values():
+                        if config["general"][str(target["cid"])]["quality"] == 7:
+                            add(target, "atk" if group == 9000575 else "def", Fraction(str(row["value2"])))
                 elif row["id"] in GUANGCHENGZI_AURA_SKILLS and (direct, row["id"]) not in applied:
                     # 无限光波/能量防护：开场给己方彩金将加 value2 仙命，按技能行去重、两技能可叠加。
                     applied.add((direct, row["id"]))
@@ -547,6 +568,10 @@ def _prepare_teams(teams, config):
                     if 9000490 not in provider["effects"]:
                         add(provider, "dmg", value)
     for direct, team in teams.items():
+        # 妙法莲华：上阵时己方全体仙抗暴 +10%，本地折算为 10 点韧性（暴击率按百分点相减）。
+        if any(RULAI_LOTUS in u["effects"] for u in team.values()):
+            for target in team.values():
+                add(target, "resilience", 10)
         reduction = max((Fraction(str(u["effects"][9100006]["value"])) for u in team.values() if 9100006 in u["effects"]), default=0)
         tower = max((Fraction(str(u["effects"][9000761]["value"])) for u in team.values() if 9000761 in u["effects"]), default=0)
         for unit in team.values():
@@ -653,6 +678,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
     def roll(chance):
         return chance > 0 and rng.random() < min(1, chance)
 
+    def chance_hit(chance):
+        """概率已满时不消耗随机数，避免新被动改变既有战斗的确定性序列。"""
+        return chance >= 1 or roll(chance)
+
     def dest(unit, **values):
         return {"r": unit["direct"], "p": unit["pos"], **values}
 
@@ -725,6 +754,12 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             multiplier *= max(0, 1 - effect(unit, 9000778) * round_actions)
             multiplier *= max(0, 1 - unit["ap_self_guard"]) * max(0, 1 - unit["ap_received_guard"])
             multiplier *= 1 - unit["fire_seeds"] * Fraction(2, 25)
+            if unit.get("buddha_seal") is not None:
+                multiplier *= 1 - unit["buddha_seal"]  # 金刚佛印：受到的伤害减少 80%。
+            if unit.get("war_god_until", 0) > round_number:
+                multiplier *= 1 - effect(unit, 9000575)  # 战神：受伤减少 50%。
+            # 精彩操作：每放 1 次合体技减少 5% 受伤，按次数线性累加。
+            multiplier *= max(0, 1 - effect(unit, 9000573, "value2") * unit.get("combo_casts", 0))
             if unit["states"].get("qianlong", 0) > round_number:
                 multiplier *= 1 - effect(unit, 9000795, "value2")
             if unit["heal_shield"] and any(9000776 in u["effects"] for u in teams[unit["direct"]].values()):
@@ -819,6 +854,14 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             value += max((effect(u, 9000584) if name == "critical" else effect(u, 9000584, "value2") * 100 for u in living(allies)), default=0)
         if name in ("def", "resilience") and any(9000413 in u["effects"] and u["hp"] > 0 for u in teams[unit["direct"]].values()):
             value += unit["def"] * Fraction(1, 5) if name == "def" else 10
+        if name == "dodge":
+            # 精彩操作：每次合体技 +10 点闪避（配置 value=10 表示 10 个百分点）。
+            value += effect(unit, 9000573) * unit.get("combo_casts", 0)
+        if name == "critical":
+            # 大涅槃：存活时降低同阵位敌方 100% 仙暴击（value=10 按 10 点/单位折算）。
+            rival = enemies.get(unit["pos"])
+            if rival and rival["hp"] > 0 and 9000608 in rival["effects"]:
+                value *= max(0, 1 - effect(rival, 9000608) / 10)
         result = int(value) + unit.get("pet_rates", {}).get(name, 0)
         if name in ("atk", "def") and unit.get("curse_marks", 0) and unit.get("curse_marks_until", 0) > round_number:
             result = int(result * (1 - (CURSE_ATTACK if name == "atk" else CURSE_DEFENSE)))
@@ -933,6 +976,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         dead = sum(u["hp"] <= 0 for team in teams.values() for u in team.values())
         multiplier *= 1 + (effect(actor, 9000431) + effect(actor, 9000488)) * dead
         multiplier *= 1 + actor.get("ramp_damage", 0) + actor.get("cast_damage", 0) + actor.get("kill_damage", 0)
+        if actor.get("war_god_until", 0) > round_number:
+            multiplier *= 1 + effect(actor, 9000575)  # 战神：最终伤害增加 50%。
         multiplier *= 1 + actor["fire_seeds"] * Fraction(2, 25)
         providers = list(teams[actor["direct"]].values())
         multiplier *= 1 + max((u.get("living_damage", 0) for u in providers if u["hp"] > 0), default=0)
@@ -1003,8 +1048,23 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     top = max(rivals, key=lambda u: (u["ap"], -u["pos"]))
                     passive_event(target, 9000518, [change_ap(top, -int(effect(target, 9000518, "value2")), provider=target)])
             if 9000606 in target["effects"]:
-                ally = min(living(teams[target["direct"]]), key=lambda u: (u["ap"], u["pos"]))
-                passive_event(target, 9000606, [change_ap(ally, int(effect(target, 9000606, "value2")), provider=target)])
+                row = target["effects"][9000606]
+                if row["id"] == 9001078:
+                    # 十善业道：60%（前排或妙法莲华 100%）给最低怒队友回 1 怒。
+                    chance = (Fraction(1) if target["pos"] < 8 or RULAI_LOTUS in target["effects"]
+                              else boosted(target, 9000606))
+                    granted, allowed = 1, chance_hit(chance)
+                else:
+                    # 无相：必定回 value2 点怒，不能套用十善业道的概率字段。
+                    granted, allowed = int(effect(target, 9000606, "value2")), True
+                allies = living(teams[target["direct"]])
+                if allies and granted and allowed:
+                    ally = min(allies, key=lambda u: (u["ap"], u["pos"]))
+                    passive_event(target, 9000606, [change_ap(ally, granted, provider=target)])
+            if target.get("buddha_seal") is not None:
+                changes = transfer_buddha_seal(target)
+                if changes:
+                    event(changes)
             if target["states"].get("qianlong", 0) > round_number:
                 target["hidden"] = True
                 passive_event(target, 9000795, [*cleanse(target), *set_state(target, "hide")])
@@ -1018,6 +1078,13 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 break
             unit = pending_deaths.pop(0)
             killer = unit.pop("killed_by", None)
+            if unit.get("buddha_seal") is not None:
+                changes = transfer_buddha_seal(unit)
+                if changes:
+                    event(changes)
+            # 慈悲：无法触发死亡技能，仍完成本次死亡结算但不执行任何被动。
+            if unit.get("mercy_until", 0) > round_number:
+                continue
             if unit["hp"] > 0:
                 continue
             if unit["heal_shield"]:
@@ -1135,6 +1202,62 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
     def living(team):
         return [u for _, u in sorted(team.items()) if u["hp"] > 0]
 
+    def boosted(unit, code):
+        """妙法莲华把携带者自身四个彩金技能的触发概率统一提高到 100%。"""
+        return Fraction(1) if RULAI_LOTUS in unit["effects"] else effect(unit, code, "value2")
+
+    def seal(provider, target, duration=1):
+        """统一封印出口：封印巨戟按概率延长 1 回合（每回合 1 次），大乘起信附加慈悲。
+
+        慈悲是纯内部状态，不新增原包状态资源；只禁反击/格挡与死亡技能。
+        """
+        if (9000576 in provider["effects"] and trigger(provider, 9000576)
+                and chance_hit(effect(provider, 9000576))):
+            duration += 1
+        changes = set_state(target, "skilllock", duration)
+        if changes and 9000607 in provider["effects"]:
+            chance = (Fraction(1) if provider["pos"] > 7 or RULAI_LOTUS in provider["effects"]
+                      else effect(provider, 9000607, "value2"))
+            if chance_hit(chance):
+                target["mercy_until"] = round_number + 1
+        return changes
+
+    def transfer_buddha_seal(unit):
+        """佛印受击或死亡后转移给阵位最靠前的其他存活己方；转回金刚携带者时按概率回 4 怒。"""
+        reduction = unit.pop("buddha_seal", None)
+        if reduction is None:
+            return []
+        candidates = [u for u in living(teams[unit["direct"]]) if u is not unit and not u.get("hidden")
+                      and u.get("buddha_seal") is None]
+        if not candidates:
+            return []
+        target = min(candidates, key=lambda u: (u["pos"], u["iid"]))
+        target["buddha_seal"] = reduction
+        if 9000604 not in target["effects"]:
+            return []
+        if chance_hit(boosted(target, 9000604)) and target["ap"] < 4:
+            return [change_ap(target, 4 - target["ap"], provider=target)]
+        return []
+
+    def pre_action(actor):
+        """行动前自身被动：迁怒、战神血统；返回 True 表示本次休息。"""
+        if 9000571 in actor["effects"] and actor["ap"] <= 2 and actor["hp"] > 0:
+            count = 4 - actor["ap"]
+            # 自研口径：先取怒气最高的其他存活角色，同怒优先敌方，再按阵位/IID 固定顺序。
+            candidates = sorted((u for team in teams.values() for u in team.values()
+                                 if u is not actor and u["hp"] > 0 and not u.get("hidden")),
+                                key=lambda u: (-u["ap"], u["direct"] == actor["direct"], u["pos"], u["iid"]))
+            chosen = candidates[:count]
+            if chosen:
+                # 自身按指定目标数回怒，不因目标免疫降怒而少回；不新增 break 动画源。
+                event([*(change_ap(u, -1, provider=actor) for u in chosen),
+                       change_ap(actor, len(chosen), provider=actor)])
+        if (9000575 in actor["effects"] and actor.get("war_god_until", 0) <= round_number
+                and actor["states"].get("skilllock", 0) <= round_number):
+            actor["war_god_until"] = round_number + 4
+            return True
+        return False
+
     def revive(provider, unit, code, fraction, ap=None, hidden=False):
         changes = cleanse(unit)
         changes.append(change_hp(unit, -max(1, int(unit["maxhp"] * fraction)), revival=True))
@@ -1151,6 +1274,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             if amount > 0:
                 unit["cover_d"] += amount
                 changes.append(dest(unit, m={"m": 0, "M": -amount, "f": 0, "u": "N", "U": 0}))
+        if 9000608 in unit["effects"]:
+            unit["nirvana_pending"] = True  # 大涅槃：复活后下次怒气技能降敌方全体攻击。
         passive_event(provider, code, changes)
 
     def ignite(provider, unit):
@@ -1268,7 +1393,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     changes = [change_ap(min(candidates, key=lambda u: (-stat(u, "atk"), u["pos"])), -2)]
                 elif name == "扼制":
                     for target in sorted(rng.sample(candidates, min(len(candidates), rng.randint(1, 2))), key=lambda u: u["pos"]):
-                        changes.extend(set_state(target, "skilllock"))
+                        changes.extend(seal(actor, target))
                 elif name in ("侵蚀", "腐蚀"):
                     for target in candidates:
                         change = buff(target, {"effect": "weaken", "effect-param": "atk;0.25" if name == "侵蚀" else "def;0.5", "effect-round": 2})
@@ -1303,6 +1428,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         # 前线机型：自身处于前排（阵位 < 8）时无法使用合体技能。
         if 9000599 in actor["effects"] and actor["pos"] < 8:
             return None
+        rival = enemies.get(actor["pos"])
+        # 怒视：敌方同阵位携带者存活时，本角色无法释放合体技能。
+        if rival and rival["hp"] > 0 and 9000572 in rival["effects"]:
+            return None
         general = config["general"][str(actor["cid"])]
         skill = config["combskill"].get(str(general["combskillid"]))
         if not skill:
@@ -1316,6 +1445,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 return None
             chance = config["combskillprobability"][str(skill["id"])][f"bout{min(10, round_number)}"]
             chance += effect(actor, 9000520)  # 心有灵犀：合体技能几率提升 value。
+            if rival and rival["hp"] > 0:
+                chance += effect(actor, 9000572)  # 怒视：同阵位敌方存活时自身合体概率 +10%。
             if 9000599 in actor["effects"]:
                 chance *= Fraction(1, 2)  # 前线机型：合体技能概率降低一半（按描述；value2=0.2 未采用）。
             return (skill, [actor["pos"]]) if roll(chance) else None
@@ -1351,6 +1482,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if round_number <= actor.get("chan_combo_until", 0):
             chance = 1
         chance += effect(actor, 9000520)  # 心有灵犀：合体技能几率提升 value。
+        if rival and rival["hp"] > 0:
+            chance += effect(actor, 9000572)  # 怒视：同阵位敌方存活时自身合体概率 +10%。
         if 9000599 in actor["effects"]:
             chance *= Fraction(1, 2)  # 前线机型：合体技能概率降低一半（按描述；value2=0.2 未采用）。
         return (skill, participants) if candidates and roll(chance) else None
@@ -1529,7 +1662,7 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             for target in selected[:1 if sid == 13018 else 2]:
                 changes.append(change_ap(target, -2))
                 if sid in (12989, 13124):
-                    changes.extend(set_state(target, "skilllock"))
+                    changes.extend(seal(actor, target))
             if sid == 13018 and killed:
                 changes.append(change_ap(actor, min(4, killed * 2)))
         if sid in (12635, 12990, 13073, 13079):
@@ -1803,6 +1936,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             critical = (combo_id == 12618 and target["pos"] < 8 or combo_id == 12632 or target["pos"] in critical_targets
                         or roll(max(0, min(.75, critical_chance))))
             parry = roll(max(0, min(.5, (stat(target, "parry") - stat(actor, "arp")) / 100)))
+            if target.get("mercy_until", 0) > round_number:
+                parry = False  # 慈悲：反击几率为 0%，也不再触发格挡减伤。
             multiplier = modifiers(actor, target)
             if skill:
                 if target["hp"] * 2 < target["maxhp"]:
@@ -1919,6 +2054,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 if skill and not reaction and 9000689 in actor["effects"] and roll(effect(actor, 9000689)):
                     # 平息：释放怒气技能命中后，按 value 概率额外降目标 value2 点怒气。
                     destinations.append(change_ap(target, -int(effect(actor, 9000689, "value2")), provider=actor))
+                if not skill and not reaction and 9000574 in actor["effects"] and chance_hit(effect(actor, 9000574)):
+                    # 封印大戟：普通攻击按 value 概率使目标封印 1 回合。
+                    destinations.extend(seal(actor, target))
                 if not skill and not reaction and 9000505 in actor["effects"]:
                     if target["ap"] >= effect(actor, 9000505):
                         destinations.append(change_ap(target, -int(effect(actor, 9000505))))
@@ -2002,6 +2140,23 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if skill and not free_combo and skill["ap_give"] and (not followup or not combined):
             destinations.append(change_ap(actor, skill["ap_give"]))
         event(destinations, source)
+        if combined:
+            actor["combo_casts"] += 1  # 精彩操作：按已释放的合体技次数累加闪避/减伤。
+        if (skill and not reaction and not followup and actor["hp"] > 0
+                and 9000605 in actor["effects"] and chance_hit(boosted(actor, 9000605))):
+            # 观无量寿：释放怒气技能后按 value2 概率封印 1 个未封印的敌方。
+            candidates = [u for u in living(enemies) if not u.get("hidden")
+                          and u["states"].get("skilllock", 0) <= round_number]
+            if candidates:
+                changes = seal(actor, rng.choice(candidates))
+                if changes:
+                    event(changes)
+        if skill and 9000608 in actor["effects"] and actor.pop("nirvana_pending", False):
+            # 大涅槃：复活后下次怒气技能降低敌方全体 30% 攻击，持续 2 回合。
+            changes = [passive_buff(u, actor, 9000608, "atk", -stat(u, "atk") * Fraction(3, 10), 2)
+                       for u in living(enemies)]
+            if changes:
+                event(changes)
         if combo_id in MULTI_COMBOS:
             combo_effects(actor, skill, hit_targets, killed)
         if skill and not followup and effect(actor, 9000062):
@@ -2119,6 +2274,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
     for team in teams.values():
         seeds = any(9000807 in u["effects"] for u in team.values())
         for unit in team.values():
+            if (9000604 in unit["effects"]
+                    and not any(u.get("buddha_seal") is not None for u in team.values())):
+                # 金刚：每队最多一枚佛印，按阵位顺序给第一个携带者；减伤比例随佛印转移。
+                unit["buddha_seal"] = effect(unit, 9000604)
             if 9000547 in unit["effects"]:
                 target = teams[not unit["direct"]].get(unit["pos"])
                 if target:
@@ -2172,6 +2331,12 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                     passive_event(unit, 9000683, [state_event(unit, "invincible", True)])
                 if 9000552 in unit["effects"] and roll(effect(unit, 9000552)):
                     passive_event(unit, 9000552, set_state(unit, "statusproof"))
+                if 9000605 in unit["effects"]:
+                    # 观无量寿：回合开始恢复 20% 生命并解除自身封印。
+                    changes = [change_hp(unit, -int(unit["maxhp"] * effect(unit, 9000605)), healing=True, healer=unit)]
+                    if unit["states"].pop("skilllock", None) is not None:
+                        changes.append(state_event(unit, "skilllock", False))
+                    event(changes)
                 if round_number == 3 and unit.get("chan_speed"):
                     unit["speed"] -= unit.pop("chan_speed")
                 if unit.get("qi_until") == round_number:
@@ -2264,6 +2429,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 if not actor["dizzy"]:
                     event([dest(actor, m=[], u={"u": "dizzy", "w": False})])
                 continue
+            if pre_action(actor):
+                continue  # 战神血统：首次行动休息 1 回合并进入战神状态。
             for reactor, target in act(actor):
                 if finished():
                     break
