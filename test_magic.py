@@ -558,6 +558,7 @@ class MagicTests(unittest.TestCase):
                 if k=="getContentSize" then return function(self) return self.size end end
                 if k=="getPositionX" or k=="getPositionY" then return function() return 0 end end
                 if k=="setString" then return function(self,v) self.text=v end end
+                if k=="setVisible" then return function(self,v) self.visible=v end end
                 return function() end
             end}) end
             function items() return setmetatable({}, {__index=function(t,k) local n=node();rawset(t,k,n);return n end}) end
@@ -590,11 +591,13 @@ class MagicTests(unittest.TestCase):
 
         data = query_data()
         lua.globals().UIInstrumentQuery(lua.table_from(data, recursive=True))
+        self.assertEqual((page.allDark, page.rootItems.breakthrougNode.visible), (False, False))
         page.rootItems.lockButton.callback()
         self.assertEqual((lua.globals().requests[len(lua.globals().requests)].type, lua.globals().requests[len(lua.globals().requests)].id), (1361, 1))
         self.unlock()
         data = query_data()
         lua.globals().UIInstrumentQuery(lua.table_from(data, recursive=True))
+        self.assertEqual((page.allDark, page.rootItems.breakthrougNode.visible), (False, False))
         request = lua.globals().requests[len(lua.globals().requests)]
         self.assertEqual((request.type, request.id, request.typeIndex, request.times), (1362, 1, 0, 0))
         values, token, _ = self.preview(3)
@@ -604,6 +607,20 @@ class MagicTests(unittest.TestCase):
         page.rootItems.upTenButton.callback()
         request = lua.globals().requests[len(lua.globals().requests)]
         self.assertEqual((request.type, request.id, request.token, request.typeIndex), (1363, 1, token, 1))
+        self.confirm(token)
+        self.change_magic(1, normal=magic.values(self.config["artifact"]["1"], "init"))
+        lua.globals().UIInstrumentQuery(lua.table_from(query_data(), recursive=True))
+        self.assertEqual((page.allDark, page.rootItems.breakthrougNode.visible), (True, True))
+        request = lua.globals().requests[len(lua.globals().requests)-1]
+        self.assertEqual((request.type, request.order, page.tupo_needprops["20270"].num, page.tupo_needprops["1025"].num), (12001, 32007, 100, 100))
+        page.setNodeVisible(page, 2)
+        self.assertEqual((page.selectID, page.allDark, page.rootItems.breakthrougNode.visible), (2, False, False))
+        page.setNodeVisible(page, 1)
+        self.assertEqual((page.selectID, page.allDark, page.rootItems.breakthrougNode.visible), (1, True, True))
+        self.change_magic(1, normal=magic.values(self.config["artifact"]["1"], "init"), stage=1,
+                          fairy=magic.values(self.config["artifact_xian_config"]["1"]["1"], "init"))
+        lua.globals().UIInstrumentQuery(lua.table_from(query_data(), recursive=True))
+        self.assertEqual((page.tuPoStatus, page.allDark, page.rootItems.breakthrougNode.visible), (1, True, False))
         page.localMagicToken = 999
         result["id"] = 2
         lua.globals().UIInstrumentForgePreview(lua.table_from(result, recursive=True))

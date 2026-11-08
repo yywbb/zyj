@@ -1270,6 +1270,20 @@ def patch_magic_scripts():
     marker = 'g_gold = self.g_gold},nil)'
     assert code.count(marker) == 1
     code = code.replace(marker, 'g_gold = self.g_gold,view=self.localMagicView},nil)')
+    marker = "    local isLight = true\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '    ui.removeGray("CCControlButton",self.rootItems.lockButton)\n')
+    marker = "\tself:setNodeVisible(self.selectID)\n\n\tself:setButtonShowType(0)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "\tself:setNodeVisible(self.selectID)\n")
+    marker = "        self.allDark = true\n        if self.data.unlock[tostring(self.selectID)] then"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "        self.allDark = self.data.unlock[tostring(self.selectID)] ~= nil\n        if self.allDark then")
+    marker = "        UIRequest({type = 12001, order = 32007, cids = cids})\n\n"
+    assert code.count(marker) == 1
+    loop_end = "                propindex = propindex+1\n            end\n        end\n"
+    assert code.count(marker + "        for k,v in pairs(cost) do\n") == 1 and code.count(loop_end) == 1
+    code = code.replace(marker, "").replace(loop_end, loop_end + "        " + marker.strip() + "\n")
     code = code.replace("return magic", '''
 local localMagicInit = magic.init
 function magic.init(self,...)
@@ -1303,8 +1317,8 @@ function magic.setNodeVisible(self,id)
         end
     end
     localMagicSelect(self,id)
-    self:setButtonShowType(0)
-    if current then UIRequest({type=1362,id=id,typeIndex=0,times=0,view=self.localMagicView}) end
+    if current then UIRequest({type=1362,id=id,typeIndex=0,times=0,view=self.localMagicView})
+    else self:setButtonShowType(0) end
 end
 return magic''')
     patched["Layer_magic"] = code
