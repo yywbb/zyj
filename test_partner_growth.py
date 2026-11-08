@@ -289,6 +289,29 @@ class PartnerGrowthTests(unittest.TestCase):
                     self.reconnect();self.refresh()
                     self.assertEqual(self.gen(self.iid), hero)
 
+    def test_guangchengzi_all_paid_gold_choices_keep_gates_costs_and_reconnect(self):
+        # 广成子 10830→164027：六彩金技能此前未接入战斗引擎，+13 升 +14 会在扣费前报
+        # 「尚不支持该突破被动 9001142」。三阶各两种选择都应能付费、保存并通过战前校验。
+        for choices in product((1, 3), repeat=3):
+            with self.subTest(choices=choices):
+                raw = self.put_hero(10830, advance=13, awake=90)
+                self.assert_rejected(1017, values=[10830, choices[0], 13])
+                raw = protocol.pb_set_varint(raw, 23, 30)
+                for field, value in partner_growth.fairy(raw, self.config).items():
+                    raw = protocol.pb_set_varint(raw, field, value)
+                raw = partner_growth.power(self.save, self.gen(self.iid), raw)
+                player.record_slot_update(self.save, protocol.encode_pb_field(1, 2, raw))
+                for stage, choice in enumerate(choices, 14):
+                    old = protocol.pb_get_varint(self.gen(self.iid), 1)
+                    self.paid(1017, [old, choice, stage-1])
+                    self.assert_rejected(1017, values=[old, choice, stage-1])
+                hero = self.gen(self.iid)
+                self.assertEqual([protocol.pb_get_varint(hero, f) for f in (1, 4, 35, 36, 37)], [164027, 16, *choices])
+                self.assertIn((50, 2, b"preserve-partner"), list(protocol.iter_pb_fields(hero)))
+                partner_growth.check_combat(hero, self.config)
+                self.reconnect(); self.refresh()
+                self.assertEqual(self.gen(self.iid), hero)
+
     def test_new_gold_missing_materials_and_final_save_failure_do_not_convert_or_charge(self):
         for cid, choice in product((10829, 10839), (1, 3)):
             self.save["role_state"].update(level=150, coin=10**12, gold=1000000)
@@ -665,6 +688,116 @@ class PartnerBattleTests(unittest.TestCase):
                 for side, key in (("attack", "atk"), ("defense", "def")):
                     for pos, unit in report["endmeta"][side].items():
                         self.assertEqual((ext.endinfo[key][pos].hp, ext.endinfo[key][pos].ap), (unit["h"], unit["ap"]))
+
+
+class GuangchengziBattleTests(unittest.TestCase):
+    """广成子彩金六技能：平息/进击/磁场/过热/无限光波/能量防护。"""
+    unit = test_hades_battle.HadesBattleTests.unit
+    hits = test_hades_battle.HadesBattleTests.hits
+    assert_replays = test_hades_battle.HadesBattleTests.assert_replays
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = player.load_role_config("configs_sec5.zip")
+
+    def isolated(self, *patches):
+        row = {**self.config["general"]["164027"], **{f"break{i}": 0 for i in range(1, 17)}}
+        skills = dict(self.config["breakskill"])
+        for sid, values in patches:
+            skills[str(sid)] = {**skills[str(sid)], **values}
+        return {**self.config, "general": {**self.config["general"], "164027": row}, "breakskill": skills}
+
+    def gold(self, pid=None, **values):
+        return self.unit(164027, iid=700, advance=16, partner_skills=[pid] if pid else [], **values)
+
+    def aps(self, report, direct=True):
+        return [d["ap"] for a in report["b"]["a"]
+                if a["s"].get("r") == direct and a["s"].get("t") in ("N", "k", "x")
+                for d in a["e"] if d["r"] != direct and "ap" in d]
+
+    def test_all_six_gold_skills_pass_combat_preparation_and_replay(self):
+        for pid in range(9001142, 9001148):
+            with self.subTest(pid=pid):
+                report = battle.simulate({2: self.gold(pid, speed=300, initial_ap=4)},
+                                         {2: self.unit(iid=1, hp=1000000, atk=1)},
+                                         self.isolated(), 7, max_rounds=2)
+                self.assertTrue(report["b"]["a"])
+                self.assert_replays(report)
+
+    def test_extra_basic_target_is_probabilistic_and_bounded_by_value2(self):
+        defense = {2: self.unit(iid=1, hp=1000000, atk=1), 8: self.unit(iid=2, hp=1000000, atk=1)}
+        for chance, count in ((1, 2), (0, 1)):
+            with self.subTest(chance=chance):
+                report = battle.simulate({2: self.gold(9001143, speed=300)}, defense,
+                                         self.isolated((9001143, {"value": chance})), 7, max_rounds=1)
+                self.assertEqual(len(self.hits(report)), count)
+                self.assert_replays(report)
+
+    def test_ap_skill_extra_drain_uses_value2_and_is_probabilistic(self):
+        defense = {2: self.unit(iid=1, hp=1000000, atk=1, initial_ap=4)}
+        for chance, expected in ((1, True), (0, False)):
+            with self.subTest(chance=chance):
+                report = battle.simulate({2: self.gold(9001142, speed=300, initial_ap=4)}, defense,
+                                         self.isolated((9001142, {"value": chance})), 7, max_rounds=1)
+                self.assertEqual(1 in self.aps(report), expected)
+                self.assert_replays(report)
+
+    def test_ap_drain_triggers_magnetic_field_and_overheat_once(self):
+        defense = {2: self.unit(iid=1, hp=1000000, atk=100, speed=1, initial_ap=4)}
+        def fight(pid=None):
+            # 技能必须实际造成伤害才会走命中后的降怒逻辑；atk=1 会被 0 伤害整块跳过。
+            return battle.simulate({2: self.gold(pid, speed=300, initial_ap=4, atk=100, hp=10000)},
+                                   defense, self.isolated(), 7, max_rounds=1)
+        plain, magnet, heat = fight(), fight(9001144), fight(9001145)
+        # 磁场：目标被降怒后攻击降低，广成子承伤更少。
+        self.assertGreater(magnet["endmeta"]["attack"]["2"]["h"], plain["endmeta"]["attack"]["2"]["h"])
+        # 过热：广成子生命上限 10000 × 实际降怒 1 × 0.1 = 1000 额外伤害。
+        self.assertEqual(plain["endmeta"]["defense"]["2"]["h"] - heat["endmeta"]["defense"]["2"]["h"], 1000)
+        for report in (plain, magnet, heat):
+            self.assert_replays(report)
+
+    def test_aura_skills_add_hp_only_to_gold_allies(self):
+        for pid in (9001146, 9001147):
+            with self.subTest(pid=pid):
+                config = self.isolated((pid, {"value": 0}))
+                attack = {2: self.gold(pid, speed=300),
+                          8: self.unit(164027, iid=701, hp=10000, speed=1),
+                          10: self.unit(10201, iid=702, hp=10000, speed=1)}
+                report = battle.simulate(attack, {2: self.unit(iid=1, hp=1000000, atk=1)}, config, 7, max_rounds=1)
+                meta = report["meta"]["attack"]["g"]
+                self.assertEqual((meta["700"]["h"], meta["701"]["h"], meta["702"]["h"]),
+                                 (10000 + 240000, 10000 + 240000, 10000))
+                self.assert_replays(report)
+
+    def test_curse_mark_raises_damage_taken_and_weakens_target(self):
+        config = self.isolated((9001146, {"value": 1}))
+        attack = {2: self.gold(9001146, speed=300, initial_ap=4, atk=100, hp=1000000)}
+        defense = {2: self.unit(iid=1, hp=1000000, atk=100, speed=1)}
+        # 同一随机序列：只把三项印记比例置零作为对照，roll 仍然发生。
+        with patch.multiple(battle, CURSE_DAMAGE=0, CURSE_ATTACK=0, CURSE_DEFENSE=0):
+            plain = battle.simulate(copy.deepcopy(attack), copy.deepcopy(defense), config, 7, max_rounds=2)
+        cursed = battle.simulate(copy.deepcopy(attack), copy.deepcopy(defense), config, 7, max_rounds=2)
+        self.assertGreater(self.hits(cursed)[-1], self.hits(plain)[-1])
+        self.assertGreater(cursed["endmeta"]["attack"]["2"]["h"], plain["endmeta"]["attack"]["2"]["h"])
+        self.assert_replays(cursed)
+        self.assert_replays(plain)
+
+    def test_guard_mark_blocks_exactly_one_attack(self):
+        defense = {2: self.unit(iid=1, hp=1000000, atk=100, speed=1)}
+        config = self.isolated((9001147, {"value": 1}))
+        def fight(actor, rounds):
+            return battle.simulate({2: actor}, defense, config, 7, max_rounds=rounds)
+        guarded = fight(self.gold(9001147, speed=300, initial_ap=4, atk=1), 1)
+        plain = fight(self.gold(None, speed=300, initial_ap=4, atk=1), 1)
+        lost = lambda report: report["meta"]["attack"]["g"]["700"]["h"] - report["endmeta"]["attack"]["2"]["h"]
+        self.assertEqual(lost(guarded), 0)
+        self.assertGreater(lost(plain), 0)
+        self.assertTrue(any(d.get("m", {}).get("u") == "proof" for a in guarded["b"]["a"]
+                            for d in a["e"] if isinstance(d.get("m"), dict)))
+        # 一层印记只挡一次：第二回合不再释放技能，普通攻击应当生效。
+        self.assertGreater(lost(fight(self.gold(9001147, speed=300, initial_ap=4, atk=1), 2)), 0)
+        self.assert_replays(guarded)
+        self.assert_replays(plain)
 
 
 class YuanshiTongtianBattleTests(unittest.TestCase):

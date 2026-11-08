@@ -13,8 +13,15 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 POSITIONS = (2, 8, 10, 4, 12, 6, 14)
 QUEENS = (10595, 10817)
 MAX_ROUNDS = 30
-# shortcut: 已接玉鼎、元始、通天，其他彩金技能须实现并回归后才允许付费转换。
-PARTNER_EFFECTS = {*range(9000742, 9000748), *range(9000547, 9000553), *range(9000678, 9000684)}
+# shortcut: 已接玉鼎、元始、通天、广成子，其他彩金技能须实现并回归后才允许付费转换。
+PARTNER_EFFECTS = {*range(9000742, 9000748), *range(9000547, 9000553), *range(9000678, 9000684),
+                   *range(9000688, 9000694)}
+# 广成子彩金技能 9001142–9001147：诅咒/守护印记比例取自配置描述，配置无独立字段。
+# 9000692 同时是「专属神器S1」的行ID（type=0、code 回退到自身ID），仙命加成只认这两行。
+GUANGCHENGZI_AURA_SKILLS = (9001146, 9001147)
+CURSE_ATTACK = Fraction(1, 10)
+CURSE_DEFENSE = Fraction(1, 5)
+CURSE_DAMAGE = Fraction(2, 5)
 # 主角彩金进阶24–26的天/地/人突破技能效果。
 LEAD_GOLD_EFFECTS = set(range(9000517, 9000524))
 HADES_EFFECTS = {9000022, 9000034, 9000306, 9000307, 9000309, 9000314, 9000315, 9000316, 9000318,
@@ -514,6 +521,12 @@ def _prepare_teams(teams, config):
                     for target in team.values():
                         if config["general"][str(target["cid"])]["quality"] == 7:
                             add(target, "atk", Fraction(str(row["value2"])))
+                elif row["id"] in GUANGCHENGZI_AURA_SKILLS and (direct, row["id"]) not in applied:
+                    # 无限光波/能量防护：开场给己方彩金将加 value2 仙命，按技能行去重、两技能可叠加。
+                    applied.add((direct, row["id"]))
+                    for target in team.values():
+                        if config["general"][str(target["cid"])]["quality"] == 7:
+                            add(target, "hp", Fraction(str(row["value2"])))
                 elif code == 9000008:
                     add(provider, "reduction", value)
                 elif code == 9000028 and provider.get("npc"):
@@ -715,6 +728,10 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             amount, status = 0, "proof"
             unit["attack_immunity"] -= 1
             barrier_end = not unit["attack_immunity"]
+        if amount > 0 and kind in ("basic", "skill") and not bypass_barrier and unit.get("guard_marks", 0):
+            # 能量防护：守护印记免疫 1 次受到的攻击；印记可叠加，额外伤害不消耗。
+            unit["guard_marks"] -= 1
+            amount, status = 0, "proof"
         if amount > 0 and unit.get("artifact_barrier", 0) and round_number < 2 and not bypass_barrier:
             amount, status = 0, "proof"
             unit["artifact_barrier"] -= 1
@@ -787,6 +804,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         if name in ("def", "resilience") and any(9000413 in u["effects"] and u["hp"] > 0 for u in teams[unit["direct"]].values()):
             value += unit["def"] * Fraction(1, 5) if name == "def" else 10
         result = int(value) + unit.get("pet_rates", {}).get(name, 0)
+        if name in ("atk", "def") and unit.get("curse_marks", 0) and unit.get("curse_marks_until", 0) > round_number:
+            result = int(result * (1 - (CURSE_ATTACK if name == "atk" else CURSE_DEFENSE)))
         return result if name in ("hit", "criticaldmg") else max(0, result)
 
     def buff(unit, skill):
@@ -922,6 +941,8 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             multiplier *= 1 - max((effect(u, 9000746) for u in living(teams[target["direct"]])), default=0)
         if target["dizzy"] or target["dot"] or target["firing"] or any(target["states"].get(k, 0) > round_number for k in ("skilllock", "close", "fire")):
             multiplier *= 1 + effect(actor, 9000480)
+        if target.get("curse_marks", 0) and target.get("curse_marks_until", 0) > round_number:
+            multiplier *= 1 + CURSE_DAMAGE
         if target["cover_d"] > 0:
             multiplier *= 1 + effect(actor, 9000421)
         return multiplier
@@ -1145,6 +1166,20 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
         previous = unit["ap"]
         unit["ap"] = max(0, min(10, unit["ap"] + amount))
         gained = unit["ap"] - previous
+        if gained < 0 and not pet:
+            # 磁场/过热：广成子所在一方每次实际降低敌方怒气时，按本行给目标减攻并追加生命上限伤害。
+            for source in living(teams[not unit["direct"]]):
+                if source["hp"] <= 0:
+                    continue
+                if 9000691 in source["effects"]:
+                    changes = [passive_buff(unit, source, 9000691, "atk",
+                                            -stat(unit, "atk") * effect(source, 9000691),
+                                            int(effect(source, 9000691, "value2")) + 1)]
+                    passive_event(source, 9000691, changes)
+                if 9000690 in source["effects"]:
+                    changes = [change_hp(unit, int(source["maxhp"] * -gained * effect(source, 9000690)),
+                                         bypass_barrier=True, attacker=source)]
+                    passive_event(source, 9000690, changes)
         if gained > 0 and provider and provider is not unit and 9000785 in provider["effects"]:
             provider["ap_self_guard"] = min(Fraction(4, 5), provider["ap_self_guard"] + effect(provider, 9000785) * gained)
             unit["ap_received_guard"] = min(Fraction(9, 20), unit["ap_received_guard"] + Fraction(3, 20) * gained)
@@ -1661,6 +1696,11 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             extra = sorted((u for u in candidates.values() if u["hp"] > 0 and not u["hidden"] and u not in selected),
                            key=lambda u: (Fraction(u["hp"], u["maxhp"]) if skill["kind"] == "gain" else 0, u["pos"]))
             selected += extra[:int(effect(actor, 9000528))]
+        if not skill and not forced_target and 9000688 in actor["effects"] and roll(effect(actor, 9000688)):
+            # 进击：普通攻击有 value 概率多打 value2 个目标，反击/续击不重复触发。
+            extra = sorted((u for u in enemies.values() if u["hp"] > 0 and not u["hidden"] and u not in selected),
+                           key=lambda u: u["pos"])
+            selected += extra[:int(effect(actor, 9000688, "value2"))]
         if not selected:
             return []
         actor["chan_attack_damage"] = actor.pop("chan_kill_damage", 0)
@@ -1828,6 +1868,9 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                                      and target["ap"] >= row["value2"])
                 if reduction:
                     destinations.append(change_ap(target, -reduction))
+                if skill and not reaction and 9000689 in actor["effects"] and roll(effect(actor, 9000689)):
+                    # 平息：释放怒气技能命中后，按 value 概率额外降目标 value2 点怒气。
+                    destinations.append(change_ap(target, -int(effect(actor, 9000689, "value2")), provider=actor))
                 if not skill and not reaction and 9000505 in actor["effects"]:
                     if target["ap"] >= effect(actor, 9000505):
                         destinations.append(change_ap(target, -int(effect(actor, 9000505))))
@@ -1845,6 +1888,15 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             destinations.append(hit)
         if hit_targets:
             actor["strikes"] += 1
+        if skill and not reaction and actor["hp"] > 0:
+            # 无限光波/能量防护：释放技能按 value 概率附加印记。诅咒印记持续 1 回合，
+            # 守护印记按层数免疫后续攻击；印记只改内部状态，不伪造原生动画资源。
+            if 9000693 in actor["effects"] and roll(effect(actor, 9000693)):
+                for target in hit_targets:
+                    target["curse_marks"] = target.get("curse_marks", 0) + 1
+                    target["curse_marks_until"] = round_number + 2
+            if 9000692 in actor["effects"] and roll(effect(actor, 9000692)):
+                actor["guard_marks"] = actor.get("guard_marks", 0) + 1
         if skill and effect(actor, 9000803) and not burned:
             target = next((u for u in hit_targets if u["hp"] > 0), None)
             if target:
