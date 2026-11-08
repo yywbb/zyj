@@ -2495,6 +2495,44 @@ def patch_deployment_scripts(patched):
         put(name, code)
 
 
+AUTO_RESEARCH_KICK = '''
+-- 自动进修由本函数单点驱动：只保留一个续接定时器，不依赖 12001 材料回显。
+-- 原实现只在 setXiuLianPropShow 里起 0.3s 定时器；回显被页面刷新/动画打断后
+-- autoXiulian 仍为真却没有定时器，玩家必须点一次取消再点一次才能继续。
+-- 上一笔 5513 在途时只排队等待，不并发发请求；材料未刷新时补查一次。
+function generalup.autoResearchKick(self)
+    if self.autoXiulian ~= true or self.selectpage ~= "xiulian" then return end
+    if not self.data.general or self.localAutoResearchPending then return end
+    local generation,iid=self.localPartnerGeneration,self.data.general.iid
+    self.localAutoResearchPending=true
+    self.rootItems.xiuliannode:stopAllActions()
+    self.rootItems.xiuliannode:runAction(CCSequence:createWithTwoActions(CCDelayTime:create(0.3),CCCallFunc:create(function()
+        self.localAutoResearchPending=false
+        if generation~=self.localPartnerGeneration or not self.data.general or iid~=self.data.general.iid then return end
+        if self.selectpage~="xiulian" or self.autoXiulian~=true then return end
+        if (gamedata.ext or {}).localPartnerGrowthBusy or (gamedata.ext or {}).localFormationBusy then
+            self:autoResearchKick()
+            return
+        end
+        if not self.xiuLianHave then
+            self.localAutoResearchMisses=(self.localAutoResearchMisses or 0)+1
+            if self.localAutoResearchMisses>10 then
+                self.autoXiulian=false
+                self:setXiuLianStateShow()
+                return
+            end
+            self:setXiuLianStateShow()
+            self:autoResearchKick()
+            return
+        end
+        self.localAutoResearchMisses=nil
+        self.levelUp=false
+        self:executeXiulian()
+    end)))
+end
+'''
+
+
 def patch_partner_growth_scripts(patched):
     def load(name, directory="scripts"):
         key = f"assets/{directory}/{name}.so"
@@ -2538,7 +2576,7 @@ def patch_partner_growth_scripts(patched):
         self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1
         self.xiuLianData[hero.iid]=nil
         self.isRefreshXiulianProps=nil;self.xiuLianHave=nil
-        self.autoJuexing=false;self.autoXiulian=false
+        self.autoJuexing=false;self.autoXiulian=false;self.localAutoResearchPending=nil
     end
 ''')
             marker = "    if not self.xiuLianData[self.data.general.iid] then\n"
@@ -2547,18 +2585,35 @@ def patch_partner_growth_scripts(patched):
             marker = "function generalup.setPage_feisheng(self)\n"
             assert code.count(marker) == 1
             code = code.replace(marker, marker+"    UIRequest({type=5511,update=true})\n")
-            # 原版自动进修在升学那次把 levelUp 置真，定时回调据此关掉 autoXiulian，
-            # 升一级就停住要玩家再点一次。升学后继续自动抽取/升学；材料不足、
-            # 等级不足、满级、手动取消与关页/换伙伴的停止与世代保护都保持原样。
-            marker = '            if self.selectpage == "xiulian" and self.autoXiulian and (not self.levelUp) then\n'
+            # 自动进修原本只靠 12001 材料回显里的 0.3s 定时器续接；回显被页面刷新
+            # 或动画打断后，autoXiulian 仍为真却再无定时器，玩家必须点一次取消再点
+            # 一次才能继续。改为由 executeXiulian 自己驱动统一续接器，回显只刷新材料；
+            # 材料不足/等级不足/满级/手动取消/关页换伙伴与世代保护保持原样。
+            marker = "function generalup.setXiuLianStateShow(self,t,xiuLianType)\n"
             assert code.count(marker) == 1
-            code = code.replace(marker, '            if self.selectpage == "xiulian" and self.autoXiulian then\n'
-                                        '                self.levelUp=false\n')
+            code = code.replace(marker, marker+'''    if self.autoXiulian ~= true then
+        self.localAutoResearchPending=nil
+        self.rootItems.xiuliannode:stopAllActions()
+    end
+''')
+            start = code.index("function generalup.executeXiulian(")
+            end = code.index("\nend", start)+len("\nend")
+            block = code[start:end]
+            tail = "    self:setXiuLianStateShow()\nend"
+            assert block.count(tail) == 1
+            block = block.replace(tail, "    self:setXiuLianStateShow()\n    self:autoResearchKick()\nend")
+            code = code[:start]+block+code[end:]
+            start = code.index("function generalup.setXiuLianPropShow(")
+            end = code.index("\nend", start)+len("\nend")
+            block = code[start:end]
+            head = block.index("    if self.autoXiulian == true then\n")
+            assert "(not self.levelUp)" in block[head:]
+            code = code[:start]+block[:head]+"    self:autoResearchKick()\nend"+code[end:]
         for method in methods:
             marker = f"function {prefix}.{method}("
             assert code.count(marker) == 1
             pos = code.index("\n", code.index(marker))+1
-            code = code[:pos]+"    self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1\n    self.autoJuexing=false;self.autoXiulian=false\n"+code[pos:]
+            code = code[:pos]+"    self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1\n    self.autoJuexing=false;self.autoXiulian=false;self.localAutoResearchPending=nil\n"+code[pos:]
             if name == "Layer_generalup" and method != "clear":
                 code = code[:pos]+"    self.xiuLianData={}\n    self.isRefreshXiulianProps=nil;self.xiuLianHave=nil\n"+code[pos:]
         if name == "Layer_generalup":
@@ -2588,6 +2643,10 @@ def patch_partner_growth_scripts(patched):
             for marker in ("CCCallFunc:create(function()", "setAnimationCompletedCallback(function()", "local function func()"):
                 block = block.replace(marker, marker+guard)
             code = code[:start]+block+code[end:]
+        if name == "Layer_generalup":
+            marker = "\nreturn generalup\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "\n"+AUTO_RESEARCH_KICK+marker)
         put(name, code)
     code = load("UIProps")
     marker = "function UIPropQueryById(t)\n"

@@ -18,6 +18,76 @@ def setUpModule():
     test_soul.setUpModule()
 
 
+# 自动进修的真实打包 Lua 时序模拟：12001 材料回显可丢弃、5513 回显可延迟，
+# cocos 动作按时间排队，stopAllActions 只清对应节点。用于复现「回显丢失后
+# autoXiulian 仍为真却再无续接定时器，必须点一次取消再点一次」的老问题。
+AUTO_RESEARCH_LUA = r'''
+generalup={};print=function() end;printT=function() end
+clock=0;timers={};requests={};conflicting=0;level=0;heart=0;dropLeft=0;dropEvery=0;netdelay=0.05
+local function node(name)
+  return setmetatable({name=name,
+    runAction=function(self,a) if a and a.fn then table.insert(timers,{at=clock+(a.delay or 0.3),fn=a.fn,node=self}) end end,
+    stopAllActions=function(self) local k={} for _,x in ipairs(timers) do if x.node~=self then table.insert(k,x) end end timers=k end,
+    numberOfRunningActions=function(self) local n=0 for _,x in ipairs(timers) do if x.node==self then n=n+1 end end return n end},
+    {__index=function() return function() end end})
+end
+netnode=node("net")
+CCDelayTime={create=function(_,d) return {delay=d} end}
+CCCallFunc={create=function(_,fn) return {fn=fn} end}
+CCSequence={createWithTwoActions=function(_,a,b) return {delay=a.delay,fn=b.fn} end}
+CCProgressFromTo={create=function() return {} end}
+CCControlEventTouchUpInside=1
+CCBReaderLoad=function() return {},{topnode=nil,bottomnode=nil} end
+getAnimationManager=function() return {runAnimationsForSequenceNamed=function() end} end
+table.copy=function(x) return x end
+guide={controller={addComplete=function() end}}
+GameScene={checkUpdate=function() return false end}
+gameConfig={strings={string_common=function() return "" end,needlv=function() return "" end},images={}}
+ui={setLabelString=function() end,setNewIcon=function() end,
+    getIDandNUMs=function() return {{cid=1000,num=1}} end,
+    IDconfig=function() return {name="mat"} end}
+setControlButtonFrame=function() end
+runGamePrompt=function() prompts=(prompts or 0)+1 end
+gamedata={ext={},cache={},config={Immortal_level={["1"]={},["2"]={}}}}
+for n=0,36 do for k=1,2 do gamedata.config.Immortal_level[tostring(k)][tostring(n)]={
+  character=1000,generalLevel=1,consumeEveryTimes="1000,1",extraConsume="1000,1",
+  stageAttr1="1,1",stageAttr2="1,1",stageAttr3="1,1"} end end
+function UIRequest(req)
+  table.insert(requests,req)
+  if req.type==12001 then
+    local skip=false
+    if dropLeft>0 then dropLeft=dropLeft-1;skip=true
+    elseif dropEvery>0 and #requests%dropEvery==0 then skip=true end
+    if not skip then
+      local n={} for _,c in ipairs(req.cids or {}) do n[tostring(c)]=999999 end
+      page:setXiuLianPropShow(n)
+    end
+  elseif req.type==5513 then
+    if gamedata.ext.localPartnerGrowthBusy then conflicting=conflicting+1 end
+    local p={};gamedata.ext.localPartnerGrowthBusy=p;gamedata.ext.localFormationBusy=p
+    local up=req.isBreak==1
+    table.insert(timers,{at=clock+netdelay,node=netnode,fn=function()
+      gamedata.ext.localPartnerGrowthBusy=nil;gamedata.ext.localFormationBusy=nil
+      if up then level=level+1;heart=0 else heart=heart+250 end
+      if heart>1000 then heart=1000 end
+      local xl={heart1=heart,heart2=0} for i=1,8 do xl["attr"..i]=0 end
+      page:xiuLianSuccess({general={iid=7,cid=10830,level1=300,level6=level,level7=0},generalXiuLian=xl})
+    end})
+  end
+end
+local xl0={heart1=0,heart2=0} for i=1,8 do xl0["attr"..i]=0 end
+page=setmetatable({data={general={iid=7,cid=10830,level1=300,level6=0,level7=0}},
+  selectpage="xiulian",autoXiulian=false,levelUp=false,localPartnerGeneration=3,
+  xiulianType=1,xiuLianProps={{cid=1000,num=1}},xiuLianHave={["1000"]=999999},
+  xiuLianData={[7]=xl0},xiuLianAddData={[7]={}},
+  rootItems=setmetatable({}, {__index=function(_,k) if not _G["n_"..k] then _G["n_"..k]=node(k) end return _G["n_"..k] end}),
+  ReloadData=function(self) self:getXiulianProp() end,
+  setXiuLianData=function() end,freshUI=function() end,
+  setPage_xiulian=function() end,touchLayerSet=function() end},
+  {__index=generalup})
+'''
+
+
 class PartnerGrowthTests(unittest.TestCase):
     request = test_soul.SoulTests.request
     add_account = test_soul.SoulTests.add_account
@@ -603,68 +673,106 @@ class PartnerGrowthTests(unittest.TestCase):
                 self.assertEqual([req.type for req in lua.globals().sent.values()], [5511, 5512])
 
     def test_native_research_material_timers_ignore_closed_or_switched_pages(self):
-        from lupa.lua51 import LuaRuntime
         code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
         start = code.index("function generalup.setXiuLianPropShow(")
-        code = code[start:code.index("\nend", start)+len("\nend")]
-        for phase, change in product((1, 2), ("page.localPartnerGeneration=4;page.data=nil", "page.data.general.iid=8")):
-            with self.subTest(timer=phase, change=change):
-                lua = LuaRuntime()
-                lua.execute('''generalup={};printT=function() end;print=function() end
-                    gameConfig={strings={string_common=function() return "" end}};ui={setLabelString=function() end}
-                    CCControlEventTouchUpInside=1;CCDelayTime={create=function() return {} end}
-                    CCCallFunc={create=function(_,fn) return fn end}
-                    CCSequence={createWithTwoActions=function(_,delay,fn) return fn end}
-                    delayed={};local node=setmetatable({runAction=function(self,fn) delayed[#delayed+1]=fn end},
-                        {__index=function() return function() end end})
-                    page=setmetatable({data={general={iid=7}},localPartnerGeneration=3,selectpage="xiulian",
-                        autoXiulian=true,xiuLianProps={},xiuLianAddData={[7]={}},
-                        rootItems=setmetatable({}, {__index=function() return node end}),
-                        executeXiulian=function() executed=(executed or 0)+1 end,
-                        setXiuLianData=function() refreshed=(refreshed or 0)+1 end,
-                        setXiuLianStateShow=function() refreshed=(refreshed or 0)+1 end}, {__index=generalup})''')
-                lua.execute(code)
-                lua.execute('page:setXiuLianPropShow({});delayed[1]();assert(executed==1);executed=nil')
-                if phase == 2:
-                    lua.execute('page.autoXiulian=false;delayed[1]();refreshed=nil')
-                lua.execute(change+f';delayed[{phase}]()')
-                self.assertIsNone(lua.globals().executed)
-                self.assertIsNone(lua.globals().refreshed)
+        block = code[start:code.index("\nend", start)+len("\nend")]
+        # 材料回显不再自建定时器，统一交给带世代/iid/auto 守卫的 autoResearchKick。
+        self.assertIn("self:autoResearchKick()", block)
+        self.assertNotIn("CCCallFunc:create", block)
+        for change in ("page.localPartnerGeneration=4;page.data=nil",
+                       "page.data.general.iid=8",
+                       "page.autoXiulian=false",
+                       'page.selectpage="tupo"'):
+            with self.subTest(change=change):
+                lua = self._research_lua(code)
+                lua.execute("page.autoXiulian=true;page:setXiuLianPropShow({['1000']=999999})")
+                lua.execute(change)
+                lua.execute('''
+                    for i=1,5 do
+                      if #timers==0 then break end
+                      table.sort(timers,function(a,b) return a.at<b.at end)
+                      local t=table.remove(timers,1); clock=t.at; t.fn()
+                    end
+                    n5513=0;for _,r in ipairs(requests) do if r.type==5513 then n5513=n5513+1 end end
+                ''')
+                self.assertEqual(int(lua.globals().n5513), 0, change)
+
+    def _research_lua(self, code, **settings):
+        from lupa.lua51 import LuaRuntime
+        lua = LuaRuntime()
+        lua.execute(AUTO_RESEARCH_LUA)
+        for name in ("executeXiulian", "setXiuLianStateShow", "getXiulianProp",
+                     "setXiuLianPropShow", "xiuLianSuccess", "autoResearchKick"):
+            start = code.index("function generalup.%s(" % name)
+            lua.execute(code[start:code.index("\nend", start)+len("\nend")])
+        for key, value in settings.items():
+            lua.globals()[key] = value
+        return lua
+
+    @staticmethod
+    def _pump_research(lua, steps=300):
+        lua.execute('''
+            page:executeXiulian()
+            for i=1,%d do
+              if #timers==0 then break end
+              table.sort(timers,function(a,b) return a.at<b.at end)
+              local t=table.remove(timers,1); clock=t.at; t.fn()
+            end
+            n5513=0;n12001=0
+            for _,r in ipairs(requests) do
+              if r.type==5513 then n5513=n5513+1 elseif r.type==12001 then n12001=n12001+1 end
+            end
+        ''' % steps)
 
     def test_native_auto_research_continues_through_level_up(self):
         from lupa.lua51 import LuaRuntime
         code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
         self.assertNotIn("(not self.levelUp)", code)
-        self.assertIn('if self.selectpage == "xiulian" and self.autoXiulian then', code)
-        start = code.index("function generalup.setXiuLianPropShow(")
-        block = code[start:code.index("\nend", start)+len("\nend")]
-        for level_up, auto in product((False, True), (True, False)):
-            with self.subTest(level_up=level_up, auto=auto):
-                lua = LuaRuntime()
-                lua.execute('''generalup={};printT=function() end;print=function() end
-                    gameConfig={strings={string_common=function() return "" end}};ui={setLabelString=function() end}
-                    CCControlEventTouchUpInside=1;CCDelayTime={create=function() return {} end}
-                    CCCallFunc={create=function(_,fn) return fn end}
-                    CCSequence={createWithTwoActions=function(_,delay,fn) return fn end}
-                    delayed={};local node=setmetatable({runAction=function(self,fn) delayed[#delayed+1]=fn end},
-                        {__index=function() return function() end end})
-                    page=setmetatable({data={general={iid=7}},localPartnerGeneration=3,selectpage="xiulian",
-                        autoXiulian=%s,levelUp=%s,xiuLianProps={},xiuLianAddData={[7]={}},
-                        rootItems=setmetatable({}, {__index=function() return node end}),
-                        executeXiulian=function() executed=(executed or 0)+1 end,
-                        setXiuLianData=function() refreshed=(refreshed or 0)+1 end,
-                        setXiuLianStateShow=function() refreshed=(refreshed or 0)+1 end}, {__index=generalup})''' % (
-                        'true' if auto else 'false', 'true' if level_up else 'false'))
-                lua.execute(block)
-                lua.execute('page:setXiuLianPropShow({})')
-                self.assertEqual(lua.eval('#delayed'), 1 if auto else 0)
-                if auto:
-                    lua.execute('delayed[1]()')
-                self.assertEqual(lua.globals().executed, 1 if auto else None)
-                self.assertEqual(bool(lua.globals().page.autoXiulian), auto)
-                if auto:
-                    self.assertFalse(lua.globals().page.levelUp)
-                    self.assertIsNone(lua.globals().refreshed)
+        self.assertIn("function generalup.autoResearchKick(self)", code)
+        self.assertIn("localPartnerGrowthBusy", code)
+        self.assertIn("    self:setXiuLianStateShow()\n    self:autoResearchKick()", code)
+        # 新函数必须插在顶层 return 之前，否则整个脚本编译失败。
+        self.assertLess(code.index("function generalup.autoResearchKick"), code.index("\nreturn generalup"))
+        LuaRuntime().compile(code)
+        # 旧实现只要 12001 材料回显丢一次就永久停住（autoXiulian 仍为真、无定时器）；
+        # 5513 慢回显还会在上一笔未回时并发再发一笔。以下场景都必须连续升学且不冲突。
+        for label, settings, minimum in (
+            ("正常连续升学", {}, 90),
+            ("偶发丢失一次材料回显", {"dropLeft": 1}, 90),
+            ("周期性丢失材料回显", {"dropEvery": 3}, 90),
+            ("5513 慢回显", {"netdelay": 0.35}, 60),
+            ("慢回显叠加周期丢失", {"netdelay": 0.35, "dropEvery": 3}, 60),
+        ):
+            with self.subTest(label):
+                lua = self._research_lua(code, **settings)
+                self._pump_research(lua)
+                g = lua.globals()
+                self.assertGreaterEqual(int(g.n5513), minimum, label)
+                self.assertEqual(int(g.conflicting), 0, label)
+                self.assertTrue(bool(g.page.autoXiulian), label)
+                self.assertGreater(int(g.level), 5, label)
+                self.assertGreater(int(lua.eval('#timers')), 0, label)
+
+    def test_auto_research_kick_stops_when_cancelled_or_generation_changes(self):
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        for label, mutation in (
+            ("手动取消", "page.autoXiulian=false"),
+            ("切换世代", "page.localPartnerGeneration=page.localPartnerGeneration+1"),
+            ("切换页面", 'page.selectpage="tupo"'),
+        ):
+            with self.subTest(label):
+                lua = self._research_lua(code)
+                lua.execute("page.autoXiulian=true;page:autoResearchKick()")
+                lua.execute(mutation)
+                lua.execute('''
+                    for i=1,5 do
+                      if #timers==0 then break end
+                      table.sort(timers,function(a,b) return a.at<b.at end)
+                      local t=table.remove(timers,1); clock=t.at; t.fn()
+                    end
+                    n5513=0;for _,r in ipairs(requests) do if r.type==5513 then n5513=n5513+1 end end
+                ''')
+                self.assertEqual(int(lua.globals().n5513), 0, label)
 
     def test_native_soaring_animation_completion_never_touches_closed_generation(self):
         from lupa.lua51 import LuaRuntime
