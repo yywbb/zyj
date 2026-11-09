@@ -105,7 +105,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if len(search) > 100 or offset < 0 or kind not in valid_kinds:
                     raise ValueError("物品查询参数无效")
                 rows = [row for row in self.server.gm.items.values() if (not kind or row["kind"] == kind)
-                        and (not search or search in f'{row["cid"]} {row["name"]}'.casefold())]
+                        and (not search or search in f'{row["cid"]} {row["name"]} {row.get("description", "")}'.casefold())]
                 rows.sort(key=lambda row: str(row["cid"]) != search)
                 return self._send(200, {"rows": rows[offset:offset + 50], "total": len(rows), "offset": offset})
             if not writing and route.path == "/api/operations":

@@ -10,6 +10,7 @@ import struct
 import tempfile
 import threading
 import unittest
+import urllib.parse
 import uuid
 from unittest.mock import patch
 
@@ -1092,6 +1093,23 @@ class GmTests(AdminFixture):
         self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
         self.assertEqual(self.store.path(1).read_bytes(), restored)
 
+    def test_gm_grant_horse_qilin_synthesized_instances(self):
+        save = self.store.snapshot(1)["save"]
+        save["guide"]["sections"]["1"].update(status=2, step=COUNTS[1])
+        player.save_role(save, self.store.path(1), COUNTS)
+        before = views.detail(self.store.snapshot(1), COUNTS, CONFIG)
+        request = self.request(items=[{"cid": 25405, "count": 1}, {"cid": 26419, "count": 1}])
+        result = self.gm.apply(1, request)
+        self.assertEqual(result["status"], "success")
+        after = views.detail(self.store.snapshot(1), COUNTS, CONFIG)
+        self.assertIsNone(after["error"])
+        self.assertEqual(len(after["equipment"]), len(before["equipment"]) + 2)
+        qilins = [e for e in after["equipment"] if e["cid"] in (25405, 26419)]
+        self.assertEqual(len(qilins), 2)
+        self.assertEqual({e["cid"] for e in qilins}, {25405, 26419})
+        self.assertTrue(all(e["level"] == 1 and e["iid"] > 1000000 for e in qilins))
+        self.assertEqual({r["cid"] for r in result["changes"] if "cid" in r}, {25405, 26419})
+
     def test_coin_adjustments_allow_int64_while_other_resources_stay_int32(self):
         data = Session(TABLES, self.store.path(1), COUNTS, CONFIG).save
         data["role_state"]["coin"] = (1 << 31) - 1
@@ -1672,6 +1690,17 @@ class AdminHttpTests(AdminFixture):
         code, _, catalog = self.request("/api/catalog?q=20014")
         self.assertEqual(code, 200)
         self.assertEqual(catalog["rows"][0]["cid"], 20014)
+        code, _, qilin_catalog = self.request("/api/catalog?q=" + urllib.parse.quote("麒麟"))
+        self.assertEqual(code, 200)
+        qilin_cids = {row["cid"] for row in qilin_catalog["rows"]}
+        self.assertIn(25405, qilin_cids)
+        self.assertIn(26419, qilin_cids)
+        q5 = next(r for r in qilin_catalog["rows"] if r["cid"] == 25405)
+        q6 = next(r for r in qilin_catalog["rows"] if r["cid"] == 26419)
+        self.assertEqual(q5["kind"], "普通装备")
+        self.assertEqual(q6["kind"], "普通装备")
+        self.assertIn("坐骑 / 品质5", q5["description"])
+        self.assertIn("坐骑 / 品质6", q6["description"])
         common = self.request("/api/status")[2]["common_items"]
         self.assertIn(20100, [row["cid"] for row in common])
         self.assertTrue(all(row["name"] == CONFIG["props"][str(row["cid"])]["name"] for row in common))

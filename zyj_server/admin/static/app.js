@@ -355,7 +355,19 @@ async function loadCatalog(offset = 0) {
   const result = await api(`/api/catalog?${new URLSearchParams({ q: $("catalog-query").value.trim(), kind: $("catalog-kind").value, offset })}`);
   if (request !== catalogRequest) return;
   state.catalogOffset = offset;
-  $("catalog-rows").replaceChildren(table(result.rows, [["物品", (r) => { const span = node("span", r.name); span.title = r.description; return span; }], ["ID / 类型", (r) => `${r.cid} / ${r.kind}`],
+  $("catalog-rows").replaceChildren(table(result.rows, [["物品", (r) => {
+    const span = node("span", r.name);
+    span.title = r.description || "";
+    if (r.description && r.description.includes(" · ")) {
+      const meta = r.description.split(" · ")[0];
+      const small = node("small", ` (${meta})`, "help");
+      small.style.marginLeft = "4px";
+      const wrapper = node("span");
+      wrapper.append(span, small);
+      return wrapper;
+    }
+    return span;
+  }], ["ID / 类型", (r) => `${r.cid} / ${r.kind}`],
     ["操作", (r) => button("添加", () => addItem(r))]], "未找到物品，请修改名称、ID 或类型。"));
   pager("catalog", offset, result.total);
 }
@@ -365,7 +377,13 @@ function addItem(item) {
 }
 function renderCart() {
   $("cart-count").textContent = `${cart.length} 种`;
-  $("gm-cart").replaceChildren(table(cart, [["物品", (r) => r.name || String(r.cid)], ["数量", (r) => {
+  $("gm-cart").replaceChildren(table(cart, [["物品", (r) => {
+    if (r.description && r.description.includes(" · ")) {
+      const meta = r.description.split(" · ")[0];
+      return `${r.name || r.cid} (${meta})`;
+    }
+    return r.name || String(r.cid);
+  }], ["数量", (r) => {
     const input = node("input"); input.type = "number"; input.min = "1"; input.max = r.max || 1000000; input.step = "1"; input.required = true; input.value = r.count;
     input.setAttribute("aria-label", `${r.name || r.cid}数量`); input.oninput = () => { r.count = Number(input.value); renderPreview(); }; return input;
   }], ["操作", (r) => button("移除", () => { cart = cart.filter((item) => item.cid !== r.cid); renderCart(); })]], "从左侧目录添加本次要发放的物品。"));
@@ -659,7 +677,10 @@ function renderMailCart() {
       return chk;
     }],
     ["物品", (r) => {
-      const span = node("span", r.name || String(r.cid));
+      const title = r.description && r.description.includes(" · ")
+        ? `${r.name || r.cid} (${r.description.split(" · ")[0]})`
+        : (r.name || String(r.cid));
+      const span = node("span", title);
       span.title = `ID: ${r.cid}${r.kind ? ` · ${r.kind}` : ""}`;
       return span;
     }],
@@ -728,6 +749,14 @@ function renderMailCatalogRows() {
     ["物品", (r) => {
       const span = node("span", r.name);
       span.title = r.description || "";
+      if (r.description && r.description.includes(" · ")) {
+        const meta = r.description.split(" · ")[0];
+        const small = node("small", ` (${meta})`, "help");
+        small.style.marginLeft = "4px";
+        const wrapper = node("span");
+        wrapper.append(span, small);
+        return wrapper;
+      }
       return span;
     }],
     ["ID / 类型", (r) => `${r.cid} / ${r.kind}`],

@@ -117,15 +117,25 @@ def catalog(config):
                 rows.append({"cid": cid, "name": name if name.endswith("碎片") else f"{name}碎片", "kind": "装备碎片",
                              "description": "装备合成碎片", "max": 1000000})
 
-    # 9. 普通装备 (equip)
+    # 9. 普通装备 / 坐骑 / 宝物 (equip)
     if "equip" in config:
+        equip_types = {
+            "weapon": "武器", "armor": "衣服", "head": "头盔", "accessory": "配饰",
+            "horse": "坐骑", "treasure": "宝物"
+        }
         for key, row in config["equip"].items():
             cid = int(key)
-            if row.get("type") in ("weapon", "armor", "head", "accessory"):
+            etype = row.get("type")
+            if etype in equip_types and row.get("adorn", 1) == 1:
                 if cid not in seen:
                     seen.add(cid)
+                    desc = row.get("desc", "")
+                    q = row.get("quality")
+                    type_label = equip_types[etype]
+                    if q:
+                        desc = f"{type_label} / 品质{q} · {desc}" if desc else f"{type_label} / 品质{q}"
                     rows.append({"cid": cid, "name": row.get("name", ""), "kind": "普通装备",
-                                 "description": row.get("desc", ""), "max": 100})
+                                 "description": desc, "max": 100})
 
     # 10. 觉醒道具 (redl_awake_item)
     if "redl_awake_item" in config:
