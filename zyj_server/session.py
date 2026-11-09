@@ -229,9 +229,6 @@ class Session:
             except ValueError as error:
                 return unavailable_response(opcode, seq, body, str(error))
 
-        if opcode in (1346, 1348):
-            return unavailable_response(opcode, seq, body, "活动副本扫荡暂未接入，请选择实际挑战，未消耗次数或资源。")
-
         if opcode == 1107 and body:
             return unavailable_response(opcode, seq, body, "装备碎片列表查询不接受参数")
 
@@ -382,7 +379,7 @@ class Session:
         local_development = (opcode in development.MUTATIONS and (opcode != 1057
                              or self.save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2))
         if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or opcode in (301, 1016, 1305, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1004, 1005, 1007, 1009, 1130, 2038, *welfare.CLAIMS,
-                                  *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS, *activity_copy.BATTLES, *hades_copy.MUTATIONS, *arena.MUTATIONS,
+                                  *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS, *activity_copy.BATTLES, *activity_copy.SWEEPS, *hades_copy.MUTATIONS, *arena.MUTATIONS,
                                   *watchstar.MUTATIONS, *artifact.MUTATIONS, *antique.MUTATIONS, *champion.MUTATIONS, *nightclub.MUTATIONS, *dragon_wishing.MUTATIONS, *gamestar.MUTATIONS, *deployment.MUTATIONS, *partner_growth.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
                                   *rob.MUTATIONS, *blackmarket.MUTATIONS, *wing.MUTATIONS, *cover.MUTATIONS, *exchange.MUTATIONS,

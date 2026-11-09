@@ -204,8 +204,8 @@ class ActivityCopyTests(unittest.TestCase):
                 self.assert_rejected(opcode, recharge.ids(values))
         for opcode in (1343, 1344, 1345, 1347):
             self.assert_rejected(opcode, recharge.ids([1]))
-        for opcode in (1346, 1348):
-            self.assert_rejected(opcode, recharge.ids([1, 1]))
+        self.assert_rejected(1346, recharge.ids([1, 999]))
+        self.assert_rejected(1348, recharge.ids([1, 1]))
         comb = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 1342) + protocol.encode_pb_field(2, 2, recharge.ids([1])))
         self.assert_rejected(999900, comb)
         self.session.save["role_state"]["level"] = 22
@@ -526,6 +526,63 @@ class ActivityCopyTests(unittest.TestCase):
         self.rows()
         self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["used"], 0)
         self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["bought"], 0)
+
+    def test_single_sweep_1346(self):
+        # 初始状态等级升到 60 级以解锁更高难度
+        self.session.save["role_state"]["level"] = 60
+        before_stone = self.prop_count(self.session.save, 20270)
+        # 对锻造石副本(aid=3)第 1 难度进行一键完成
+        packets = self.session.handle(1346, 501, recharge.ids([3, 1]))
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1346)
+        # 验证次数使用增加 1，cleared 推进到 1
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["used"], 1)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["cleared"], 1)
+        # 验证背包中获得了锻造石
+        after_stone = self.prop_count(self.session.save, 20270)
+        self.assertGreater(after_stone, before_stone)
+
+        # 挑战 Boss 银币副本(aid=2)第 1 难度一键完成
+        before_coin = self.session.save["role_state"]["coin"]
+        packets = self.session.handle(1346, 502, recharge.ids([2, 1]))
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1346)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["2"]["used"], 1)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["2"]["cleared"], 1)
+        self.assertEqual(self.session.save["role_state"]["coin"], before_coin + 50000)
+
+        # 验证未解锁难度拒绝
+        self.assert_rejected(1346, recharge.ids([3, 10]))
+        # 验证参数错误拒绝
+        self.assert_rejected(1346, recharge.ids([3]))
+        self.assert_rejected(1346, recharge.ids([99, 1]))
+
+        # 次数耗尽校验
+        self.session.save["activity_copy_state"]["copies"]["3"]["used"] = 2
+        self.assert_rejected(1346, recharge.ids([3, 1]))
+
+    def test_batch_sweep_1348(self):
+        self.session.save["role_state"]["level"] = 60
+        # 先通关 aid=1(经验) 和 aid=3(锻造石) 第 1 难度
+        self.session.save["activity_copy_state"]["copies"]["1"].update(cleared=1, tried=1)
+        self.session.save["activity_copy_state"]["copies"]["3"].update(cleared=1, tried=1)
+
+        before_exp_items = self.prop_count(self.session.save, 26407) + self.prop_count(self.session.save, 26410)
+        before_stone = self.prop_count(self.session.save, 20270)
+
+        # 批量扫荡：经验副本 1 次，锻造石副本 2 次
+        packets = self.session.handle(1348, 601, recharge.ids([1, 1, 3, 2]))
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1348)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["1"]["used"], 1)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["used"], 2)
+
+        after_stone = self.prop_count(self.session.save, 20270)
+        self.assertGreater(after_stone, before_stone)
+
+        # 次数不足拒绝
+        self.assert_rejected(1348, recharge.ids([3, 1]))
+        # 未通关难度拒绝 (aid=4 cleared=0)
+        self.assert_rejected(1348, recharge.ids([4, 1]))
+        # 奇数参数拒绝
+        self.assert_rejected(1348, recharge.ids([1, 1, 3]))
 
 
 if __name__ == "__main__":

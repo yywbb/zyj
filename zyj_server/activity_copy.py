@@ -9,6 +9,7 @@ from .protocol import encode_pb_field, iter_pb_fields
 
 
 QUERIES = (1340,)
+SWEEPS = (1346, 1348)
 BATTLES = (1341, 1342, 1343, 1344, 1345, 1347)
 # aid: 配置表、挑战协议、功能入口、每日基础次数字段。
 COPIES = {1: ("exp_copy", 1342, 157, "exp_copy_times"),
@@ -103,7 +104,16 @@ def rosters(save, aid, difficulty, config):
     return attack, defense, config
 
 
-def reward(save, aid, difficulty, percent, config, day, seed):
+def parse_ids(body):
+    values = []
+    for n, w, v in iter_pb_fields(body):
+        if (n, w) != (1, 0) or not 0 <= v < (1 << 31):
+            raise ValueError("活动副本参数格式错误")
+        values.append(v)
+    return values
+
+
+def calculate_prizes(aid, difficulty, percent, config, day, seed):
     row, rng = config[COPIES[aid][0]][str(difficulty)], random.Random(seed ^ 0xD09)
     prizes = []
     if aid in BOSSES:
@@ -120,7 +130,12 @@ def reward(save, aid, difficulty, percent, config, day, seed):
     weekday = (day + 3) % 7 + 1
     rows = [r for r in config["activity_huodong"].values() if r["param"] == 6 and r["open_time"] == weekday]
     factor = Fraction(str(rows[0]["modulus"])) if rows else Fraction(1)
-    return activities.build_reward(save, ";".join(f"{cid},{int(count * factor)}" for cid, count in prizes), config)
+    return [(cid, int(count * factor)) for cid, count in prizes if int(count * factor) > 0]
+
+
+def reward(save, aid, difficulty, percent, config, day, seed):
+    prizes = calculate_prizes(aid, difficulty, percent, config, day, seed)
+    return activities.build_reward(save, ";".join(f"{cid},{count}" for cid, count in prizes), config)
 
 
 def prepare(opcode, save, body, config, now, seed):
@@ -131,11 +146,84 @@ def prepare(opcode, save, body, config, now, seed):
         if body:
             raise ValueError("活动副本查询不接受参数")
         return query(save, state, config), b""
+    if (now + 28800) // 86400 < state["day"]:
+        raise ValueError("服务器日期回拨，请稍后挑战活动副本")
+    if opcode == 1346:
+        values = parse_ids(body)
+        if len(values) != 2:
+            raise ValueError("活动副本一键完成参数无效")
+        aid, difficulty = values
+        if aid not in COPIES or difficulty <= 0:
+            raise ValueError("活动副本一键完成参数无效")
+        if aid not in open_copies(state, config):
+            raise ValueError("未到活动副本开放日")
+        table, _, build, limit = COPIES[aid]
+        point = config[table].get(str(difficulty))
+        row = state["copies"][str(aid)]
+        eligible = max((int(pid) for pid, pt in config[table].items() if pt["monster_level"] <= save["role_state"]["level"]), default=1)
+        if (not point or save["role_state"]["level"] < max(config["build"][str(build)]["level"], point["monster_level"])
+                or difficulty > min(row["cleared"] + 1, eligible)):
+            raise ValueError("活动副本难度尚未解锁")
+        if row["used"] >= config["vip"]["0"][limit] + row.get("bought", 0):
+            raise ValueError("活动副本今日挑战次数已用完")
+        row["used"] += 1
+        row["tried"] = max(row["tried"], difficulty)
+        row["cleared"] = max(row["cleared"], difficulty)
+        if aid == 3:
+            magic.record_count(save, "stone_copy", 1, config)
+        if aid == 5:
+            activities.record_liveness(save, 35, 1, config, now)
+        prize = reward(save, aid, difficulty, 100, config, state["day"], seed)
+        return prize, prize
+    if opcode == 1348:
+        values = parse_ids(body)
+        if not values or len(values) % 2 != 0:
+            raise ValueError("一键完成参数无效")
+        open_set = set(open_copies(state, config))
+        counts = {}
+        for i in range(0, len(values), 2):
+            aid, count = values[i], values[i + 1]
+            if aid not in COPIES or count <= 0:
+                raise ValueError("一键完成参数无效")
+            counts[aid] = counts.get(aid, 0) + count
+
+        targets = {}
+        for aid, count in counts.items():
+            table, _, build, limit = COPIES[aid]
+            if aid not in open_set:
+                raise ValueError("未到活动副本开放日")
+            if save["role_state"]["level"] < max(config["build"][str(build)]["level"], config["build"]["157"]["level"]):
+                raise ValueError("活动副本尚未解锁")
+            row = state["copies"][str(aid)]
+            if row["used"] + count > config["vip"]["0"][limit] + row.get("bought", 0):
+                raise ValueError("活动副本今日挑战次数已用完")
+            eligible = max((int(pid) for pid, pt in config[table].items() if pt["monster_level"] <= save["role_state"]["level"]), default=1)
+            difficulty = min(row["cleared"], eligible)
+            if difficulty <= 0:
+                raise ValueError("活动副本尚未通关任何难度，无法一键完成")
+            targets[aid] = (difficulty, count)
+
+        all_prizes = {}
+        step = 0
+        for aid, (difficulty, count) in targets.items():
+            row = state["copies"][str(aid)]
+            row["used"] += count
+            if aid == 3:
+                magic.record_count(save, "stone_copy", count, config)
+            if aid == 5:
+                activities.record_liveness(save, 35, count, config, now)
+            for _ in range(count):
+                prizes = calculate_prizes(aid, difficulty, 100, config, state["day"], seed ^ (step * 0x9e3779b9 + aid))
+                step += 1
+                for cid, cnt in prizes:
+                    all_prizes[cid] = all_prizes.get(cid, 0) + cnt
+
+        prize_spec = ";".join(f"{cid},{cnt}" for cid, cnt in all_prizes.items())
+        prize = activities.build_reward(save, prize_spec, config)
+        return prize, prize
     fields = list(iter_pb_fields(body))
     if len(fields) != 1 or fields[0][:2] != (1, 0) or not 0 < fields[0][2] < (1 << 31):
         raise ValueError("活动副本挑战需要一个有效难度")
-    if (now + 28800) // 86400 < state["day"]:
-        raise ValueError("服务器日期回拨，请稍后挑战活动副本")
     aid = next(aid for aid, (_, mid, _, _) in COPIES.items() if mid == opcode)
     table, _, build, limit = COPIES[aid]
     difficulty = fields[0][2]
