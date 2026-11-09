@@ -220,6 +220,83 @@ def load_visual_assets(base, src_apk):
             existing.add(name.casefold())
     return assets
 
+
+def build_missing_skill_ccb_assets(base, src_apk, existing):
+    """补齐战报会引用、原包却缺失的 <动画名>02.ccbi。
+
+    客户端 battleReportConvert 对伤害技能固定下发 name=<skillanimation.name>.."02"，
+    但原包 130 个技能动画只有 01 没有 02；CCBReader 读取空数据会在 native 层 SIGSEGV
+    （元始天尊「光子锁定」guangzisuoding 实测）。这里从 01 等长派生 02，并把内部
+    序列名 01 改为 02，使 runAnimationsForSequenceNamed 能匹配、完成回调正常触发。
+    """
+    with zipfile.ZipFile(src_apk) as z, zipfile.ZipFile(os.path.join(base, "configs_sec5.zip")) as cfg:
+        originals = set(z.namelist())
+        present = originals | set(existing)
+        rows = json.loads(cfg.read("5/skillanimation.json")).values()
+        assets = {}
+        for row in rows:
+            name = row.get("name")
+            if not name or not re.fullmatch(r"[A-Za-z0-9_]+", name):
+                continue
+            source = f"assets/battle/{name}/{name}01.ccbi"
+            target = f"assets/battle/{name}/{name}02.ccbi"
+            if source not in originals or target in present:
+                continue
+            data = z.read(source)
+            derived = data.replace((name + "01").encode(), (name + "02").encode())
+            assert len(derived) == len(data) and derived[:4] == b"ibcc"
+            assets[target] = derived
+            present.add(target)
+    return assets
+
+
+CCB_READER_GUARD = '''
+    -- [LocalMock] 原包部分技能动画只有 X01.ccbi，战报却下发 X02；CCBReader 读取
+    -- 不存在的 ccbi 会在 native 层 SIGSEGV。加载前先确认资源，缺失则回退同族 01，
+    -- 仍缺失就返回不可见空节点，绝不把空路径交给 native CCBReader。
+    do
+        local _fileUtils = CCFileUtils:sharedFileUtils()
+        local function _ccbExists(path)
+            if not string.find(path, "%.ccbi$") then path = path .. ".ccbi" end
+            return _fileUtils:fullPathForFilename(path) ~= path
+        end
+        if type(strFilePath) == "string" and not _ccbExists(strFilePath) then
+            local _dir = string.match(strFilePath, "^(.-)/[^/]+$")
+            local _base = _dir and string.match(_dir, "[^/]+$") or nil
+            local _fallback = _base and (_dir .. "/" .. _base .. "01.ccbi") or nil
+            if _fallback and _ccbExists(_fallback) then
+                cclog("[LocalMock] missing ccbi %q, use %q instead", strFilePath, _fallback)
+                strFilePath = _fallback
+            else
+                cclog("[LocalMock] missing ccbi %q, skip effect to avoid native crash", strFilePath)
+                local _empty = cc.Node:create()
+                _empty:setVisible(false)
+                return _empty, setmetatable({}, {__index = function() return nil end})
+            end
+        end
+    end
+'''
+
+
+def patch_ccb_reader_guard(code):
+    """给 common_lua/CCBReaderLoad.so 加资源存在性校验与空动画管理器兜底。"""
+    marker = "function CCBReaderLoad(strFilePath, proxy, bSetOwner, strOwnerName,timelineCallBacks)\n"
+    assert code.count(marker) == 1, "CCBReaderLoad 函数签名变化，需重新确认注入点"
+    code = code.replace(marker, marker + CCB_READER_GUARD)
+    owner_marker = 'ccb = ccb or {}\n'
+    assert code.count(owner_marker) == 1
+    code = code.replace(owner_marker, owner_marker +
+        "local _localDummyCCBAnimationManager = setmetatable({}, {__index = function() return function() end end})\n")
+    manager_marker = '    if nil ~= ccbControler["mAnimationManager"] then\n'
+    assert code.count(manager_marker) == 1
+    code = code.replace(manager_marker,
+        "    if ccbControler == nil then\n        return _localDummyCCBAnimationManager\n    end\n" + manager_marker)
+    nil_marker = '        cclog"WANG :: mAnimationManager is nil."\n'
+    assert code.count(nil_marker) == 1
+    code = code.replace(nil_marker, nil_marker + "        animationMgr = _localDummyCCBAnimationManager\n")
+    return code
+
+
 def patch_combo_animation_script(code):
     marker = "local posconfig = {"
     assert code.count(marker) == 1
@@ -4730,6 +4807,9 @@ end''' + code[end:]
         source = "net" if name in ("main", "accbyhttp/main_net", "adpat_code/start_net") else "ui"
         code = report_code + "\n" + code.replace(marker, marker + '    pcall(localReportLua, msg, "' + source + '")\n')
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+    ccb_code = read_script("CCBReaderLoad", "common_lua").decode("utf-8").replace("\r\n", "\n")
+    patched["assets/common_lua/CCBReaderLoad.so"] = xxtea_encrypt(
+        patch_ccb_reader_guard(ccb_code).encode("utf-8"), XXTEA_KEY)
     return patched
 
 
@@ -4869,6 +4949,9 @@ def main(argv=None):
 
     print("[1/4] Preparing patched Lua scripts...")
     visual_assets = load_visual_assets(base, src_apk)
+    derived_ccb = build_missing_skill_ccb_assets(base, src_apk, visual_assets)
+    visual_assets.update(derived_ccb)
+    print(f"  [CCB] Derived {len(derived_ccb)} missing skill animation 02.ccbi from 01")
     patched_lua = get_patched_lua_scripts()
     from build_client_reports import build_assets
     report_assets = build_assets(base, args.server_ip, patched_lua, find_tool, run_tool)
@@ -4917,7 +5000,8 @@ def main(argv=None):
             zout.writestr(filename, data)
         for filename, data in visual_assets.items():
             zout.writestr(filename, data)
-        print(f"  [Visuals] Added {len(visual_assets)} verified files; no existing assets replaced")
+        print(f"  [Visuals] Added {len(visual_assets)} verified files "
+              f"({len(derived_ccb)} derived skill CCBs); no existing assets replaced")
 
         print("  [Config] Injecting offline JSON configs into APK assets...")
         count = 0
