@@ -286,6 +286,100 @@ def lua_ccb_resource_table(keys):
             "local _localCcbFiles = {%s}\n" % entries)
 
 
+# 真机 logcat 证明：运行时生效的是 cocos/cocosbuilder 那份（它没有 ccbReader created
+# 日志，而 common_lua 版每次加载都会打）。只给 common_lua 打补丁等于没打，因此三份全打。
+CCB_READER_SCRIPTS = (
+    ("assets/common_lua/CCBReaderLoad.so", "CCBReaderLoad", "common_lua", "common_lua"),
+    ("assets/scripts/cocos/cocosbuilder/CCBReaderLoad.so", "CCBReaderLoad",
+     "scripts/cocos/cocosbuilder", "cocos/cocosbuilder"),
+    ("assets/scripts/adpat_demo/util/CCBReaderLoad.so", "CCBReaderLoad",
+     "scripts/adpat_demo/util", "adpat_demo/util"),
+)
+
+
+def ccb_max_shards(src_apk, extra_names=()):
+    """构建期实算每个技能真实存在的 01_N / 02_N 分片最大编号。
+
+    原包诛仙剑阵只有 02_1..02_7，而 numberOfPeople 按存活目标数递增（最多 8+），
+    yuhuangjuntuan 固定循环 1..8，battleReportConvert 的 random/order/posorder 也会
+    拼出越界编号。源头钳制可让文件名与动画序列名保持一致、完成回调正常触发。
+    """
+    with zipfile.ZipFile(src_apk) as z:
+        names = set(z.namelist())
+    names |= set(extra_names)
+    shards = {}
+    for name in names:
+        match = re.match(r"assets/battle/([A-Za-z0-9_]+)/\1(0[12])_(\d+)\.ccbi$", name)
+        if not match:
+            continue
+        key = (match.group(1), match.group(2))
+        shards[key] = max(shards.get(key, 0), int(match.group(3)))
+    return shards
+
+
+def lua_ccb_shard_table(shards):
+    """生成「真实最大分片号」表与钳制函数，注入战斗脚本文件顶部。"""
+    entries = "".join('["%s%s"]=%d,' % (anim, kind, n)
+                      for (anim, kind), n in sorted(shards.items()))
+    return ("-- [LocalMock] 每个技能 02_N / 01_N 分片的真实最大编号（构建期实算）。\n"
+            "-- 8 目标存活、固定 1..8 循环等都会拼出越界编号，必须在源头钳制，\n"
+            "-- 否则 CCBReader 读到不存在的 ccbi 会让 native 崩溃。\n"
+            "local _localCcbMaxShard = {%s}\n"
+            "local function LocalCcbShard(name, n)\n"
+            "    local maxN = _localCcbMaxShard[tostring(name) .. \"02\"]\n"
+            "    n = tonumber(n) or 1\n"
+            "    if maxN then\n"
+            "        if n > maxN then return maxN end\n"
+            "        if n < 1 then return 1 end\n"
+            "    end\n"
+            "    return n\n"
+            "end\n" % entries)
+
+
+def _script_text(patched, key):
+    """取脚本明文：优先用已注入的补丁版，否则回退到原包内脚本。"""
+    raw = patched.get(key)
+    if raw is None:
+        with zipfile.ZipFile(SRC_APK) as z:
+            raw = z.read(key)
+    data = xxtea_decrypt(raw, XXTEA_KEY)
+    return data[:struct.unpack("<I", data[-4:])[0]].decode("utf-8").replace("\r\n", "\n")
+
+
+def patch_skill_shard_clamp(patched, shards):
+    """把所有 02_N 拼接点钳制到真实存在的最大分片，文件名与序列名同步生效。"""
+    assert shards, "技能分片清单不能为空"
+    shard_code = lua_ccb_shard_table(shards)
+    rules = {
+        "assets/scripts/battleSkillModules.so": [
+            ('.."02_"..action.destccbmodule.index',
+             '.."02_"..LocalCcbShard(action.destccbmodule.name, action.destccbmodule.index)', 2),
+            ('.."02_"..index_',
+             '.."02_"..LocalCcbShard(action.destccbmodule.name, index_)', 2),
+            ('.."02_"..(tonumber(v.pos)<=7 and 1 or 2)',
+             '.."02_"..LocalCcbShard(action.destccbmodule.name, (tonumber(v.pos)<=7 and 1 or 2))', 1),
+            ('.."02_"..i', '.."02_"..LocalCcbShard(action.destccbmodule.name, i)', 3),
+            ('zhuxianjianzhen02_"..destnum',
+             'zhuxianjianzhen02_"..LocalCcbShard("zhuxianjianzhen", destnum)', 2),
+            ('"zhuxianjianzhen02_" .. destnum',
+             '"zhuxianjianzhen02_" .. LocalCcbShard("zhuxianjianzhen", destnum)', 1),
+        ],
+        "assets/scripts/battleReportConvert.so": [
+            ('.."02_"..select', '.."02_"..LocalCcbShard(skillanimation.name, select)', 1),
+            ('.."02_"..index', '.."02_"..LocalCcbShard(skillanimation.name, index)', 1),
+            ('.."02_"..posorderconfig[destaction.pos]',
+             '.."02_"..LocalCcbShard(skillanimation.name, posorderconfig[destaction.pos])', 1),
+        ],
+    }
+    for key, replacements in rules.items():
+        text = _script_text(patched, key)
+        for old, new, expected in replacements:
+            assert text.count(old) == expected, \
+                f"{key} 中 {old!r} 数量应为 {expected}，实为 {text.count(old)}，需重新确认注入点"
+            text = text.replace(old, new)
+        patched[key] = xxtea_encrypt((shard_code + text).encode("utf-8"), XXTEA_KEY)
+
+
 def lua_no_ccb02_table(names):
     """生成两个战斗脚本共用的「缺 02 资源」白名单 Lua 表。"""
     entries = "".join('["%s"]=true,' % name for name in names)
@@ -351,13 +445,29 @@ CCB_READER_GUARD = '''
         if type(strFilePath) == "string" and not _ccbAvailable(strFilePath) then
             local _dir = string.match(strFilePath, "^(.-)/[^/]+$")
             local _base = _dir and string.match(_dir, "[^/]+$") or nil
-            local _fallback = _base and (_dir .. "/" .. _base .. "01") or nil
-            if _fallback and _ccbAvailable(_fallback) then
-                cclog("[LocalMock] missing ccbi %q, use %q instead", strFilePath, _fallback)
-                strFilePath = _fallback
+            -- 缺 02_N 分片时优先复用同族 02_1，缺 02 时回退 01；两者都是真实资源。
+            local _pick = nil
+            for _, _suffix in ipairs({"02_1", "01"}) do
+                local _candidate = _base and (_dir .. "/" .. _base .. _suffix) or nil
+                if _candidate and _ccbAvailable(_candidate) then
+                    _pick = _candidate
+                    break
+                end
+            end
+            if _pick then
+                cclog("[LocalMock] missing ccbi %q, use %q instead", strFilePath, _pick)
+                strFilePath = _pick
             else
                 cclog("[LocalMock] missing ccbi %q, skip effect to avoid native crash", strFilePath)
-                local _empty = CCNode:create()
+                local _empty
+                local _ok = pcall(function()
+                    if type(cc) == "table" and cc.Node and cc.Node.create then
+                        _empty = cc.Node:create()
+                    else
+                        _empty = CCNode:create()
+                    end
+                end)
+                if not _ok or _empty == nil then _empty = CCNode:create() end
                 _empty:setVisible(false)
                 local _proxy = proxy or CCBProxy:create()
                 local _ctrl = setmetatable({}, {__index = function() return nil end})
@@ -368,16 +478,22 @@ CCB_READER_GUARD = '''
 '''
 
 
-def patch_ccb_reader_guard(code, ccb_keys=None):
-    """给 common_lua/CCBReaderLoad.so 加真实资源清单与空动画管理器兜底。
+def patch_ccb_reader_guard(code, ccb_keys=None, tag="unknown"):
+    """给任意一份 CCBReaderLoad.so 注入真实资源清单、启动标记与空动画管理器兜底。
 
+    三份同名脚本的形参名不同，只能用正则定位函数头。启动标记用于在真机 logcat
+    里确认到底哪一份被加载，避免再次出现「补丁打在不生效的副本上」。
     ccb_keys 为空时注入空表（单测的极小 fixture 用），真实构建由 main() 传入
     原包 + 视觉资源包实算出的完整清单并断言非空。
     """
-    code = lua_ccb_resource_table(ccb_keys or ()) + code
-    marker = "function CCBReaderLoad(strFilePath, proxy, bSetOwner, strOwnerName,timelineCallBacks)\n"
-    assert code.count(marker) == 1, "CCBReaderLoad 函数签名变化，需重新确认注入点"
-    code = code.replace(marker, marker + CCB_READER_GUARD)
+    header = lua_ccb_resource_table(ccb_keys or ()) + \
+        ('if cclog then cclog("[LocalMock] CCB guard active: %%q", %s) end\n'
+         % json.dumps(tag))
+    code = header + code
+    signatures = list(re.finditer(r"^function CCBReaderLoad\([^\n]*\)\n", code, re.M))
+    assert len(signatures) == 1, "CCBReaderLoad 函数签名数量变化，需重新确认注入点"
+    end = signatures[0].end()
+    code = code[:end] + CCB_READER_GUARD + code[end:]
     owner_marker = 'ccb = ccb or {}\n'
     assert code.count(owner_marker) == 1
     code = code.replace(owner_marker, owner_marker +
@@ -3652,7 +3768,7 @@ def patch_artifact_scripts(patched):
     put("battleReportConvert", code)
 
 
-def get_patched_lua_scripts(no02_names=None, ccb_keys=None):
+def get_patched_lua_scripts(no02_names=None, ccb_keys=None, ccb_shards=None):
     if no02_names is None:
         base = os.path.dirname(os.path.abspath(__file__))
         no02_names = skill_animations_without_ccb02(base, SRC_APK, visual_asset_names(base))
@@ -4905,13 +5021,18 @@ end''' + code[end:]
         source = "net" if name in ("main", "accbyhttp/main_net", "adpat_code/start_net") else "ui"
         code = report_code + "\n" + code.replace(marker, marker + '    pcall(localReportLua, msg, "' + source + '")\n')
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
-    ccb_code = read_script("CCBReaderLoad", "common_lua").decode("utf-8").replace("\r\n", "\n")
-    patched["assets/common_lua/CCBReaderLoad.so"] = xxtea_encrypt(
-        patch_ccb_reader_guard(ccb_code, ccb_keys).encode("utf-8"), XXTEA_KEY)
+    # 三份同名 CCBReaderLoad 全打：真机日志证明生效的是 cocos/cocosbuilder 那份，
+    # 只打 common_lua 会让防护完全失效（前三版均因此失败）。
+    for key, rel, folder, tag in CCB_READER_SCRIPTS:
+        code = read_script(rel, folder).decode("utf-8").replace("\r\n", "\n")
+        patched[key] = xxtea_encrypt(
+            patch_ccb_reader_guard(code, ccb_keys, tag).encode("utf-8"), XXTEA_KEY)
     # 单元测试会把 SRC_APK 换成不含战斗资源的极小 fixture，此时资源表为空，
     # 跳过命名补丁即可；真实构建在 main() 里显式断言非空，不会静默漏打。
     if no02_names:
         patch_skill_ccb_fallback(patched, no02_names)
+    if ccb_shards:
+        patch_skill_shard_clamp(patched, ccb_shards)
     return patched
 
 
@@ -5066,7 +5187,12 @@ def main(argv=None):
         "包内 ccbi 清单异常过小，资源实况判断不可信，拒绝构建"
     print(f"  [CCB] {len(ccb_keys)} real ccbi keys embedded; missing 02_N shards "
           f"will be rejected before reaching native CCBReader")
-    patched_lua = get_patched_lua_scripts(no02_names, ccb_keys)
+    ccb_shards = ccb_max_shards(src_apk, visual_assets)
+    assert ccb_shards or not has_battle_01, \
+        "原包存在战斗 01.ccbi 但分片清单为空，源头钳制无法生效，拒绝构建"
+    print(f"  [CCB] {len(ccb_shards)} skill shard series clamped at source "
+          f"(max 02_N={max(ccb_shards.values()) if ccb_shards else 0})")
+    patched_lua = get_patched_lua_scripts(no02_names, ccb_keys, ccb_shards)
     from build_client_reports import build_assets
     report_assets = build_assets(base, args.server_ip, patched_lua, find_tool, run_tool)
     config_data = dict(iter_config_bytes(os.path.join(base, "configs_sec5.zip")))
