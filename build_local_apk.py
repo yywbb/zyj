@@ -221,39 +221,80 @@ def load_visual_assets(base, src_apk):
     return assets
 
 
-def build_missing_skill_ccb_assets(base, src_apk, existing):
-    """补齐战报会引用、原包却缺失的 <动画名>02.ccbi。
+def skill_animations_without_ccb02(base, src_apk, visual_names=()):
+    """返回「有 01.ccbi、没有 02.ccbi」的技能动画名（按构建期资源实算）。
 
     客户端 battleReportConvert 对伤害技能固定下发 name=<skillanimation.name>.."02"，
-    但原包 130 个技能动画只有 01 没有 02；CCBReader 读取空数据会在 native 层 SIGSEGV
-    （元始天尊「光子锁定」guangzisuoding 实测）。这里从 01 等长派生 02，并把内部
-    序列名 01 改为 02，使 runAnimationsForSequenceNamed 能匹配、完成回调正常触发。
+    但原包 130 个技能动画只有 01 没有 02；CCBReader 读取不存在的 ccbi 会在 native 层
+    崩溃（元始天尊「光子锁定」guangzisuoding 实测）。不再从 01 派生 02：CCB 内部的
+    序列名与图片路径可能共用同一字符串（daniepan01.ccbi 内是 daniepan/daniepan01.png），
+    字节替换会把真实图片改成不存在的文件，native 层取不到精灵帧会 abort。
+    改为让客户端对这类技能直接下发真实的 01，动画序列与资源路径全部保持原样。
     """
-    with zipfile.ZipFile(src_apk) as z, zipfile.ZipFile(os.path.join(base, "configs_sec5.zip")) as cfg:
+    with zipfile.ZipFile(src_apk) as z:
         originals = set(z.namelist())
-        present = originals | set(existing)
+    present = originals | set(visual_names)
+    with zipfile.ZipFile(os.path.join(base, "configs_sec5.zip")) as cfg:
         rows = json.loads(cfg.read("5/skillanimation.json")).values()
-        assets = {}
-        for row in rows:
-            name = row.get("name")
-            if not name or not re.fullmatch(r"[A-Za-z0-9_]+", name):
-                continue
-            source = f"assets/battle/{name}/{name}01.ccbi"
-            target = f"assets/battle/{name}/{name}02.ccbi"
-            if source not in originals or target in present:
-                continue
-            data = z.read(source)
-            derived = data.replace((name + "01").encode(), (name + "02").encode())
-            assert len(derived) == len(data) and derived[:4] == b"ibcc"
-            assets[target] = derived
-            present.add(target)
-    return assets
+    result = set()
+    for row in rows:
+        name = row.get("name")
+        if not name or not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            continue
+        if (f"assets/battle/{name}/{name}01.ccbi" in originals
+                and f"assets/battle/{name}/{name}02.ccbi" not in present):
+            result.add(name)
+    return sorted(result)
+
+
+def visual_asset_names(base):
+    """只列视觉资源包里的 CCB 路径，不读内容，供资源实况判断使用。"""
+    with open(os.path.join(base, "client_visual_assets.json"), encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    with zipfile.ZipFile(os.path.join(base, manifest["archive"])) as archive:
+        return {"assets/" + name[len("compress/"):] for name in archive.namelist()
+                if name.startswith("compress/battle/") and name.endswith(".ccbi")}
+
+
+def lua_no_ccb02_table(names):
+    """生成两个战斗脚本共用的「缺 02 资源」白名单 Lua 表。"""
+    entries = "".join('["%s"]=true,' % name for name in names)
+    return ("-- [LocalMock] 原包缺少这些技能动画的 02.ccbi；战报须改发真实存在的 01，\n"
+            "-- 否则 native CCBReader 读取空文件会崩溃。禁止从 01 派生 02（会改坏图片路径）。\n"
+            "local _localNoSkillCcb02 = {%s}\n" % entries)
+
+
+def patch_skill_ccb_fallback(patched, no02_names):
+    """把战报与战斗特效里固定的 ..\"02\" 改为按资源实况选择 01 或 02。"""
+    assert no02_names, "缺 02 资源的技能动画名不能为空"
+    table_code = lua_no_ccb02_table(no02_names)
+    entries = {
+        "assets/scripts/battleReportConvert.so": (
+            'skillanimation.name.."02"',
+            'skillanimation.name..(_localNoSkillCcb02[skillanimation.name] and "01" or "02")',
+            2,
+        ),
+        "assets/scripts/battlegeneral.so": (
+            '_dir.."02"',
+            '_dir..(_localNoSkillCcb02[_dir] and "01" or "02")',
+            1,
+        ),
+    }
+    for key, (old, new, expected) in entries.items():
+        code = patched[key]
+        raw = xxtea_decrypt(code, XXTEA_KEY)
+        text = raw[:struct.unpack("<I", raw[-4:])[0]].decode("utf-8").replace("\r\n", "\n")
+        assert text.count(old) == expected, f"{key} 中 {old!r} 数量变化，需重新确认注入点"
+        text = text.replace(old, new)
+        text = table_code + text
+        patched[key] = xxtea_encrypt(text.encode("utf-8"), XXTEA_KEY)
 
 
 CCB_READER_GUARD = '''
-    -- [LocalMock] 原包部分技能动画只有 X01.ccbi，战报却下发 X02；CCBReader 读取
-    -- 不存在的 ccbi 会在 native 层 SIGSEGV。加载前先确认资源，缺失则回退同族 01，
-    -- 仍缺失就返回不可见空节点，绝不把空路径交给 native CCBReader。
+    -- [LocalMock] 部分技能动画只有 X01.ccbi，战报会请求 X02 / X02_N；CCBReader 读到
+    -- 不存在的 ccbi 会在 native 层崩溃。加载前先确认资源，缺失则回退同族 01（路径
+    -- 不带扩展名，CCBReader 内部会自行补 .ccbi），仍缺失就返回不可见空节点与可用的
+    -- 空动画管理器，绝不把空路径交给 native CCBReader。
     do
         local _fileUtils = CCFileUtils:sharedFileUtils()
         local function _ccbExists(path)
@@ -263,15 +304,17 @@ CCB_READER_GUARD = '''
         if type(strFilePath) == "string" and not _ccbExists(strFilePath) then
             local _dir = string.match(strFilePath, "^(.-)/[^/]+$")
             local _base = _dir and string.match(_dir, "[^/]+$") or nil
-            local _fallback = _base and (_dir .. "/" .. _base .. "01.ccbi") or nil
+            local _fallback = _base and (_dir .. "/" .. _base .. "01") or nil
             if _fallback and _ccbExists(_fallback) then
                 cclog("[LocalMock] missing ccbi %q, use %q instead", strFilePath, _fallback)
                 strFilePath = _fallback
             else
                 cclog("[LocalMock] missing ccbi %q, skip effect to avoid native crash", strFilePath)
-                local _empty = cc.Node:create()
+                local _empty = CCNode:create()
                 _empty:setVisible(false)
-                return _empty, setmetatable({}, {__index = function() return nil end})
+                local _proxy = proxy or CCBProxy:create()
+                local _ctrl = setmetatable({}, {__index = function() return nil end})
+                return _empty, _ctrl, _proxy
             end
         end
     end
@@ -3557,7 +3600,10 @@ def patch_artifact_scripts(patched):
     put("battleReportConvert", code)
 
 
-def get_patched_lua_scripts():
+def get_patched_lua_scripts(no02_names=None):
+    if no02_names is None:
+        base = os.path.dirname(os.path.abspath(__file__))
+        no02_names = skill_animations_without_ccb02(base, SRC_APK, visual_asset_names(base))
     scripts_dir = "/home/linux/games/zyj/scripts_decrypted/scripts"
     patched = {}
 
@@ -4810,6 +4856,10 @@ end''' + code[end:]
     ccb_code = read_script("CCBReaderLoad", "common_lua").decode("utf-8").replace("\r\n", "\n")
     patched["assets/common_lua/CCBReaderLoad.so"] = xxtea_encrypt(
         patch_ccb_reader_guard(ccb_code).encode("utf-8"), XXTEA_KEY)
+    # 单元测试会把 SRC_APK 换成不含战斗资源的极小 fixture，此时资源表为空，
+    # 跳过命名补丁即可；真实构建在 main() 里显式断言非空，不会静默漏打。
+    if no02_names:
+        patch_skill_ccb_fallback(patched, no02_names)
     return patched
 
 
@@ -4949,10 +4999,15 @@ def main(argv=None):
 
     print("[1/4] Preparing patched Lua scripts...")
     visual_assets = load_visual_assets(base, src_apk)
-    derived_ccb = build_missing_skill_ccb_assets(base, src_apk, visual_assets)
-    visual_assets.update(derived_ccb)
-    print(f"  [CCB] Derived {len(derived_ccb)} missing skill animation 02.ccbi from 01")
-    patched_lua = get_patched_lua_scripts()
+    no02_names = skill_animations_without_ccb02(base, src_apk, visual_assets)
+    with zipfile.ZipFile(src_apk) as source_zip:
+        has_battle_01 = any(name.startswith("assets/battle/") and name.endswith("01.ccbi")
+                            for name in source_zip.namelist())
+    assert no02_names or not has_battle_01, \
+        "原包存在 01.ccbi 但缺 02 清单为空，资源实况判断异常，拒绝构建"
+    print(f"  [CCB] {len(no02_names)} skill animations have only 01.ccbi; "
+          f"battle reports will request the real 01 (no synthetic CCB assets)")
+    patched_lua = get_patched_lua_scripts(no02_names)
     from build_client_reports import build_assets
     report_assets = build_assets(base, args.server_ip, patched_lua, find_tool, run_tool)
     config_data = dict(iter_config_bytes(os.path.join(base, "configs_sec5.zip")))
@@ -5001,7 +5056,7 @@ def main(argv=None):
         for filename, data in visual_assets.items():
             zout.writestr(filename, data)
         print(f"  [Visuals] Added {len(visual_assets)} verified files "
-              f"({len(derived_ccb)} derived skill CCBs); no existing assets replaced")
+              f"(no synthetic skill CCBs); no existing assets replaced")
 
         print("  [Config] Injecting offline JSON configs into APK assets...")
         count = 0
