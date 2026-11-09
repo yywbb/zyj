@@ -19,19 +19,35 @@ COPIES = {1: ("exp_copy", 1342, 157, "exp_copy_times"),
           6: ("forging_copy", 1347, 389, "forging_copy_times")}
 BOSSES = (2, 4, 5)
 
+# 301 购买类型对应的 (aid, buycount_price 消耗字段)
+BUY_KINDS = {
+    7: (2, "coin_copy_cost"),
+    8: (1, "exp_copy_cost"),
+    9: (3, "stone_cost"),
+    11: (4, "upstar_copy_cost"),
+    12: (5, "zhenfu_copy_cost"),
+    17: (6, "forging_cost"),
+}
+
 
 def get_state(save, config):
     state = save.setdefault("activity_copy_state", {"day": 0, "copies": {
-        str(aid): {"cleared": 0, "used": 0, "tried": 0} for aid in COPIES}})
+        str(aid): {"cleared": 0, "used": 0, "tried": 0, "bought": 0} for aid in COPIES}})
     if (not isinstance(state, dict) or type(state.get("day")) is not int or not 0 <= state["day"] < (1 << 31)
             or not isinstance(state.get("copies"), dict) or set(state["copies"]) != set(map(str, COPIES))):
         raise ValueError("活动副本存档无效")
+    vip = str(save.get("role_state", {}).get("vip", 0)) if "role_state" in save else "0"
     for aid, (table, _, _, limit) in COPIES.items():
         row = state["copies"][str(aid)]
-        if (not isinstance(row, dict) or any(type(row.get(k)) is not int for k in ("cleared", "used", "tried"))
+        row.setdefault("bought", 0)
+        max_buy = config["vip"][vip][limit] if vip in config["vip"] else config["vip"]["0"][limit]
+        max_allowed = config["vip"]["0"][limit] + max_buy
+        if (not isinstance(row, dict) or any(type(row.get(k)) is not int for k in ("cleared", "used", "tried", "bought"))
                 or not 0 <= row["cleared"] <= len(config[table])
                 or not row["cleared"] <= row["tried"] <= min(row["cleared"] + 1, len(config[table]))
-                or not 0 <= row["used"] <= config["vip"]["0"][limit]):
+                or not 0 <= row["used"] <= max_allowed
+                or not 0 <= row["bought"] <= max_buy
+                or row["used"] > config["vip"]["0"][limit] + row["bought"]):
             raise ValueError("活动副本进度或次数无效")
     return state
 
@@ -43,6 +59,7 @@ def settle(save, config, now):
         state["day"] = day
         for row in state["copies"].values():
             row["used"] = 0
+            row["bought"] = 0
     return state
 
 
@@ -129,7 +146,7 @@ def prepare(opcode, save, body, config, now, seed):
     if (not point or save["role_state"]["level"] < max(config["build"][str(build)]["level"], point["monster_level"])
             or difficulty > row["cleared"] + 1):
         raise ValueError("活动副本难度尚未解锁")
-    if row["used"] >= config["vip"]["0"][limit]:
+    if row["used"] >= config["vip"]["0"][limit] + row.get("bought", 0):
         raise ValueError("活动副本今日挑战次数已用完")
     attack, defense, combat_config = rosters(save, aid, difficulty, config)
     report = battle.simulate(attack, defense, combat_config, seed, attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config),
@@ -155,3 +172,54 @@ def prepare(opcode, save, body, config, now, seed):
                 + encode_pb_field(4, 2, prize)
                 + encode_pb_field(5, 2, json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
     return response, prize
+
+
+def buy(save, kind, count, quoted, config, now):
+    if not save.get("has_role"):
+        raise ValueError("请先创建角色")
+    if kind not in BUY_KINDS or count <= 0:
+        raise ValueError("活动副本购买类型或数量无效")
+    aid, cost_key = BUY_KINDS[kind]
+    table, _, build_id, limit = COPIES[aid]
+    if save["role_state"]["level"] < max(config["build"][str(build_id)]["level"], config["build"]["157"]["level"]):
+        raise ValueError("该活动副本尚未解锁")
+    state = settle(save, config, now)
+    if (now + 28800) // 86400 != state["day"]:
+        raise ValueError("服务器日期回拨，请稍后购买")
+    if aid not in open_copies(state, config):
+        raise ValueError("未到活动副本开放日")
+    row = state["copies"][str(aid)]
+    row.setdefault("bought", 0)
+    vip = str(save["role_state"]["vip"])
+    max_buy = config["vip"][vip][limit] if vip in config["vip"] else config["vip"]["0"][limit]
+    if row["bought"] + count > max_buy:
+        raise ValueError("今日购买次数不足")
+    prices = config["buycount_price"]
+    max_p = max(map(int, prices))
+    price = sum(prices[str(min(i, max_p))][cost_key] for i in range(row["bought"] + 1, row["bought"] + count + 1))
+    if quoted is not None and quoted != price:
+        raise ValueError("价格或每日次数已变化，请重新打开购买窗口")
+    row["bought"] += count
+    return price
+
+
+def rewrite_vip(body, save, config, now):
+    state = settle(save, config, now)
+    mapping = {
+        10: state["copies"]["2"].get("bought", 0),
+        11: state["copies"]["1"].get("bought", 0),
+        14: state["copies"]["3"].get("used", 0),
+        15: state["copies"]["3"].get("bought", 0),
+        23: state["copies"]["4"].get("bought", 0),
+        24: state["copies"]["5"].get("bought", 0),
+        32: state["copies"]["6"].get("bought", 0),
+    }
+    out = bytearray()
+    index = 0
+    for n, w, value in iter_pb_fields(body):
+        if (n, w) == (1, 0):
+            index += 1
+            if index in mapping:
+                value = mapping[index]
+        out.extend(encode_pb_field(n, w, value))
+    return bytes(out)

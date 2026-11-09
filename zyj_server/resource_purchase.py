@@ -24,15 +24,28 @@ def settle(save, now):
 
 def prepare(save, body, config, now):
     fields = list(iter_pb_fields(body))
-    if len(fields) != 3 or any((n, w) != (1, 0) or v >= (1 << 31) for n, w, v in fields):
+    if len(fields) not in (2, 3) or any((n, w) != (1, 0) or v >= (1 << 31) for n, w, v in fields):
         raise ValueError("购买资源需要数量和当前价格，请更新客户端")
-    kind, count, quoted = (v for _, _, v in fields)
-    if not save.get("has_role") or kind not in (1, 2, 3, 6) or count <= 0:
+    if len(fields) == 3:
+        kind, count, quoted = (v for _, _, v in fields)
+    else:
+        kind, count = (v for _, _, v in fields)
+        quoted = None
+    if not save.get("has_role") or count <= 0:
         raise ValueError("购买资源类型或数量无效")
     if kind == 1:
+        if quoted is None:
+            raise ValueError("购买资源需要数量和当前价格，请更新客户端")
         return arena.buy(save, count, quoted, config, now)
     if kind == 6:
+        if quoted is None:
+            raise ValueError("购买资源需要数量和当前价格，请更新客户端")
         return single_boss.buy(save, count, quoted, config, now)
+    from . import activity_copy
+    if kind in activity_copy.BUY_KINDS:
+        return activity_copy.buy(save, kind, count, quoted, config, now)
+    if kind not in (2, 3) or quoted is None:
+        raise ValueError("购买资源类型或数量无效")
     state = settle(save, now)
     if (now + 28800) // 86400 < state["day"]:
         raise ValueError("服务器日期回拨，请稍后重试")

@@ -479,6 +479,54 @@ class ActivityCopyTests(unittest.TestCase):
                         for pos, unit in report["endmeta"][side].items():
                             self.assertEqual((ext.endinfo[key][pos].hp, ext.endinfo[key][pos].ap), (unit["h"], unit["ap"]))
 
+    def test_stone_copy_purchase_vip_limits_and_challenge(self):
+        self.session.save["role_state"].update(level=31, gold=100000, vip=0)
+        self.strengthen()
+        status = protocol.parse_ids_pb(self.session.handle(300, 100, b"")[0][16:])
+        self.assertEqual(status[14], 0)
+        before_gold = self.session.save["role_state"]["gold"]
+        packets = self.session.handle(301, 101, recharge.ids([9, 1]))
+        self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 301)
+        self.assertEqual(protocol.pb_get_varint(packets[0][16:], 1), 1)
+        self.assertEqual(self.session.save["role_state"]["gold"], before_gold - 50)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["bought"], 1)
+
+        status = protocol.parse_ids_pb(self.session.handle(300, 102, b"")[0][16:])
+        self.assertEqual(status[14], 1)
+
+        packets = self.session.handle(301, 103, recharge.ids([9, 1, 80]))
+        self.assertEqual(protocol.pb_get_varint(packets[0][16:], 1), 1)
+        self.assertEqual(self.session.save["role_state"]["gold"], before_gold - 50 - 80)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["bought"], 2)
+
+        self.assert_rejected(301, recharge.ids([9, 1]))
+
+        self.session.save["role_state"]["vip"] = 27
+        gold_before_5 = self.session.save["role_state"]["gold"]
+        packets = self.session.handle(301, 104, recharge.ids([9, 5]))
+        self.assertEqual(protocol.pb_get_varint(packets[0][16:], 1), 1)
+        self.assertEqual(self.session.save["role_state"]["gold"], gold_before_5 - 1000)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["bought"], 7)
+
+        self.assert_rejected(301, recharge.ids([9, 1]))
+
+        for i in range(1, 10):
+            pkts = self.call(1343, [1], seq=200 + i)
+            self.assertTrue(self.report(pkts)["result"])
+            self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["used"], i)
+
+        self.assert_rejected(1343, recharge.ids([1]))
+
+        status = protocol.parse_ids_pb(self.session.handle(300, 300, b"")[0][16:])
+        self.assertEqual(status[13], 9)
+        self.assertEqual(status[14], 7)
+
+        self.clock.return_value = NOW + 86400
+        self.session = self.reconnect()
+        self.rows()
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["used"], 0)
+        self.assertEqual(self.session.save["activity_copy_state"]["copies"]["3"]["bought"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

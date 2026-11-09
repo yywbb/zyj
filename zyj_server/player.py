@@ -905,6 +905,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = welfare.rewrite_vip(body, save, resource_purchase.settle(save, now))
         body = arena.rewrite_vip(body, save, role_config, now)
         body = single_boss.rewrite_vip(body, save, role_config, now)
+        body = activity_copy.rewrite_vip(body, save, role_config, now)
     elif opcode == 301:
         price = resource_purchase.prepare(save, request_body, role_config, now)
         change_item_count(save, 1001, -price, role_config, now)
