@@ -1,14 +1,18 @@
 """战斗技能动画 CCB 缺失导致挑战闪退的回归。
 
-复现：普通副本点「挑战」后，元始天尊「光子锁定」(guangzisuoding) 触发
-battleReportConvert 下发 name=<动画名>.."02"，而原包只有 <动画名>01.ccbi；
-CCBReader 读取空 ccbi 在 native 层 SIGSEGV（GLThread, readNodeGraphFromFile）。
+三代修复历程（每次实机闪退都推翻了上一代的假设）：
+1. 元始天尊「光子锁定」guangzisuoding：battleReportConvert 固定下发 name.."02"，
+   原包只有 01.ccbi，CCBReader 读到空文件在 native 层 SIGSEGV。
+2. 从 01 等长派生 02.ccbi 又引入新崩溃：CCB 字符串表里序列名与真实图片路径
+   共用同一串（daniepan01.ccbi 内含 daniepan/daniepan01.png），字节替换会造出
+   不存在的 daniepan02.png，native 取不到精灵帧 abort。最终改为下发真实 01。
+3. 2026-11-10 01:04 诛仙剑阵再崩：原包只有 zhuxianjianzhen02_1..02_7，8 个
+   目标存活时 numberOfPeople 会请求 02_8；yuhuangjuntuan 固定循环 1..8。
+   根因是 CCBReaderLoad 防护用 fullPathForFilename(path) ~= path 判断存在性，
+   但该 API 对不存在的文件同样返回解析后的绝对路径，防护形同虚设。
 
-修复：不再从 01 派生 02.ccbi —— CCB 内部序列名与图片路径可能共用同一字符串
-（daniepan01.ccbi 内含 daniepan/daniepan01.png），字节替换会造出并不存在的
-daniepan02.png，native 层取不到精灵帧会 abort。改为按构建期资源实况，让战报与
-战斗特效对「只有 01」的技能直接下发真实的 01；CCBReaderLoad 再加一层资源防护，
-兜住 02_N / _6 / _7 等其它动态路径。
+最终方案：构建期实算包内全部真实 ccbi，归一化成 _localCcbFiles 注入
+CCBReaderLoad.so；缺失的战斗动画分片绝不交给 native，回退同族 01 或不可见空节点。
 """
 
 import inspect
@@ -111,18 +115,50 @@ class SkillCCBNamingTests(unittest.TestCase):
         self.assertEqual(choose("daniepan"), "daniepan01")
         self.assertEqual(choose("definitely_not_a_skill"), "definitely_not_a_skill02")
 
+    def test_zhuxianjianzhen_has_02_1_to_02_7_but_never_02_8(self):
+        """锁定 2026-11-10 01:04 崩溃：8 目标战斗请求了不存在的 02_8。"""
+        with zipfile.ZipFile(SRC_APK) as z:
+            names = set(z.namelist())
+        for i in range(1, 8):
+            self.assertIn(f"assets/battle/zhuxianjianzhen/zhuxianjianzhen02_{i}.ccbi", names)
+        self.assertNotIn("assets/battle/zhuxianjianzhen/zhuxianjianzhen02_8.ccbi", names)
+        self.assertNotIn("assets/battle/zhuxianjianzhen/zhuxianjianzhen01.ccbi", names)
 
+    def test_ccb_resource_keys_cover_every_packaged_ccbi(self):
+        keys = set(builder.ccb_resource_keys(SRC_APK))
+        self.assertGreater(len(keys), 1000)
+        with zipfile.ZipFile(SRC_APK) as z:
+            ccbi = [n for n in z.namelist() if n.lower().endswith(".ccbi")]
+        self.assertGreater(len(ccbi), 1000)
+        for name in ccbi:
+            rel = name[len("assets/"):-len(".ccbi")] if name.startswith("assets/") else name[:-len(".ccbi")]
+            self.assertIn("/".join(rel.split("/")[-2:]), keys, name)
+        self.assertIn("zhuxianjianzhen/zhuxianjianzhen02_7", keys)
+        self.assertNotIn("zhuxianjianzhen/zhuxianjianzhen02_8", keys)
+
+    def test_lua_resource_table_compiles_and_looks_up(self):
+        keys = builder.ccb_resource_keys(SRC_APK)
+        lua = lua51.LuaRuntime()
+        lua.execute(builder.lua_ccb_resource_table(keys) + "\n" +
+                    'has = function(k) return _localCcbFiles[k] == true end')
+        has = lua.globals().has
+        self.assertTrue(has("zhuxianjianzhen/zhuxianjianzhen02_7"))
+        self.assertFalse(has("zhuxianjianzhen/zhuxianjianzhen02_8"))
+
+    def test_existence_check_never_uses_full_path_for_filename(self):
+        """fullPathForFilename 对缺失文件同样返回绝对路径，绝不能再用于存在性判断。"""
+        self.assertNotIn("fullPathForFilename", builder.CCB_READER_GUARD)
+        self.assertIn("_localCcbFiles", builder.CCB_READER_GUARD)
+
+
+# fullPathForFilename 恒返回解析后的绝对路径 —— 这正是真机上的实际行为，
+# 也是上一版防护失效的原因；新防护必须完全不看它。
 LUA_STUBS = """
 cclog = function() end
-existing = setmetatable({}, {__index = function() return false end})
-checked = {}
 native_called = 0
 native_path = nil
 CCFileUtils = { sharedFileUtils = function() return {
-    fullPathForFilename = function(self, p)
-        checked[#checked + 1] = p
-        if existing[p] then return "assets/" .. p else return p end
-    end
+    fullPathForFilename = function(self, p) return "assets/" .. p end
 } end }
 CCNode = { create = function() return {setVisible = function() end} end }
 CCBProxy = { create = function() return {
@@ -135,12 +171,19 @@ CCBProxy = { create = function() return {
 } end }
 """
 
+TEST_CCB_KEYS = [
+    "guangzisuoding/guangzisuoding01",
+    "zhuxianjianzhen/zhuxianjianzhen02_1",
+    "zhuxianjianzhen/zhuxianjianzhen02_2",
+    "zhuxianjianzhen/zhuxianjianzhen02_7",
+]
 
-def fresh_runtime():
+
+def fresh_runtime(keys=None):
     lua = lua51.LuaRuntime()
     lua.execute(LUA_STUBS)
     source = builder.read_script("CCBReaderLoad", "common_lua").decode("utf-8").replace("\r\n", "\n")
-    lua.execute(builder.patch_ccb_reader_guard(source))
+    lua.execute(builder.patch_ccb_reader_guard(source, TEST_CCB_KEYS if keys is None else keys))
     return lua
 
 
@@ -152,31 +195,54 @@ class CCBReaderGuardTests(unittest.TestCase):
 
     def test_existing_ccbi_goes_through_native_reader_unchanged(self):
         lua = fresh_runtime()
-        lua.execute('existing["guangzisuoding/guangzisuoding02.ccbi"] = true')
         with self.assertRaises(lua51.LuaError) as caught:
-            lua.globals().CCBReaderLoad("guangzisuoding/guangzisuoding02", None, True, "guangzisuoding02")
+            lua.globals().CCBReaderLoad("zhuxianjianzhen/zhuxianjianzhen02_7", None, True, "z02_7")
         self.assertIn("NATIVE_READER_REACHED", str(caught.exception))
         self.assertEqual(lua.globals().native_called, 1)
-        self.assertEqual(lua.globals().native_path, "guangzisuoding/guangzisuoding02")
+        self.assertEqual(lua.globals().native_path, "zhuxianjianzhen/zhuxianjianzhen02_7")
 
     def test_missing_02_falls_back_to_real_01_without_extra_extension(self):
         lua = fresh_runtime()
-        lua.execute('existing["guangzisuoding/guangzisuoding01.ccbi"] = true')
         with self.assertRaises(lua51.LuaError) as caught:
             lua.globals().CCBReaderLoad("guangzisuoding/guangzisuoding02", None, True, "guangzisuoding02")
         self.assertIn("NATIVE_READER_REACHED", str(caught.exception))
-        checked = [lua.globals().checked[i] for i in range(1, len(lua.globals().checked) + 1)]
-        self.assertIn("guangzisuoding/guangzisuoding02.ccbi", checked)
-        self.assertIn("guangzisuoding/guangzisuoding01.ccbi", checked)
         # CCBReader 内部自行补 .ccbi，传入的路径不能带扩展名。
         self.assertEqual(lua.globals().native_path, "guangzisuoding/guangzisuoding01")
 
     def test_dynamic_02_n_falls_back_to_01(self):
         lua = fresh_runtime()
-        lua.execute('existing["guangzisuoding/guangzisuoding01.ccbi"] = true')
         with self.assertRaises(lua51.LuaError):
-            lua.globals().CCBReaderLoad("guangzisuoding/guangzisuoding02_3", None, True, "guangzisuoding02_3")
+            lua.globals().CCBReaderLoad("guangzisuoding/guangzisuoding02_3", None, True, "g02_3")
         self.assertEqual(lua.globals().native_path, "guangzisuoding/guangzisuoding01")
+
+    def test_missing_02_8_never_reaches_native_reader(self):
+        """本次实机崩溃的精确回归：fullPathForFilename 恒真也必须拦住 02_8。"""
+        lua = fresh_runtime()
+        node, items, proxy = lua.globals().CCBReaderLoad(
+            "zhuxianjianzhen/zhuxianjianzhen02_8", None, True, "zhuxianjianzhen02_8")
+        self.assertIsNotNone(node)
+        self.assertIsNotNone(items)
+        self.assertIsNotNone(proxy)
+        self.assertEqual(lua.globals().native_called, 0)
+        self.assertIsNone(lua.globals().native_path)
+        self.assertIsNone(items.topnode)
+        self.assertIsNotNone(lua.globals().getAnimationManager(items))
+
+    def test_unlisted_ui_path_is_not_blocked(self):
+        """非战斗路径不靠清单判定，避免误伤 UI 与热更资源。"""
+        lua = fresh_runtime()
+        with self.assertRaises(lua51.LuaError) as caught:
+            lua.globals().CCBReaderLoad("recharge/cell_recharge_info_new", None, True, "c")
+        self.assertIn("NATIVE_READER_REACHED", str(caught.exception))
+        self.assertEqual(lua.globals().native_path, "recharge/cell_recharge_info_new")
+
+    def test_single_segment_path_is_not_blocked(self):
+        """无目录的单段路径即使以 02 结尾也不按战斗分片拦截。"""
+        lua = fresh_runtime()
+        with self.assertRaises(lua51.LuaError) as caught:
+            lua.globals().CCBReaderLoad("panel02", None, True, "panel02")
+        self.assertIn("NATIVE_READER_REACHED", str(caught.exception))
+        self.assertEqual(lua.globals().native_path, "panel02")
 
     def test_fully_missing_resource_never_reaches_native_reader(self):
         lua = fresh_runtime()
@@ -201,14 +267,39 @@ class CCBReaderGuardTests(unittest.TestCase):
         self.assertIsNotNone(lua.globals().nil_manager)
 
     def test_patched_lua_scripts_include_guarded_common_lua_reader(self):
-        patched = builder.get_patched_lua_scripts()
+        keys = builder.ccb_resource_keys(SRC_APK)
+        patched = builder.get_patched_lua_scripts(ccb_keys=keys)
         key = "assets/common_lua/CCBReaderLoad.so"
         self.assertIn(key, patched)
         code = decrypt_script(patched, key)
         self.assertIn("missing ccbi", code)
         self.assertIn("_localDummyCCBAnimationManager", code)
+        self.assertIn("_localCcbFiles", code)
+        self.assertIn('["zhuxianjianzhen/zhuxianjianzhen02_7"]=true', code)
+        self.assertNotIn('["zhuxianjianzhen/zhuxianjianzhen02_8"]=true', code)
+        self.assertNotIn("fullPathForFilename", code)
         self.assertIn("CCNode:create()", code)
         lua51.LuaRuntime().execute("cclog = function() end\n" + code)
+
+    def test_real_packaged_script_blocks_02_8_but_allows_02_7(self):
+        """用真实包内清单 + 真机路径形态验证：缺失分片不进 native，存在分片正常。"""
+        keys = builder.ccb_resource_keys(SRC_APK)
+        patched = builder.get_patched_lua_scripts(ccb_keys=keys)
+        code = decrypt_script(patched, "assets/common_lua/CCBReaderLoad.so")
+        lua = lua51.LuaRuntime()
+        lua.execute(LUA_STUBS)
+        lua.execute("cclog = function() end\n" + code)
+        node, items, proxy = lua.globals().CCBReaderLoad(
+            "zhuxianjianzhen/zhuxianjianzhen02_8", None, True, "z02_8")
+        self.assertIsNotNone(node)
+        self.assertIsNotNone(items)
+        self.assertIsNotNone(proxy)
+        self.assertEqual(lua.globals().native_called, 0)
+        with self.assertRaises(lua51.LuaError) as caught:
+            lua.globals().CCBReaderLoad(
+                "zhuxianjianzhen/zhuxianjianzhen02_7", None, True, "z02_7")
+        self.assertIn("NATIVE_READER_REACHED", str(caught.exception))
+        self.assertEqual(lua.globals().native_path, "zhuxianjianzhen/zhuxianjianzhen02_7")
 
 
 if __name__ == "__main__":

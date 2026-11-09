@@ -256,6 +256,36 @@ def visual_asset_names(base):
                 if name.startswith("compress/battle/") and name.endswith(".ccbi")}
 
 
+def ccb_resource_keys(src_apk, extra_names=()):
+    """构建期实算包内真实存在的 ccbi，归一化成 CCBReaderLoad 的路径形态。
+
+    CCBReaderLoad 收到的 strFilePath 形如 "zhuxianjianzhen/zhuxianjianzhen02_8"
+    （没有 assets/ 前缀，也没有 .ccbi 后缀），因此统一取「最后两级目录/文件名」
+    作为查找键。原包诛仙剑阵只有 02_1..02_7，8 目标战斗会请求并不存在的 02_8。
+    """
+    with zipfile.ZipFile(src_apk) as z:
+        names = set(z.namelist())
+    names |= set(extra_names)
+    keys = set()
+    for name in names:
+        if not name.lower().endswith(".ccbi"):
+            continue
+        rel = name[len("assets/"):] if name.startswith("assets/") else name
+        rel = rel[:-len(".ccbi")]
+        parts = rel.split("/")
+        keys.add("/".join(parts[-2:]))
+    return sorted(keys)
+
+
+def lua_ccb_resource_table(keys):
+    """生成注入 CCBReaderLoad.so 的「真实存在资源」查找表。"""
+    entries = "".join("[%s]=true," % json.dumps(key) for key in keys)
+    return ("-- [LocalMock] 包内真实存在的 ccbi 清单（构建期实算，键为 dir/leaf）。\n"
+            "-- 禁止用 CCFileUtils 的路径解析接口判断存在性：它对不存在的文件同样\n"
+            "-- 返回解析后的绝对路径，曾导致防护形同虚设、战斗中再次 SIGSEGV。\n"
+            "local _localCcbFiles = {%s}\n" % entries)
+
+
 def lua_no_ccb02_table(names):
     """生成两个战斗脚本共用的「缺 02 资源」白名单 Lua 表。"""
     entries = "".join('["%s"]=true,' % name for name in names)
@@ -291,21 +321,38 @@ def patch_skill_ccb_fallback(patched, no02_names):
 
 
 CCB_READER_GUARD = '''
-    -- [LocalMock] 部分技能动画只有 X01.ccbi，战报会请求 X02 / X02_N；CCBReader 读到
-    -- 不存在的 ccbi 会在 native 层崩溃。加载前先确认资源，缺失则回退同族 01（路径
-    -- 不带扩展名，CCBReader 内部会自行补 .ccbi），仍缺失就返回不可见空节点与可用的
-    -- 空动画管理器，绝不把空路径交给 native CCBReader。
+    -- [LocalMock] 战报/战斗特效会按 .."02"、.."02_"..N 拼出并不存在的 ccbi：原包
+    -- 诛仙剑阵只有 02_1..02_7，8 目标存活时会请求 02_8；yuhuangjuntuan 固定循环
+    -- 到 8。native CCBReader 读到空文件即 SIGSEGV，Lua pcall 拦不住。
+    -- 判断依据是构建期实算的 _localCcbFiles，绝不能用 CCFileUtils 的路径解析
+    -- 接口：它对不存在的文件也返回绝对路径，之前的防护因此完全失效。
     do
-        local _fileUtils = CCFileUtils:sharedFileUtils()
-        local function _ccbExists(path)
-            if not string.find(path, "%.ccbi$") then path = path .. ".ccbi" end
-            return _fileUtils:fullPathForFilename(path) ~= path
+        local function _ccbKey(path)
+            path = string.gsub(path, "^assets/", "")
+            if string.lower(string.sub(path, -5)) == ".ccbi" then
+                path = string.sub(path, 1, -6)
+            end
+            local parent, leaf = string.match(path, "([^/]+)/([^/]+)$")
+            return leaf and (parent .. "/" .. leaf) or path
         end
-        if type(strFilePath) == "string" and not _ccbExists(strFilePath) then
+        local function _ccbAvailable(path)
+            if type(path) ~= "string" then return true end
+            local key = _ccbKey(path)
+            if _localCcbFiles[key] then return true end
+            -- 技能动画资源全部随包发布（isupdate=false），不在清单即确实缺失；
+            -- 只对带目录且形如 X01 / X02 / X02_N 的路径严格拦截，其它路径放行，
+            -- 避免误伤未列入清单的 UI / 热更资源或无目录的单段路径。
+            if string.find(key, "/") and
+               (string.find(key, "0[12]_[0-9]+$") or string.find(key, "0[12]$")) then
+                return false
+            end
+            return true
+        end
+        if type(strFilePath) == "string" and not _ccbAvailable(strFilePath) then
             local _dir = string.match(strFilePath, "^(.-)/[^/]+$")
             local _base = _dir and string.match(_dir, "[^/]+$") or nil
             local _fallback = _base and (_dir .. "/" .. _base .. "01") or nil
-            if _fallback and _ccbExists(_fallback) then
+            if _fallback and _ccbAvailable(_fallback) then
                 cclog("[LocalMock] missing ccbi %q, use %q instead", strFilePath, _fallback)
                 strFilePath = _fallback
             else
@@ -321,8 +368,13 @@ CCB_READER_GUARD = '''
 '''
 
 
-def patch_ccb_reader_guard(code):
-    """给 common_lua/CCBReaderLoad.so 加资源存在性校验与空动画管理器兜底。"""
+def patch_ccb_reader_guard(code, ccb_keys=None):
+    """给 common_lua/CCBReaderLoad.so 加真实资源清单与空动画管理器兜底。
+
+    ccb_keys 为空时注入空表（单测的极小 fixture 用），真实构建由 main() 传入
+    原包 + 视觉资源包实算出的完整清单并断言非空。
+    """
+    code = lua_ccb_resource_table(ccb_keys or ()) + code
     marker = "function CCBReaderLoad(strFilePath, proxy, bSetOwner, strOwnerName,timelineCallBacks)\n"
     assert code.count(marker) == 1, "CCBReaderLoad 函数签名变化，需重新确认注入点"
     code = code.replace(marker, marker + CCB_READER_GUARD)
@@ -3600,7 +3652,7 @@ def patch_artifact_scripts(patched):
     put("battleReportConvert", code)
 
 
-def get_patched_lua_scripts(no02_names=None):
+def get_patched_lua_scripts(no02_names=None, ccb_keys=None):
     if no02_names is None:
         base = os.path.dirname(os.path.abspath(__file__))
         no02_names = skill_animations_without_ccb02(base, SRC_APK, visual_asset_names(base))
@@ -4855,7 +4907,7 @@ end''' + code[end:]
         patched["assets/scripts/" + name + ".so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
     ccb_code = read_script("CCBReaderLoad", "common_lua").decode("utf-8").replace("\r\n", "\n")
     patched["assets/common_lua/CCBReaderLoad.so"] = xxtea_encrypt(
-        patch_ccb_reader_guard(ccb_code).encode("utf-8"), XXTEA_KEY)
+        patch_ccb_reader_guard(ccb_code, ccb_keys).encode("utf-8"), XXTEA_KEY)
     # 单元测试会把 SRC_APK 换成不含战斗资源的极小 fixture，此时资源表为空，
     # 跳过命名补丁即可；真实构建在 main() 里显式断言非空，不会静默漏打。
     if no02_names:
@@ -5007,7 +5059,14 @@ def main(argv=None):
         "原包存在 01.ccbi 但缺 02 清单为空，资源实况判断异常，拒绝构建"
     print(f"  [CCB] {len(no02_names)} skill animations have only 01.ccbi; "
           f"battle reports will request the real 01 (no synthetic CCB assets)")
-    patched_lua = get_patched_lua_scripts(no02_names)
+    ccb_keys = ccb_resource_keys(src_apk, visual_assets)
+    # 单测会把 SRC_APK 换成不含战斗资源的极小 fixture，按 has_battle_01 放行；
+    # 真实包必须给出完整清单，避免静默漏打导致防护失效。
+    assert len(ccb_keys) > 1000 or not has_battle_01, \
+        "包内 ccbi 清单异常过小，资源实况判断不可信，拒绝构建"
+    print(f"  [CCB] {len(ccb_keys)} real ccbi keys embedded; missing 02_N shards "
+          f"will be rejected before reaching native CCBReader")
+    patched_lua = get_patched_lua_scripts(no02_names, ccb_keys)
     from build_client_reports import build_assets
     report_assets = build_assets(base, args.server_ip, patched_lua, find_tool, run_tool)
     config_data = dict(iter_config_bytes(os.path.join(base, "configs_sec5.zip")))
