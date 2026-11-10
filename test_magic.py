@@ -134,6 +134,23 @@ class MagicTests(unittest.TestCase):
                 if caps[3] < 100:
                     self.assertEqual(caps[3], round(row["init4"]*100))
 
+    def test_automatic_percentage_stat_progressive_retention_allows_maxing_stat(self):
+        # 验证方案A：当百分比属性（如第3件法宝的闪避）在自动锻造中开启时，
+        # 内部采用单次渐进保留，能让百分比属性顺利提升并达到上限
+        save = copy.deepcopy(self.session.save)
+        save["role_state"]["level"] = 80
+        save["role_state"]["coin"] = 1000000000
+        state = magic.get_state(save, self.config)
+        save["magic_state"] = state
+        state["items"]["1"] = {"normal": [5740, 3190, 19140, 6000], "stage": 0, "fairy": [0]*4}
+        state["items"]["2"] = {"normal": [6890, 3830, 22960, 6000], "stage": 0, "fairy": [0]*4}
+        state["items"]["3"] = {"normal": [7650, 4250, 25520, 0], "stage": 0, "fairy": [0]*4}
+        # 勾选第4项（闪避只升不降），单次运行500次自动锻造
+        reply, costs, actual = magic.prepare(1364, save, recharge.ids([3, 2, 500, 0, 0, 0, 1, 0]), self.config, 42)
+        item = save["magic_state"]["items"]["3"]["normal"]
+        self.assertGreater(item[3], 0)
+        self.assertEqual(item[3], 10)  # 500次内闪避顺利达到满级 10 (即 10%)
+
     def test_strict_payloads_locks_limits_funds_and_unmatched_combs_are_non_mutating(self):
         for opcode, values in ((1360, [1]), (1361, []), (1362, [1, 1]), (1363, [1]), (1364, [1]*7), (1365, [0])):
             self.assert_rejected(opcode, recharge.ids(values))

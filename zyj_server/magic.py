@@ -259,14 +259,24 @@ def prepare(opcode, save, body, config, seed):
             raise ValueError("法宝锻造费用配置无效")
         table = config["artifact_baptize_xian"][str((cid-1)*3+method)] if item["stage"] else config["artifact_baptize"][str(cid)][str(method)]
         rng, after, status, counts = random.Random(seed), data[:], [], []
-        while actual < count and after != values(row, "init"):
-            candidate, done = roll(after, row, table, min(10, count-actual), rng)
-            keep = opcode == 1362 or (candidate != after and all(b >= a for a, b, flag in zip(after, candidate, flags) if flag)
-                    and (score(candidate, row) >= score(after, row) if flags[4] else True)
-                    and (any(b > a for a, b in zip(after, candidate)) if not any(flags) else True))
+        caps = values(row, "init")
+        while actual < count and after != caps:
+            step = min(10, count-actual)
+            candidate, done_in_batch = after[:], 0
+            for _ in range(step):
+                done_in_batch += 1
+                cand, _ = roll(candidate, row, table, 1, rng)
+                keep_step = opcode == 1362 or (cand != candidate and all(b >= a for a, b, flag in zip(candidate, cand, flags) if flag)
+                        and (score(cand, row) >= score(candidate, row) if flags[4] else True)
+                        and (any(b > a for a, b in zip(candidate, cand)) if not any(flags) else True))
+                if keep_step:
+                    candidate = cand
+                if candidate == caps:
+                    break
+            keep = opcode == 1362 or candidate != after
             status.extend([int(keep), *(b-a for a, b in zip(after, candidate))])
-            counts.append(done)
-            actual += done
+            counts.append(done_in_batch)
+            actual += done_in_batch
             if keep:
                 after = candidate
         costs = [(c, n*actual) for c, n in unit_costs]
