@@ -20,8 +20,7 @@ ACTIONS = {"grant": "GM 调整与发放", "register": "创建登录账号", "bac
            "transfer": "转移账号数据到测试号"}
 TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"grant": {"resources", "items"}, "inventory": {"cid", "count"},
-                  "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"},
-                  "reset-copy-counts": {"aid"}}
+                  "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
 COMMON_ITEMS = (20081, 20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
 
 
@@ -212,11 +211,9 @@ def validate(data, items):
     if not isinstance(data["reason"], str) or not data["reason"].strip() or len(data["reason"]) > 200:
         raise ValueError("请填写 1–200 字的操作原因")
     if action != "grant":
-        if any(type(data[key]) is not int or not (0 if key in ("count", "position", "aid") else 1) <= data[key] < (1 << 31)
+        if any(type(data[key]) is not int or not (0 if key in ("count", "position") else 1) <= data[key] < (1 << 31)
                for key in PLAYER_ACTIONS[action]):
             raise ValueError("物品、武将或数量参数无效")
-        if action == "reset-copy-counts" and data["aid"] > len(activity_copy.COPIES):
-            raise ValueError("活动副本编号无效")
         if action == "inventory" and data["cid"] == 1025:
             raise ValueError("仙元是角色资源，请通过发放物品或邮件调整")
         if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片", "战宠碎片", "宝物碎片", "装备碎片"):
@@ -256,17 +253,6 @@ def _manage(save, action, data, config, step_counts, now):
         if count == data["count"]:
             raise ValueError("物品数量未变化")
         player.change_item_count(save, data["cid"], data["count"] - count, config, now)
-        return
-    if action == "reset-copy-counts":
-        # 只清今日已用/已购买次数；通关进度、已尝试难度与日序号一律保留，也不退还已花的元宝。
-        state = activity_copy.get_state(save, config)
-        targets = [state["copies"][str(aid)] for aid in (activity_copy.COPIES if not data["aid"] else (data["aid"],))]
-        if not any(row["used"] or row["bought"] for row in targets):
-            raise ValueError("所选活动副本次数已经为零")
-        for row in targets:
-            row["used"] = 0
-            row["bought"] = 0
-        activity_copy.get_state(save, config)
         return
     if save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2:
         raise ValueError("请先完成新手引导后管理武将")
@@ -343,15 +329,6 @@ def changes(before, after):
                     if previous[attr] != current[attr]:
                         result.append({"name": f'{row["name"]} · {label}', "iid": row["iid"],
                                        "before": previous[attr], "after": current[attr]})
-    old_state, new_state = before.get("states", {}).get("activity_copy_state"), after.get("states", {}).get("activity_copy_state")
-    old_counts = old_state.get("copies", {}) if isinstance(old_state, dict) else {}
-    new_counts = new_state.get("copies", {}) if isinstance(new_state, dict) else {}
-    for key in sorted(set(old_counts) | set(new_counts)):
-        previous, current = old_counts.get(key, {}), new_counts.get(key, {})
-        for field, label in (("used", "今日已用"), ("bought", "今日已购买")):
-            start, end = previous.get(field, 0), current.get(field, 0)
-            if start != end:
-                result.append({"name": f"活动副本 {key} · {label}", "before": start, "after": end})
     return result
 
 
@@ -411,6 +388,84 @@ class Workbench:
         # 请求正文只用于重试比对，页面使用明确的变更明细。
         return {"rows": [{k: v for k, v in row.items() if k != "request"} for row in rows[offset:offset + 50]],
                 "total": len(rows), "offset": offset}
+
+    def copy_counts(self):
+        """只读汇总各账号的活动副本次数，供独立页签核对重置前后。"""
+        with self.accounts.lock:
+            rows = []
+            for account in self.accounts.account_ids():
+                snapshot = self.accounts.snapshot(account)
+                state = snapshot["save"].get("activity_copy_state")
+                if snapshot["error"] or not snapshot["has_save"] or not isinstance(state, dict):
+                    continue
+                copies = state.get("copies")
+                if not isinstance(copies, dict):
+                    continue
+                rows.append({"account": account, "name": snapshot["save"].get("role_name", ""),
+                             "online": snapshot["online"], "day": state.get("day", 0),
+                             "copies": {key: {"used": row.get("used", 0), "bought": row.get("bought", 0)}
+                                        for key, row in copies.items() if isinstance(row, dict)}})
+            return {"rows": rows}
+
+    def reset_copy_counts(self, data):
+        """独立全局功能：不绑定账号，一次重置所有离线账号的活动副本次数。"""
+        if (not isinstance(data, dict) or set(data) != {"operation_id", "reason", "aid"}
+                or not isinstance(data["operation_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", data["operation_id"])
+                or not isinstance(data["reason"], str) or not data["reason"].strip() or len(data["reason"]) > 200
+                or type(data["aid"]) is not int or not 0 <= data["aid"] <= len(activity_copy.COPIES)):
+            raise ValueError("重置次数请求无效")
+        store = self.accounts
+        with store.lock:
+            path = self.directory / (data["operation_id"] + ".json")
+            if path.exists():
+                row = self._read(path)
+                if row["account"] is not None or row.get("request") != data:
+                    raise ValueError("操作编号已用于另一项请求，请重新填写操作")
+                return {k: v for k, v in row.items() if k != "request"}
+            row = {"id": data["operation_id"], "at": time.time(), "account": None, "action": "reset-copy-counts",
+                   "reason": data["reason"], "status": "pending", "request": copy.deepcopy(data)}
+            self._write(row)
+            try:
+                keys = [str(aid) for aid in (activity_copy.COPIES if not data["aid"] else (data["aid"],))]
+                plans, skipped = [], []
+                # 先整体预检，任一账号状态异常时一笔都不写。
+                for account in store.account_ids():
+                    snapshot = store.snapshot(account)
+                    if snapshot["online"]:
+                        skipped.append({"account": account, "reason": "账号在线，请先退出游戏"})
+                        continue
+                    if snapshot["error"]:
+                        skipped.append({"account": account, "reason": "存档损坏"})
+                        continue
+                    if not snapshot["has_save"] or not snapshot["save"].get("has_role"):
+                        continue
+                    save = copy.deepcopy(snapshot["save"])
+                    state = activity_copy.get_state(save, store.role_config)
+                    targets = [state["copies"][key] for key in keys]
+                    if not any(target["used"] or target["bought"] for target in targets):
+                        continue
+                    plans.append((account, save, targets))
+                affected, used, bought = [], 0, 0
+                for account, save, targets in plans:
+                    for target in targets:
+                        used += target["used"]
+                        bought += target["bought"]
+                        target["used"] = 0
+                        target["bought"] = 0
+                    activity_copy.get_state(save, store.role_config)
+                    backup_id = storage.backup(store.save_path.parent / "backups" / "accounts" / str(account),
+                                               store.path(account).read_bytes())
+                    if not player.save_role(save, store.path(account), store.step_counts):
+                        raise OSError("活动副本次数重置保存失败")
+                    affected.append({"account": account, "name": save.get("role_name", ""), "backup_id": backup_id})
+                row.update(status="success", details={"aid": data["aid"], "affected": affected, "skipped": skipped,
+                                                      "cleared_used": used, "cleared_bought": bought})
+                self._write(row)
+                return {k: v for k, v in row.items() if k != "request"}
+            except (ValueError, TypeError, KeyError, OSError) as error:
+                row.update(status="failed", error=str(error))
+                self._write(row)
+                raise
 
     def apply(self, account, data):
         action = validate(data, self.items)

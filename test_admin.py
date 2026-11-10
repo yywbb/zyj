@@ -1542,81 +1542,89 @@ class GmManagementTests(AdminFixture):
 class GmResetCopyCountsTests(AdminFixture):
     def setUp(self):
         super().setUp()
-        self.save()
-        save = self.store.snapshot(1)["save"]
-        save["activity_copy_state"] = {"day": 20833, "copies": {
-            str(aid): {"cleared": 2, "used": 4, "tried": 2, "bought": 2} for aid in range(1, 7)}}
-        player.save_role(save, self.store.path(1), COUNTS)
+        for account in (1, 2):
+            self.save(account)
+            save = self.store.snapshot(account)["save"]
+            save["activity_copy_state"] = {"day": 20833, "copies": {
+                str(aid): {"cleared": 2, "used": 4, "tried": 2, "bought": 2} for aid in range(1, 7)}}
+            player.save_role(save, self.store.path(account), COUNTS)
         self.gm = gm.Workbench(self.store)
 
-    def request(self, aid=0):
-        return {"operation_id": uuid.uuid4().hex, "revision": self.store.snapshot(1)["revision"],
-                "reason": "重置次数测试", "action": "reset-copy-counts", "aid": aid}
+    def request(self, aid=0, **changes):
+        return {"operation_id": uuid.uuid4().hex, "reason": "全局重置次数测试", "aid": aid, **changes}
 
-    def state(self):
-        return self.store.snapshot(1)["save"]["activity_copy_state"]
+    def state(self, account=1):
+        return self.store.snapshot(account)["save"]["activity_copy_state"]
 
-    def test_reset_all_copies_clears_used_and_bought_and_keeps_progress(self):
-        from zyj_server import activity_copy
+    def bytes(self):
+        return [self.store.path(account).read_bytes() for account in (1, 2)]
 
-        before = self.state()
-        result = self.gm.apply(1, self.request())
+    def test_global_reset_clears_all_offline_accounts_and_keeps_progress(self):
+        result = self.gm.reset_copy_counts(self.request())
         self.assertEqual(result["status"], "success")
-        self.assertIsNotNone(result["backup_id"])
-        after = self.state()
-        self.assertEqual(after["day"], before["day"])
-        for aid in range(1, 7):
-            self.assertEqual((after["copies"][str(aid)]["used"], after["copies"][str(aid)]["bought"]), (0, 0))
-            self.assertEqual((after["copies"][str(aid)]["cleared"], after["copies"][str(aid)]["tried"]), (2, 2))
-        self.assertIn({"name": "活动副本 1 · 今日已用", "before": 4, "after": 0}, result["changes"])
-        self.assertIn({"name": "活动副本 6 · 今日已购买", "before": 2, "after": 0}, result["changes"])
-        self.assertEqual(sum(row["name"].startswith("活动副本") for row in result["changes"]), 12)
+        details = result["details"]
+        self.assertEqual([row["account"] for row in details["affected"]], [1, 2])
+        self.assertEqual((details["cleared_used"], details["cleared_bought"]), (48, 24))
+        self.assertEqual(details["skipped"], [])
+        for account in (1, 2):
+            state = self.state(account)
+            self.assertEqual(state["day"], 20833)
+            for aid in range(1, 7):
+                row = state["copies"][str(aid)]
+                self.assertEqual((row["used"], row["bought"], row["cleared"], row["tried"]), (0, 0, 2, 2))
+            self.assertTrue(self.store.backups(account))
+        row = self.gm.history()["rows"][0]
+        self.assertIsNone(row["account"])
+        self.assertEqual(row["action"], "reset-copy-counts")
         self.assertIn("activity_copy_state", views.detail(self.store.snapshot(1), COUNTS, CONFIG)["states"])
-        self.assertEqual(activity_copy.get_state(self.store.snapshot(1)["save"], CONFIG)["copies"]["1"]["used"], 0)
 
-    def test_reset_single_copy_invalid_and_noop_requests_leave_other_copies(self):
-        result = self.gm.apply(1, self.request(aid=3))
-        self.assertEqual(result["status"], "success")
-        for aid in range(1, 7):
-            row = self.state()["copies"][str(aid)]
-            self.assertEqual((row["used"], row["bought"]), (0, 0) if aid == 3 else (4, 2))
-        before = self.store.path(1).read_bytes()
-        for aid in (-1, 7, 1 << 31, True, None, 3.5):
-            with self.subTest(aid=aid), self.assertRaises(ValueError):
-                self.gm.apply(1, self.request(aid=aid))
-            self.assertEqual(self.store.path(1).read_bytes(), before)
-        for request in ({**self.request(aid=3), "extra": 1}, {k: v for k, v in self.request(aid=3).items() if k != "aid"}):
-            with self.assertRaises(ValueError):
-                self.gm.apply(1, request)
-            self.assertEqual(self.store.path(1).read_bytes(), before)
-        with self.assertRaisesRegex(ValueError, "已经为零"):
-            self.gm.apply(1, self.request(aid=3))
-        self.assertEqual(self.store.path(1).read_bytes(), before)
-
-    def test_reset_counts_share_offline_revision_backup_and_save_guards(self):
-        before = self.store.path(1).read_bytes()
-        self.store.active[1] = {"address": "phone", "connected_at": 1}
-        with self.assertRaisesRegex(ValueError, "在线"):
-            self.gm.apply(1, self.request())
-        self.store.close_session(1)
-        with self.assertRaisesRegex(ValueError, "变化"):
-            self.gm.apply(1, {**self.request(), "revision": "0" * 64})
-        with patch.object(storage, "backup", side_effect=OSError("full")), self.assertRaises(OSError):
-            self.gm.apply(1, self.request())
-        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
-            self.gm.apply(1, self.request())
-        self.assertEqual(self.store.path(1).read_bytes(), before)
-        self.assertEqual(self.state()["copies"]["1"]["used"], 4)
-
-    def test_reset_counts_retry_is_exactly_once_and_survives_reconnect(self):
+    def test_global_reset_single_copy_validation_and_idempotent_retry(self):
+        result = self.gm.reset_copy_counts(self.request(aid=3))
+        self.assertEqual((result["details"]["cleared_used"], result["details"]["cleared_bought"]), (8, 4))
+        for account in (1, 2):
+            for aid in range(1, 7):
+                row = self.state(account)["copies"][str(aid)]
+                self.assertEqual((row["used"], row["bought"]), (0, 0) if aid == 3 else (4, 2))
+        before = self.bytes()
+        invalid = [self.request(aid=-1), self.request(aid=7), self.request(aid=True), self.request(aid=None),
+                   self.request(aid=3.5), self.request(operation_id="bad"), self.request(reason=""),
+                   {**self.request(), "extra": 1}, {k: v for k, v in self.request().items() if k != "aid"}]
+        for request in invalid:
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                self.gm.reset_copy_counts(request)
+        self.assertEqual(self.bytes(), before)
         request = self.request()
-        first = self.gm.apply(1, request)
-        saved = self.store.path(1).read_bytes()
-        retried = gm.Workbench(self.store).apply(1, request)
-        self.assertEqual((retried["status"], retried["id"]), ("success", first["id"]))
-        self.assertEqual(self.store.path(1).read_bytes(), saved)
-        self.assertEqual(len(self.gm.history(1)["rows"]), 1)
-        self.assertEqual(Session(self.store.tables, self.store.path(1), COUNTS, CONFIG).save["activity_copy_state"], self.state())
+        first = self.gm.reset_copy_counts(request)
+        saved = self.bytes()
+        self.assertEqual(gm.Workbench(self.store).reset_copy_counts(request)["id"], first["id"])
+        self.assertEqual(self.bytes(), saved)
+        self.assertEqual(len(self.gm.history()["rows"]), 2)
+
+    def test_global_reset_skips_online_accounts_and_atomic_failures(self):
+        self.store.active[2] = {"address": "phone", "connected_at": 1}
+        result = self.gm.reset_copy_counts(self.request())
+        self.assertEqual([row["account"] for row in result["details"]["affected"]], [1])
+        self.assertEqual([row["account"] for row in result["details"]["skipped"]], [2])
+        self.assertEqual(self.state(1)["copies"]["1"]["used"], 0)
+        self.assertEqual(self.state(2)["copies"]["1"]["used"], 4)
+        self.store.close_session(2)
+        before = self.bytes()
+        with patch.object(storage, "backup", side_effect=OSError("full")), self.assertRaises(OSError):
+            self.gm.reset_copy_counts(self.request())
+        self.assertEqual(self.bytes(), before)
+        with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+            self.gm.reset_copy_counts(self.request())
+        self.assertEqual(self.bytes(), before)
+
+    def test_copy_counts_summary_is_read_only_and_marks_online(self):
+        before = self.bytes()
+        rows = self.gm.copy_counts()["rows"]
+        self.assertEqual([row["account"] for row in rows], [1, 2])
+        self.assertEqual(rows[0]["copies"]["1"], {"used": 4, "bought": 2})
+        self.assertFalse(rows[0]["online"])
+        self.store.active[1] = {"address": "phone", "connected_at": 1}
+        self.assertTrue(self.gm.copy_counts()["rows"][0]["online"])
+        self.assertEqual(self.bytes(), before)
 
 
 class ConfigurationTests(AdminFixture):
@@ -1765,28 +1773,36 @@ class AdminHttpTests(AdminFixture):
         self.assertEqual(self.request("/api/accounts/1/download")[2], before)
         self.assertFalse(self.store.path(17).exists())
 
-    def test_gm_page_exposes_reset_counts_control_and_script(self):
+    def test_reset_page_is_independent_and_not_bound_to_account_gm_form(self):
         html = self.request("/")[2].decode()
         script = self.request("/app.js")[2].decode()
-        self.assertIn('id="gm-reset-copy"', html)
-        self.assertIn('id="gm-reset-submit"', html)
-        self.assertIn("submitResetCopyCounts", script)
-        self.assertIn('$("gm-reset-submit").onclick', script)
+        for marker in ('id="nav-reset"', 'id="reset-page"', 'id="reset-form"', 'id="reset-copy"'):
+            self.assertIn(marker, html)
+        self.assertIn("submitGlobalReset", script)
+        self.assertIn('$("reset-form").onsubmit', script)
+        self.assertNotIn('id="gm-reset-submit"', html)
+        self.assertNotIn("submitResetCopyCounts", script)
 
-    def test_gm_reset_copy_counts_http_route_status_label_and_idempotent_retry(self):
-        save = self.store.snapshot(1)["save"]
-        save["activity_copy_state"] = {"day": 20833, "copies": {
-            str(aid): {"cleared": 1, "used": 3, "tried": 1, "bought": 1} for aid in range(1, 7)}}
-        player.save_role(save, self.store.path(1), COUNTS)
+    def test_global_reset_copy_counts_http_route_summary_and_idempotent_retry(self):
+        for account in (1, 2):
+            if account == 2:
+                self.save(2)
+            save = self.store.snapshot(account)["save"]
+            save["activity_copy_state"] = {"day": 20833, "copies": {
+                str(aid): {"cleared": 1, "used": 3, "tried": 1, "bought": 1} for aid in range(1, 7)}}
+            player.save_role(save, self.store.path(account), COUNTS)
         self.assertIn("reset-copy-counts", self.request("/api/status")[2]["actions"])
-        payload = {"action": "reset-copy-counts", "aid": 0, "operation_id": uuid.uuid4().hex,
-                   "revision": self.store.snapshot(1)["revision"], "reason": "HTTP 重置次数"}
-        code, _, result = self.request("/api/accounts/1/gm", payload)
+        code, _, summary = self.request("/api/reset-copy-counts")
+        self.assertEqual((code, len(summary["rows"])), (200, 2))
+        payload = {"operation_id": uuid.uuid4().hex, "reason": "HTTP 全局重置", "aid": 0}
+        self.assertEqual(self.request("/api/reset-copy-counts", payload, {"X-Admin-Token": "bad"})[0], 403)
+        code, _, result = self.request("/api/reset-copy-counts", payload)
         self.assertEqual((code, result["status"]), (200, "success"))
-        self.assertIn({"name": "活动副本 1 · 今日已用", "before": 3, "after": 0}, result["changes"])
-        detail = self.request("/api/accounts/1")[2]["states"]["activity_copy_state"]["copies"]["1"]
-        self.assertEqual((detail["used"], detail["bought"], detail["cleared"]), (0, 0, 1))
-        self.assertEqual(self.request("/api/accounts/1/gm", payload)[2]["status"], "success")
+        self.assertEqual(len(result["details"]["affected"]), 2)
+        detail = self.request("/api/reset-copy-counts")[2]["rows"][0]["copies"]["1"]
+        self.assertEqual((detail["used"], detail["bought"]), (0, 0))
+        self.assertEqual(self.request("/api/reset-copy-counts", payload)[2]["status"], "success")
+        self.assertEqual(self.request("/api/reset-copy-counts", {**payload, "aid": 9})[0], 400)
 
     def test_gm_catalog_and_structured_views_are_read_only_and_paginated(self):
         before = self.store.path(1).read_bytes()

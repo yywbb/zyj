@@ -400,16 +400,40 @@ function renderPreview() {
   });
   $("gm-preview").replaceChildren(table(rows, [["资源", (r) => r.name], ["调整", (r) => r.change], ["预计余额（未计离线恢复）", (r) => r.after]], cart.length ? `将发放 ${cart.length} 种物品，实际入账见执行结果。` : "填写资源或选择物品后，在此核对调整。"));
 }
-async function submitResetCopyCounts() {
-  if (submitting || pendingGrant) throw new Error("请先确认上一次 GM 操作的结果。");
-  if (!gmTarget || gmTarget.id !== Number($("gm-account").value)) throw new Error("请先读取目标玩家。");
-  const reason = $("gm-reason").value.trim();
-  if (!reason) { $("gm-reason").focus(); throw new Error("请填写本次操作原因。"); }
-  rememberGrant({ account: gmTarget.id, data: {
-    action: "reset-copy-counts", operation_id: crypto.randomUUID().replaceAll("-", ""),
-    revision: gmTarget.revision, reason, aid: Number($("gm-reset-copy").value),
-  } });
-  await sendGmOperation();
+let resetSubmitting = false;
+async function loadResetPage() {
+  const result = await api("/api/reset-copy-counts");
+  const rows = result.rows.map((row) => {
+    let used = 0, bought = 0;
+    for (const copy of Object.values(row.copies || {})) { used += copy.used || 0; bought += copy.bought || 0; }
+    return { ...row, used, bought };
+  });
+  $("reset-rows").replaceChildren(table(rows, [
+    ["账号", (r) => r.account], ["角色", (r) => r.name || "—"],
+    ["状态", (r) => badge(r.online ? "在线（跳过）" : "离线", r.online ? "online" : "")],
+    ["日序号", (r) => number(r.day)], ["六类已用合计", (r) => number(r.used)], ["六类已购买合计", (r) => number(r.bought)],
+  ], rows.length ? "" : "暂无已创建角色的活动副本状态。"));
+}
+async function submitGlobalReset(event) {
+  event.preventDefault();
+  if (resetSubmitting) return;
+  const reason = $("reset-reason").value.trim();
+  if (!reason) { $("reset-reason").focus(); throw new Error("请填写本次操作原因。"); }
+  resetSubmitting = true; $("reset-submit").disabled = true;
+  try {
+    const result = await api("/api/reset-copy-counts", {
+      operation_id: crypto.randomUUID().replaceAll("-", ""), reason, aid: Number($("reset-copy").value),
+    });
+    const details = result.details || {}, affected = details.affected || [], skipped = details.skipped || [];
+    $("reset-result").hidden = false;
+    $("reset-result").replaceChildren(node("h2", "全局重置完成"),
+      fields([["操作编号", result.id], ["清除已用次数", number(details.cleared_used || 0)],
+        ["清除已购买次数", number(details.cleared_bought || 0)], ["变更账号数", number(affected.length)], ["跳过账号数", number(skipped.length)]]),
+      section("已变更账号", table(affected, [["账号", (r) => r.account], ["角色", (r) => r.name || "—"], ["备份编号", (r) => r.backup_id]])),
+      section("跳过账号", table(skipped, [["账号", (r) => r.account], ["原因", (r) => r.reason]])));
+    message(`已重置 ${affected.length} 个账号的活动副本次数，跳过 ${skipped.length} 个在线或损坏账号。`);
+    await loadResetPage();
+  } finally { resetSubmitting = false; $("reset-submit").disabled = false; }
 }
 async function submitGrant() {
   if (submitting) return;
@@ -1018,10 +1042,10 @@ async function submitSendMail(event) {
 
 async function route() {
   const [target = "overview", id, tab] = location.hash.slice(1).split("/");
-  const page = target === "account" ? "accounts" : ["overview", "accounts", "gm", "mails", "configs", "operations"].includes(target) ? target : "overview";
+  const page = target === "account" ? "accounts" : ["overview", "accounts", "gm", "mails", "configs", "reset", "operations"].includes(target) ? target : "overview";
   state.page = page; navigation++; accountRequest++; gmRequest++; mailRequest++; mailCatalogRequest++;
   grantLock();
-  for (const name of ["overview", "accounts", "gm", "mails", "configs", "operations"]) {
+  for (const name of ["overview", "accounts", "gm", "mails", "configs", "reset", "operations"]) {
     $(`${name}-page`).hidden = name !== page;
     if (name === page) $(`nav-${name}`).setAttribute("aria-current", "page"); else $(`nav-${name}`).removeAttribute("aria-current");
   }
@@ -1044,6 +1068,7 @@ async function route() {
   }
   if (page === "mails") return loadMailsPage();
   if (page === "configs") return loadConfigs(0);
+  if (page === "reset") return loadResetPage();
   $("operations-account").value = id || ""; return loadOperations(0);
 }
 
@@ -1059,7 +1084,7 @@ $("account-next").onclick = () => { state.accountOffset += 25; renderAccounts();
 $("gm-account").oninput = () => { gmRequest++; gmTarget = null; $("gm-identity").textContent = "账号已改变，请重新读取玩家。"; grantLock(); };
 $("gm-target-form").onsubmit = (event) => { event.preventDefault(); run(() => loadGmAccount(Number($("gm-account").value))); };
 $("gm-form").onsubmit = (event) => { event.preventDefault(); run(submitGrant); };
-$("gm-reset-submit").onclick = () => run(submitResetCopyCounts);
+$("reset-form").onsubmit = (event) => run(() => submitGlobalReset(event));
 $("close-manager").onclick = () => $("manager").close();
 $("manage-form").onsubmit = (event) => { event.preventDefault(); run(submitManagement); };
 $("catalog-search").onclick = () => run(() => loadCatalog(0));

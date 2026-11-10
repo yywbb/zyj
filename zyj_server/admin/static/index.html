@@ -19,6 +19,7 @@
         <a id="nav-gm" href="#gm">GM 调整与发放</a>
         <a id="nav-mails" href="#mails">系统邮件</a>
         <a id="nav-configs" href="#configs">游戏配置</a>
+        <a id="nav-reset" href="#reset">重置次数</a>
         <a id="nav-operations" href="#operations">操作记录</a>
       </nav>
       <div class="rail-note"><strong>本地模拟服</strong><p>单管理员 · 本机访问</p><p>玩家数据来自最近落盘存档。</p></div>
@@ -68,10 +69,6 @@
                 <section class="panel"><div class="panel-heading"><h2>本次发放</h2><span id="cart-count" class="muted">0 种</span></div><div id="gm-cart"></div><p class="help">最多 32 种物品，装备和武将合计最多 100 个。武将发放需先完成新手引导。</p></section>
               </div>
               <section class="panel"><h2>操作说明</h2><label for="gm-reason">原因</label><textarea id="gm-reason" required maxlength="200" placeholder="例如：测试招募阵容、补偿道具"></textarea><div id="gm-preview"></div></section>
-              <section class="panel"><div class="panel-heading"><h2>重置次数</h2><span class="muted">首批支持活动副本</span></div>
-                <div class="filters"><div><label for="gm-reset-copy">活动副本</label><select id="gm-reset-copy"><option value="0">全部 6 类</option><option value="1">经验副本</option><option value="2">银币副本</option><option value="3">锻造石副本</option><option value="4">升星副本</option><option value="5">阵符副本</option><option value="6">法宝锻造副本</option></select></div>
-                  <button id="gm-reset-submit" type="button" class="button primary">重置所选次数</button></div>
-                <p class="help">只清空所选副本今日已用与已购买次数（含元宝购买次数），保留已通关难度、已尝试难度与日期；不返还已花费的元宝。操作原因使用上方「原因」栏，提交前自动备份，重登游戏生效。</p></section>
             </fieldset>
             <div class="submit-bar"><span>提交前自动备份，全部变更一次保存。</span><button id="gm-submit" class="primary" disabled>执行 GM 操作</button></div>
           </form>
@@ -288,6 +285,18 @@
           <div class="page-heading"><div><h1 id="configs-title">游戏配置</h1><p>查阅配置、对比原始值与本地覆盖，管理已开放的编辑项。</p></div></div>
           <section class="panel"><div class="panel-heading"><h2>常用编辑项</h2><span class="muted">保存后重启服务并重建 APK</span></div><div id="config-shortcuts" class="actions"></div></section>
           <section class="panel"><form id="config-search" class="filters"><div><label for="config-category">分类</label><select id="config-category"><option value="">全部配置</option><option value="items">道具与奖励</option><option value="units">武将与装备</option><option value="business">招募与充值</option></select></div><div class="grow"><label for="config-name">配置表</label><input id="config-name" list="config-names" value="props" required autocomplete="off"><datalist id="config-names"></datalist></div><div class="grow"><label for="config-query">搜索 ID 或内容</label><input id="config-query" type="search" maxlength="100" placeholder="例如 20014 或 体力丹"></div><button class="primary">查询</button></form><div id="config-rows" aria-live="polite"></div><div class="pager"><span id="config-count"></span><button id="previous" type="button">上一页</button><button id="next" type="button">下一页</button></div></section>
+        </section>
+
+        <section id="reset-page" aria-labelledby="reset-title" hidden>
+          <div class="page-heading"><div><h1 id="reset-title">重置次数</h1><p>全局维护功能，不需要选择角色：一次重置所有离线账号的活动副本次数，立即生效、无需重启。</p></div></div>
+          <section class="panel"><div class="panel-heading"><h2>当前各账号次数</h2><span class="muted">只读汇总 · UTC+8 日序号</span></div><div id="reset-rows" aria-live="polite"></div></section>
+          <section class="panel"><h2>执行重置</h2>
+            <form id="reset-form" class="filters"><div><label for="reset-copy">活动副本</label><select id="reset-copy"><option value="0">全部 6 类</option><option value="1">经验副本</option><option value="2">银币副本</option><option value="3">锻造石副本</option><option value="4">升星副本</option><option value="5">阵符副本</option><option value="6">法宝锻造副本</option></select></div>
+              <div class="grow"><label for="reset-reason">操作原因</label><input id="reset-reason" type="text" maxlength="200" required placeholder="例如：测试活动副本重置"></div>
+              <button id="reset-submit" class="primary" type="submit">一键重置所选次数</button></form>
+            <p class="help">只清空今日已用与已购买次数（含元宝购买次数），保留已通关难度、已尝试难度、日期、累计充值和已领奖记录；不返还已花费的元宝。在线账号会跳过并在结果中列出；每个变更的账号先备份再原子保存，操作编号可重复查询而不会重复执行。</p>
+          </section>
+          <section id="reset-result" class="panel" aria-live="polite" hidden></section>
         </section>
 
         <section id="operations-page" aria-labelledby="operations-title" hidden>

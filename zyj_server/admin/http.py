@@ -125,6 +125,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             if writing and len(parts) == 4 and parts[:2] == ["api", "mails"] and parts[3] == "delete":
                 mail_id = int(parts[2])
                 return self._send(200, self.server.gm.delete_mail(mail_id, data.get("reason", "GM 撤回邮件")))
+            if route.path == "/api/reset-copy-counts":
+                return self._send(200, self.server.gm.copy_counts() if not writing else self.server.gm.reset_copy_counts(data))
             if not writing and route.path == "/api/accounts":
                 rows = [views.summary(accounts.snapshot(i), accounts.step_counts, accounts.role_config) for i in accounts.account_ids()]
                 return self._send(200, {"accounts": rows})
