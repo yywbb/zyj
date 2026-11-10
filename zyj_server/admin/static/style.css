@@ -75,9 +75,9 @@ main { padding: 28px 30px 18px; max-width: 1700px; margin: auto; }
 .inline, .actions { display: flex; gap: 10px; align-items: center; }
 .inline button { flex-shrink: 0; }
 .actions { flex-wrap: wrap; }
-.jump, .target { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; }
-.jump label, .target label { margin: 0; }
-.jump input, .target input { max-width: 190px; }
+.jump { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; }
+.jump label { margin: 0; }
+.jump input { max-width: 190px; }
 .back { display: inline-block; margin-bottom: 14px; font-size: 13px; }
 .detail-heading { margin-bottom: 18px; }
 .detail-heading h2 { margin: 4px 0; font-size: 23px; overflow-wrap: anywhere; }
@@ -120,15 +120,11 @@ time { white-space: nowrap; }
 .notice, .pending, .error { padding: 11px 15px; border-radius: 4px; background: #e7f3eb; color: #216742; max-width: none; font-size: 13px; }
 .pending { color: #805216; background: #fff1d9; }
 .error { color: var(--red); background: #fbecef; }
-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .resource-inputs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .resource-inputs small { display: block; margin: 5px 0; }
-.gm-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 20px; }
 .sub-panel { background: #fafbfc; border-color: #e5e9f0; margin-top: 14px; }
 #mail-catalog-rows { max-height: 390px; overflow: auto; }
 #mail-catalog-rows thead { position: sticky; top: 0; }
-#catalog-rows { max-height: 390px; overflow: auto; }
-#catalog-rows thead { position: sticky; top: 0; }
 
 /* Compact System Mail & Tabs */
 .compact-page-heading { margin-bottom: 12px; }
@@ -197,11 +193,6 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
   .mail-compose-grid { grid-template-columns: 1fr; }
   .compact-table-scroll { max-height: 220px; }
 }
-#gm-form h2 + label { margin-top: 16px; }
-#gm-preview { margin-top: 18px; }
-#gm-identity { flex: 1 1 220px; }
-.submit-bar { display: flex; gap: 14px; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-.submit-bar span { color: var(--muted); font-size: 12px; }
 details { margin-top: 8px; }
 summary { cursor: pointer; color: #176d80; }
 details .table-wrap { margin-top: 14px; }
@@ -222,7 +213,7 @@ footer { color: var(--muted); font-size: 11px; margin-top: 28px; }
 @media (max-width: 1180px) {
   .shell { grid-template-columns: 180px minmax(0, 1fr); }
   main { padding: 24px 20px; }
-  .gm-grid, .overview-grid { grid-template-columns: 1fr; gap: 0; }
+  .overview-grid { grid-template-columns: 1fr; gap: 0; }
   .brand { font-size: 25px; }
   .stats > div { padding: 0 18px; }
 }
@@ -251,9 +242,8 @@ footer { color: var(--muted); font-size: 11px; margin-top: 28px; }
   .tabs { gap: 18px; font-size: 13px; }
   .filters > div { flex: 1 1 120px; }
   .filters > .grow { flex-basis: 100%; }
-  .submit-bar { align-items: stretch; flex-direction: column; }
-  .jump .inline, .target .inline { width: 100%; }
-  .jump input, .target input { max-width: none; }
+  .jump .inline { width: 100%; }
+  .jump input { max-width: none; }
   .restore .inline { flex-wrap: wrap; }
   .pager { flex-wrap: wrap; }
   th, td { padding: 9px 10px; }

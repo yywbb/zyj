@@ -1,13 +1,13 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const resources = { gold: "元宝", coin: "银币", stamina: "体力", energy: "精力" };
 const tabs = { summary: "角色概况", roster: "武将与装备", inventory: "背包", progress: "副本与引导", business: "充值与活动", maintenance: "账号与备份" };
 const COPY_NAMES = { 1: "经验副本", 2: "银币副本", 3: "锻造石副本", 4: "升星副本", 5: "阵符副本", 6: "法宝锻造副本" };
-const state = { token: "", accounts: [], account: 1, page: "overview", accountOffset: 0, configOffset: 0, catalogOffset: 0, operationsOffset: 0, mailOffset: 0, mailCatalogOffset: 0 };
-let info, editing, management, gmTarget = null, cart = [], mailCart = [], pendingGrant = null, submitting = false;
-let navigation = 0, accountRequest = 0, configRequest = 0, catalogRequest = 0, gmRequest = 0, logRequest = 0, mailRequest = 0, mailCatalogRequest = 0;
-try { pendingGrant = JSON.parse(sessionStorage.getItem("gm-pending") || "null"); } catch { /* 浏览器存储不可用时仍保留本页回执。 */ }
+const state = { token: "", accounts: [], account: 1, page: "overview", accountOffset: 0, configOffset: 0, operationsOffset: 0, mailOffset: 0, mailCatalogOffset: 0 };
+let info, editing, management, mailCart = [], pendingOperation = null, submitting = false;
+let navigation = 0, accountRequest = 0, configRequest = 0, logRequest = 0, mailRequest = 0, mailCatalogRequest = 0;
+// 沿用旧键，刷新后仍可按原编号查询在途的档案修正操作。
+try { pendingOperation = JSON.parse(sessionStorage.getItem("gm-pending") || "null"); } catch { /* 浏览器存储不可用时仍保留本页回执。 */ }
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -85,8 +85,7 @@ async function status() {
   const action = $("operations-action").value;
   $("operations-action").replaceChildren(node("option", "全部操作"), ...Object.entries(info.actions).map(([id, name]) => { const option = node("option", name); option.value = id; return option; }));
   $("operations-action").firstChild.value = ""; $("operations-action").value = action;
-  $("common-items").replaceChildren(...info.common_items.map((item) => button(item.name, () => addItem(item))));
-  grantLock();
+  pendingLock();
 }
 
 async function loadAccounts() { state.accounts = (await api("/api/accounts")).accounts; renderAccounts(); }
@@ -136,7 +135,7 @@ async function loadAccount(id, tab = "summary") {
   if (request !== accountRequest || state.page !== "accounts") return;
   const detail = $("account-detail"), heading = node("div", undefined, "detail-heading"), identity = node("div"), actions = node("div", undefined, "actions");
   identity.append(node("small", `账号 ${row.id}`), node("h2", row.name), node("small", `最近保存 ${date(row.saved_at)}`));
-  actions.append(badge(row.online ? "在线" : "离线", row.online ? "online" : ""), link("GM 调整与发放", `#gm/${row.id}`, "button primary"), link("操作记录", `#operations/${row.id}`, "button"));
+  actions.append(badge(row.online ? "在线" : "离线", row.online ? "online" : ""), link("发送系统邮件", `#mails/${row.id}`, "button primary"), link("操作记录", `#operations/${row.id}`, "button"));
   heading.append(identity, actions); detail.replaceChildren(heading);
   if (row.error) detail.append(node("p", row.error, "error"));
   if (!row.has_save) detail.append(node("p", "尚无存档。在“账号与备份”中设置密码后，可使用此账号登录游戏。", "notice"));
@@ -178,16 +177,16 @@ function renderPossessions(detail, account, heroes) {
     const wrapper = node("div", undefined, control === search ? "grow" : ""), label = node("label", text); label.htmlFor = control.id;
     wrapper.append(label, control); filters.append(wrapper);
   }
-  filters.append(button(heroes ? "发放武将" : "发放物品", () => {
-    $("catalog-kind").value = heroes ? "武将" : ""; $("catalog-query").value = ""; location.hash = `gm/${account.id}`;
+  filters.append(button(heroes ? "邮件发放武将" : "邮件发放物品", () => {
+    $("mail-catalog-kind").value = heroes ? "武将" : ""; $("mail-catalog-query").value = ""; location.hash = `mails/${account.id}`;
   }));
   const locked = account.online || account.error || !account.has_role || (heroes && account.states.guide?.sections?.["1"]?.status !== 2);
   detail.append(node("p", account.online ? "玩家在线，退出游戏后可管理物品与武将。" : heroes
     ? `武将等级上限 ${account.general_level_cap}，已开放 ${account.slot_limit} 个阵位。管理需完成新手引导。` : "直接修正目标数量，填 0 清空该物品；所有变更自动备份并记录。", "help"), filters, results);
   function control(text, action, item, unavailable = false) {
     const b = button(text, () => openManagement(account, action, item));
-    b.dataset.gmAction = ""; b.dataset.unavailable = locked || unavailable ? "true" : "false";
-    b.disabled = b.dataset.unavailable === "true" || submitting || !!pendingGrant;
+    b.dataset.manageAction = ""; b.dataset.unavailable = locked || unavailable ? "true" : "false";
+    b.disabled = b.dataset.unavailable === "true" || submitting || !!pendingOperation;
     return b;
   }
   function render() {
@@ -211,7 +210,7 @@ function renderPossessions(detail, account, heroes) {
 }
 
 function openManagement(account, action, item) {
-  if (submitting || pendingGrant) throw new Error("请先确认上一次 GM 操作的结果。");
+  if (submitting || pendingOperation) throw new Error("请先确认上一次管理操作的结果。");
   management = { account, action, item };
   $("manage-form").reset(); $("manager-fields").replaceChildren();
   $("manager-title").textContent = info.actions[action];
@@ -250,7 +249,7 @@ function openManagement(account, action, item) {
 }
 
 async function submitManagement() {
-  if (submitting || pendingGrant) throw new Error("请先确认上一次 GM 操作的结果。");
+  if (submitting || pendingOperation) throw new Error("请先确认上一次管理操作的结果。");
   const { account, action, item } = management, data = {
     action, operation_id: operationId(), revision: account.revision, reason: $("manager-reason").value.trim(),
     ...(action === "inventory" ? { cid: item.item_id, count: Number($("manager-value").value) } : { iid: item.iid }),
@@ -258,8 +257,8 @@ async function submitManagement() {
   if (action === "general-level") data.level = Number($("manager-value").value);
   if (action === "formation") data.position = Number($("manager-value").value);
   if (!data.reason) { $("manager-reason").focus(); return; }
-  rememberGrant({ account: account.id, data }); $("manager").close();
-  await sendGmOperation();
+  rememberPending({ account: account.id, data }); $("manager").close();
+  await sendPlayerOperation();
 }
 
 function renderBusiness(detail, data) {
@@ -332,79 +331,29 @@ async function maintain(row, action, backupId) {
   finally { await loadAccounts(); if (state.account === row.id && state.page === "accounts") await loadAccount(row.id, "maintenance"); }
 }
 
-function grantLock() {
-  const usable = gmTarget && !gmTarget.online && gmTarget.has_role && !gmTarget.error;
-  $("gm-fields").disabled = submitting || !!pendingGrant || !usable;
-  $("gm-account").disabled = submitting || !!pendingGrant;
-  $("gm-target-form").querySelector("button").disabled = submitting || !!pendingGrant;
-  $("gm-submit").disabled = submitting || (!pendingGrant && !usable);
-  $("gm-submit").textContent = submitting ? "正在处理…" : pendingGrant ? "按原编号查询 / 重试" : "执行 GM 操作";
-  $("gm-retry").hidden = !pendingGrant;
-  $("gm-retry").textContent = pendingGrant ? `账号 ${pendingGrant.account} · ${info?.actions[pendingGrant.data.action || "grant"] || "GM 操作"} · ${pendingGrant.data.operation_id} 尚待确认。重试使用原编号，不会重复执行。` : "";
-  $("operation-pending").hidden = !pendingGrant || state.page === "gm";
-  $("operation-pending").replaceChildren(...(pendingGrant ? [document.createTextNode(`账号 ${pendingGrant.account} 有一项待确认操作。`), link("查看结果 / 重试", `#gm/${pendingGrant.account}`)] : []));
-  document.querySelectorAll("[data-gm-action]").forEach((b) => { b.disabled = submitting || !!pendingGrant || b.dataset.unavailable === "true"; });
-}
-function rememberGrant(value) {
-  pendingGrant = value;
-  try { if (value) sessionStorage.setItem("gm-pending", JSON.stringify(value)); else sessionStorage.removeItem("gm-pending"); } catch { /* 回执仍保留在内存与服务端流水中。 */ }
-  grantLock();
-}
-async function loadGmAccount(id) {
-  const request = ++gmRequest; gmTarget = null; grantLock();
-  $("gm-identity").textContent = `正在读取账号 ${id}…`;
-  const row = await api(`/api/accounts/${id}`);
-  if (request !== gmRequest || state.page !== "gm") return;
-  gmTarget = row;
-  $("gm-identity").replaceChildren(link(`账号 ${row.id} · ${row.name}`, `#account/${row.id}/summary`), document.createTextNode(`　等级 ${number(row.level)}　`), badge(row.online ? "在线" : "离线", row.online ? "online" : ""));
-  if (row.error || row.online || !row.has_role) $("gm-identity").append(node("p", row.error || (row.online ? "请先退出游戏，再读取玩家。" : "请先在游戏内创建角色。"), "error"));
-  for (const key of Object.keys(resources)) $(`current-${key}`).textContent = `当前 ${number(row[key])}`;
-  grantLock(); renderPreview();
-}
-async function loadCatalog(offset = 0) {
-  const request = ++catalogRequest;
-  const result = await api(`/api/catalog?${new URLSearchParams({ q: $("catalog-query").value.trim(), kind: $("catalog-kind").value, offset })}`);
-  if (request !== catalogRequest) return;
-  state.catalogOffset = offset;
-  $("catalog-rows").replaceChildren(table(result.rows, [["物品", (r) => {
-    const span = node("span", r.name);
-    span.title = r.description || "";
-    if (r.description && r.description.includes(" · ")) {
-      const meta = r.description.split(" · ")[0];
-      const small = node("small", ` (${meta})`, "help");
-      small.style.marginLeft = "4px";
-      const wrapper = node("span");
-      wrapper.append(span, small);
-      return wrapper;
-    }
-    return span;
-  }], ["ID / 类型", (r) => `${r.cid} / ${r.kind}`],
-    ["操作", (r) => button("添加", () => addItem(r))]], "未找到物品，请修改名称、ID 或类型。"));
-  pager("catalog", offset, result.total);
-}
-function addItem(item) {
-  if (!cart.some((r) => r.cid === item.cid)) cart.push({ ...item, count: 1 });
-  renderCart();
-}
-function renderCart() {
-  $("cart-count").textContent = `${cart.length} 种`;
-  $("gm-cart").replaceChildren(table(cart, [["物品", (r) => {
-    if (r.description && r.description.includes(" · ")) {
-      const meta = r.description.split(" · ")[0];
-      return `${r.name || r.cid} (${meta})`;
-    }
-    return r.name || String(r.cid);
-  }], ["数量", (r) => {
-    const input = node("input"); input.type = "number"; input.min = "1"; input.max = r.max || 1000000; input.step = "1"; input.required = true; input.value = r.count;
-    input.setAttribute("aria-label", `${r.name || r.cid}数量`); input.oninput = () => { r.count = Number(input.value); renderPreview(); }; return input;
-  }], ["操作", (r) => button("移除", () => { cart = cart.filter((item) => item.cid !== r.cid); renderCart(); })]], "从左侧目录添加本次要发放的物品。"));
-  renderPreview();
-}
-function renderPreview() {
-  const rows = Object.entries(resources).filter(([key]) => Number($(`gm-${key}`).value)).map(([key, name]) => {
-    const delta = Number($(`gm-${key}`).value); return { name, change: `${delta > 0 ? "+" : ""}${number(delta)}`, after: gmTarget ? number(gmTarget[key] + delta) : "—" };
+function pendingLock() {
+  $("operation-pending").hidden = !pendingOperation;
+  if (pendingOperation) {
+    const retry = button("按原编号查询 / 重试", () => sendPlayerOperation());
+    retry.disabled = submitting;
+    $("operation-pending").replaceChildren(document.createTextNode(
+      `账号 ${pendingOperation.account} 的${info?.actions[pendingOperation.data.action] || "管理"}操作尚待确认。重试使用原编号，不会重复执行。`), retry);
+  } else {
+    $("operation-pending").replaceChildren();
+  }
+  document.querySelectorAll("[data-manage-action]").forEach((b) => {
+    b.disabled = submitting || !!pendingOperation || b.dataset.unavailable === "true";
   });
-  $("gm-preview").replaceChildren(table(rows, [["资源", (r) => r.name], ["调整", (r) => r.change], ["预计余额（未计离线恢复）", (r) => r.after]], cart.length ? `将发放 ${cart.length} 种物品，实际入账见执行结果。` : "填写资源或选择物品后，在此核对调整。"));
+}
+function rememberPending(value) {
+  pendingOperation = value;
+  try { if (value) sessionStorage.setItem("gm-pending", JSON.stringify(value)); else sessionStorage.removeItem("gm-pending"); } catch { /* 回执仍保留在内存与服务端流水中。 */ }
+  pendingLock();
+}
+function showOperationResult(...children) {
+  const panel = $("operation-result");
+  panel.hidden = false;
+  panel.replaceChildren(...children);
 }
 let resetSubmitting = false;
 async function loadResetPage() {
@@ -441,43 +390,27 @@ async function submitGlobalReset(event) {
     await loadResetPage();
   } finally { resetSubmitting = false; $("reset-submit").disabled = false; }
 }
-async function submitGrant() {
-  if (submitting) return;
-  if (!pendingGrant) {
-    if (!gmTarget || gmTarget.id !== Number($("gm-account").value)) throw new Error("请先读取目标玩家。");
-    const deltas = Object.fromEntries(Object.keys(resources).map((key) => [key, Number($(`gm-${key}`).value)]).filter(([, value]) => value !== 0));
-    if (!Object.keys(deltas).length && !cart.length) throw new Error("至少填写一项资源变更或添加一种物品。");
-    rememberGrant({ account: gmTarget.id, cart: cart.map((item) => ({ ...item })), data: {
-      operation_id: operationId(), revision: gmTarget.revision, reason: $("gm-reason").value.trim(),
-      resources: deltas, items: cart.map(({ cid, count }) => ({ cid, count })),
-    } });
-  }
-  await sendGmOperation();
-}
-async function sendGmOperation() {
-  const request = pendingGrant, origin = location.hash; submitting = true; grantLock();
+async function sendPlayerOperation() {
+  const request = pendingOperation, origin = location.hash; submitting = true; pendingLock();
   try {
     const result = await api(`/api/accounts/${request.account}/gm`, request.data);
     if (result.status === "pending") {
-      $("gm-result").hidden = false;
-      $("gm-result").replaceChildren(node("h2", "操作结果待核对"), node("p", "服务在执行期间中断。请在操作记录中核对变更与备份；此编号不会再次执行。"), link("查看记录", `#operations/${request.account}`),
-        button("结束本次查询", () => { rememberGrant(null); $("gm-form").reset(); cart = []; renderCart(); return loadGmAccount(request.account); }));
+      showOperationResult(node("h2", "操作结果待核对"), node("p", "服务在执行期间中断。请在操作记录中核对变更与备份；此编号不会再次执行。"),
+        link("查看记录", `#operations/${request.account}`),
+        button("结束本次查询", () => rememberPending(null)));
       return;
     }
-    rememberGrant(null);
+    rememberPending(null);
     if (result.status === "failed") throw new Error(result.error || "此操作已失败，请重新填写。");
-    cart = []; $("gm-form").reset(); renderCart();
-    $("gm-result").hidden = false;
-    $("gm-result").replaceChildren(node("h2", `账号 ${request.account} 操作成功`), node("p", result.audit_warning || "已保存。重登游戏后可看到最新资源与物品。"),
-      fields([["操作类型", info.actions[result.action]], ["操作编号", result.id], ["备份编号", result.backup_id]]), changeTable(result.changes),
+    showOperationResult(node("h2", `账号 ${request.account} 操作成功`), node("p", result.audit_warning || "已保存。重登游戏后可看到最新资源与物品。"),
+      fields([["操作类型", info.actions[result.action] || result.action], ["操作编号", result.id], ["备份编号", result.backup_id]]), changeTable(result.changes),
       link("返回玩家档案", `#account/${request.account}/${request.data.action === "inventory" ? "inventory" : "roster"}`), document.createTextNode(" · "), link("查看此玩家记录", `#operations/${request.account}`));
-    message(result.audit_warning || `账号 ${request.account}：GM 操作已完成。`);
-    if (state.page === "gm") await loadGmAccount(request.account);
+    message(result.audit_warning || `账号 ${request.account}：管理操作已完成。`);
     if (state.page === "accounts" && location.hash === origin && state.account === request.account) await loadAccount(request.account, origin.split("/")[2] || "summary");
   } catch (error) {
-    if (error.status === 400) rememberGrant(null);
+    if (error.status === 400) rememberPending(null);
     throw error;
-  } finally { submitting = false; grantLock(); }
+  } finally { submitting = false; pendingLock(); }
 }
 
 function configNames() {
@@ -549,7 +482,7 @@ function operationTable(rows) {
       if (r.status === "pending") details.append(node("p", "执行期间服务或日志写入中断，请结合当前状态和备份核对。", "pending"));
       const changes = r.changes || r.result?.changes; if (changes?.length) details.append(changeTable(changes));
       return details;
-    }]], "暂无操作记录。GM 发放、账号维护及配置保存后会在这里留存结果。");
+    }]], "暂无操作记录。账号维护、系统邮件及配置保存后会在这里留存结果。");
   result.classList.add("operation-table"); return result;
 }
 async function loadOperations(offset = 0) {
@@ -854,17 +787,6 @@ const SKYTOKEN_BUNDLE = [
   { cid: 192599, name: "火之精华", count: 8120 }
 ];
 
-function fillGmSkyTokenBundle() {
-  for (const item of SKYTOKEN_BUNDLE) {
-    const existing = cart.find((r) => r.cid === item.cid);
-    if (existing) existing.count = item.count;
-    else cart.push({ ...item, kind: "道具", max: 1000000 });
-  }
-  if (!$("gm-reason").value.trim()) $("gm-reason").value = "GM发放天机令大礼包全套激活材料";
-  renderCart();
-  message("已一键填入全套天机令（24种各7个）及金木水火精华（各8120个），可满配全阵7名伙伴！");
-}
-
 function fillMailSkyTokenBundle() {
   for (const item of SKYTOKEN_BUNDLE) {
     const existing = mailCart.find((r) => r.cid === item.cid);
@@ -1048,56 +970,42 @@ async function submitSendMail(event) {
 
 async function route() {
   const [target = "overview", id, tab] = location.hash.slice(1).split("/");
-  const page = target === "account" ? "accounts" : ["overview", "accounts", "gm", "mails", "configs", "reset", "operations"].includes(target) ? target : "overview";
-  state.page = page; navigation++; accountRequest++; gmRequest++; mailRequest++; mailCatalogRequest++;
-  grantLock();
-  for (const name of ["overview", "accounts", "gm", "mails", "configs", "reset", "operations"]) {
+  const pages = ["overview", "accounts", "mails", "configs", "reset", "operations"];
+  const page = target === "account" ? "accounts" : pages.includes(target) ? target : "overview";
+  state.page = page; navigation++; accountRequest++; mailRequest++; mailCatalogRequest++;
+  pendingLock();
+  for (const name of pages) {
     $(`${name}-page`).hidden = name !== page;
     if (name === page) $(`nav-${name}`).setAttribute("aria-current", "page"); else $(`nav-${name}`).removeAttribute("aria-current");
   }
   message("");
+  $("operation-result").hidden = true;
   if (page === "overview") return loadOverview();
   if (page === "accounts") {
     $("accounts-index").hidden = target === "account"; $("account-workspace").hidden = target !== "account";
     if (target === "account") return loadAccount(Number(id), tabs[tab] ? tab : "summary");
     return loadAccounts();
   }
-  if (page === "gm") {
-    const account = pendingGrant?.account || Number(id) || state.account;
-    $("gm-account").value = account;
-    if (pendingGrant) {
-      cart = pendingGrant.cart || pendingGrant.data.items || [];
-      for (const key of Object.keys(resources)) $(`gm-${key}`).value = pendingGrant.data.resources?.[key] || "";
-      $("gm-reason").value = pendingGrant.data.reason; renderCart();
+  if (page === "mails") {
+    if (/^\d+$/.test(id || "") && 1 <= Number(id) && Number(id) <= 1000) {
+      $("mail-target-type").value = "single";
+      $("mail-target-account-box").hidden = false;
+      $("mail-target-account").value = id;
     }
-    return Promise.all([loadGmAccount(account), loadCatalog(0)]);
+    return loadMailsPage();
   }
-  if (page === "mails") return loadMailsPage();
   if (page === "configs") return loadConfigs(0);
   if (page === "reset") return loadResetPage();
   $("operations-account").value = id || ""; return loadOperations(0);
 }
 
-for (const [key, labelText] of Object.entries(resources)) {
-  const wrapper = node("div"), label = node("label", labelText), input = node("input"), current = node("small", "请先读取玩家");
-  label.htmlFor = `gm-${key}`; input.id = `gm-${key}`; input.type = "number"; input.step = "1"; input.min = "-2147483647"; input.max = "2147483647"; input.placeholder = "不变";
-  current.id = `current-${key}`; input.oninput = renderPreview; wrapper.append(label, input, current); $("gm-resources").append(wrapper);
-}
 $("account-jump").onsubmit = (event) => { event.preventDefault(); location.hash = `account/${Number($("account-id").value)}/maintenance`; };
 for (const id of ["account-search", "account-filter", "account-level"]) $(id).addEventListener("input", () => { state.accountOffset = 0; renderAccounts(); });
 $("account-previous").onclick = () => { state.accountOffset = Math.max(0, state.accountOffset - 25); renderAccounts(); };
 $("account-next").onclick = () => { state.accountOffset += 25; renderAccounts(); };
-$("gm-account").oninput = () => { gmRequest++; gmTarget = null; $("gm-identity").textContent = "账号已改变，请重新读取玩家。"; grantLock(); };
-$("gm-target-form").onsubmit = (event) => { event.preventDefault(); run(() => loadGmAccount(Number($("gm-account").value))); };
-$("gm-form").onsubmit = (event) => { event.preventDefault(); run(submitGrant); };
 $("reset-form").onsubmit = (event) => run(() => submitGlobalReset(event));
 $("close-manager").onclick = () => $("manager").close();
 $("manage-form").onsubmit = (event) => { event.preventDefault(); run(submitManagement); };
-$("catalog-search").onclick = () => run(() => loadCatalog(0));
-$("catalog-query").onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); run(() => loadCatalog(0)); } };
-$("catalog-kind").onchange = () => run(() => loadCatalog(0));
-$("catalog-previous").onclick = () => run(() => loadCatalog(Math.max(0, state.catalogOffset - 50)));
-$("catalog-next").onclick = () => run(() => loadCatalog(state.catalogOffset + 50));
 $("config-category").onchange = configNames;
 $("config-search").onsubmit = (event) => { event.preventDefault(); run(() => loadConfigs(0)); };
 $("previous").onclick = () => run(() => loadConfigs(Math.max(0, state.configOffset - 50)));
@@ -1120,7 +1028,6 @@ $("mail-recharge-preset").onchange = () => {
 };
 $("mail-tab-compose").onclick = () => switchMailTab("compose");
 $("mail-tab-history").onclick = () => switchMailTab("history");
-if ($("gm-bundle-skytoken")) $("gm-bundle-skytoken").onclick = fillGmSkyTokenBundle;
 if ($("mail-bundle-skytoken")) $("mail-bundle-skytoken").onclick = fillMailSkyTokenBundle;
 $("mail-catalog-add-selected").onclick = addSelectedCatalogItems;
 $("mail-apply-batch-qty").onclick = () => applyBatchQuantity();
@@ -1153,5 +1060,4 @@ $("mail-list-next").onclick = () => run(() => loadMails(state.mailOffset + 25));
 $("refresh").onclick = () => run(async () => { await status(); await route(); });
 document.querySelector(".skip").onclick = (event) => { event.preventDefault(); $("main").focus(); };
 window.addEventListener("hashchange", () => { if (info) run(route); });
-renderCart();
 run(async () => { await status(); await route(); });

@@ -1,4 +1,7 @@
-"""本机 GM 发放与操作流水；与登录共用离线锁，先记录意图再修改存档。"""
+"""本机玩家管理与操作流水；与登录共用离线锁，先记录意图再修改存档。
+
+资源与物品发放统一走系统邮件，这里只处理玩家档案页的离线修正操作。
+"""
 
 import copy
 import json
@@ -6,20 +9,21 @@ import re
 import time
 import uuid
 
-from .. import activity_copy, cheer, formation, player, qiankun, recruit, storage, training
+from .. import activity_copy, cheer, formation, player, qiankun, storage, training
 from ..protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 from ..session import Session
 from . import views
 
 RESOURCES = {"gold": "元宝", "coin": "银币", "stamina": "体力", "energy": "精力"}
-ACTIONS = {"grant": "GM 调整与发放", "register": "创建登录账号", "backup": "创建备份",
+# "grant" 只用于展示与筛选功能下线前的历史流水，不再接受任何新的发放请求。
+ACTIONS = {"grant": "历史发放（已下线）", "register": "创建登录账号", "backup": "创建备份",
            "restore": "恢复备份", "reset": "重置账号", "reset-guide": "重置引导", "config": "修改配置",
            "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将",
            "reset-copy-counts": "重置活动副本次数",
            "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件", "kick": "强制下线",
            "transfer": "转移账号数据到测试号"}
 TEST_ACCOUNT = 10
-PLAYER_ACTIONS = {"grant": {"resources", "items"}, "inventory": {"cid", "count"},
+PLAYER_ACTIONS = {"inventory": {"cid", "count"},
                   "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
 COMMON_ITEMS = (20081, 20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
 
@@ -195,52 +199,31 @@ def catalog(config):
 
 
 def validate(data, items):
+    """只接受玩家档案页的离线修正操作；资源与物品发放请使用系统邮件。"""
     if not isinstance(data, dict):
-        raise ValueError("GM 操作必须为对象")
-    action = data.get("action", "grant")
+        raise ValueError("管理操作必须为对象")
+    action = data.get("action")
     if not isinstance(action, str) or action not in PLAYER_ACTIONS:
-        raise ValueError("不支持的 GM 操作")
+        raise ValueError("不支持的玩家管理操作，资源与物品发放请使用系统邮件")
     expected = {"operation_id", "revision", "reason"} | PLAYER_ACTIONS[action]
     if "action" in data:
         expected.add("action")
     if set(data) != expected:
-        raise ValueError("GM 操作字段不完整或包含多余参数")
+        raise ValueError("管理操作字段不完整或包含多余参数")
     for key, length in (("operation_id", 32), ("revision", 64)):
         if not isinstance(data[key], str) or not re.fullmatch(f"[a-f0-9]{{{length}}}", data[key]):
             raise ValueError("操作编号或存档版本无效")
     if not isinstance(data["reason"], str) or not data["reason"].strip() or len(data["reason"]) > 200:
         raise ValueError("请填写 1–200 字的操作原因")
-    if action != "grant":
-        if any(type(data[key]) is not int or not (0 if key in ("count", "position") else 1) <= data[key] < (1 << 31)
-               for key in PLAYER_ACTIONS[action]):
-            raise ValueError("物品、武将或数量参数无效")
-        if action == "inventory" and data["cid"] == 1025:
-            raise ValueError("仙元是角色资源，请通过发放物品或邮件调整")
-        if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片", "战宠碎片", "宝物碎片", "装备碎片"):
-            raise ValueError("只能修正目录中的道具或碎片数量")
-        if action == "formation" and data["position"] > 7:
-            raise ValueError("阵位必须为 0（下阵）或 1–7")
-        return action
-    resources = data["resources"]
-    if (not isinstance(resources, dict) or not set(resources) <= RESOURCES.keys()
-            or any(type(v) is not int or not 0 < abs(v) < (1 << 31) for v in resources.values())):
-        raise ValueError("资源变更必须是非零整数，且在 int32 范围内")
-    rewards = data["items"]
-    if not isinstance(rewards, list) or len(rewards) > 32:
-        raise ValueError("一次最多发放 32 种物品")
-    seen, instances = set(), 0
-    for row in rewards:
-        if (not isinstance(row, dict) or set(row) != {"cid", "count"} or type(row["cid"]) is not int
-                or row["cid"] not in items or type(row["count"]) is not int
-                or not 1 <= row["count"] <= items[row["cid"]]["max"] or row["cid"] in seen):
-            raise ValueError("物品不存在、数量超限或包含重复条目")
-        seen.add(row["cid"])
-        if items[row["cid"]]["kind"] in ("普通装备", "武将", "战宠", "专属装备", "战魂", "魔符"):
-            instances += row["count"]
-    if instances > 100:
-        raise ValueError("一次最多发放 100 件装备、武将或特殊实体")
-    if not resources and not rewards:
-        raise ValueError("请至少填写一项资源变更或物品")
+    if any(type(data[key]) is not int or not (0 if key in ("count", "position") else 1) <= data[key] < (1 << 31)
+           for key in PLAYER_ACTIONS[action]):
+        raise ValueError("物品、武将或数量参数无效")
+    if action == "inventory" and data["cid"] == 1025:
+        raise ValueError("仙元是角色资源，请通过系统邮件发放")
+    if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片", "战宠碎片", "宝物碎片", "装备碎片"):
+        raise ValueError("只能修正目录中的道具或碎片数量")
+    if action == "formation" and data["position"] > 7:
+        raise ValueError("阵位必须为 0（下阵）或 1–7")
     return action
 
 
@@ -351,7 +334,8 @@ class Workbench:
 
     def _read(self, path):
         row = json.loads(path.read_bytes())
-        if row["status"] == "pending" and row["action"] in PLAYER_ACTIONS:
+        # "grant" 是功能下线前的历史操作，仍可按存档回执确认结果。
+        if row["status"] == "pending" and (row["action"] in PLAYER_ACTIONS or row["action"] == "grant"):
             saved = self.accounts.snapshot(row["account"])["save"]
             if saved.get("gm_receipt") == row["id"]:
                 row["status"] = "success"
@@ -486,7 +470,7 @@ class Workbench:
             self._write(row)
             try:
                 if snapshot["online"]:
-                    raise ValueError("账号仍在线，请先退出游戏再执行 GM 操作")
+                    raise ValueError("账号仍在线，请先退出游戏再执行管理操作")
                 if snapshot["revision"] != data["revision"]:
                     raise ValueError("存档已变化，请刷新玩家档案后重新操作")
                 if snapshot["error"] or not snapshot["save"].get("has_role"):
@@ -496,30 +480,7 @@ class Workbench:
                 now = int(time.time())
                 player.settle_self_stats(save, store.role_config)
                 player.settle_stamina(save, store.role_config, now)
-                state = player.get_role_state(save, store.role_config)
-                for key, delta in data.get("resources", {}).items():
-                    value = state[key] + delta
-                    # 银币在协议里是 int64，其余资源是 int32。
-                    if not 0 <= value < (1 << 63 if key == "coin" else 1 << 31):
-                        raise ValueError(f"{RESOURCES[key]}不足或超出范围")
-                    # GM 修正不属于游戏消费，不增加消费活动进度。
-                    state[key] = value
-                if action == "grant":
-                    if any(self.items[item["cid"]]["kind"] == "武将" for item in data["items"]):
-                        recruit.require_role(save)
-                    expanded_items = []
-                    for item in data["items"]:
-                        if item["cid"] == 20081:
-                            for cid in range(201901, 201925):
-                                expanded_items.append((cid, item["count"]))
-                            for cid in range(192596, 192600):
-                                expanded_items.append((cid, 1160 * item["count"]))
-                        else:
-                            expanded_items.append((item["cid"], item["count"]))
-                    reward = recruit.build_reward(save, expanded_items, store.role_config)
-                    player.apply_reward(save, reward, store.role_config, now)
-                else:
-                    _manage(save, action, data, store.role_config, store.step_counts, now)
+                _manage(save, action, data, store.role_config, store.step_counts, now)
                 player.settle_stamina(save, store.role_config, now)
                 after = views.detail({**snapshot, "save": save}, store.step_counts, store.role_config)
                 previous = views.detail(snapshot, store.step_counts, store.role_config)
