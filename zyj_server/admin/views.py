@@ -75,7 +75,8 @@ def detail(snapshot, step_counts, role_config):
             result["copies"].append({"id": cid, "name": name("map", cid), "cleared": sum(number(p, 3) > 0 for p in points),
                                      "stars": sum(number(p, 3) for p in points), "boxes": [number(row, f) for f in (4, 5, 6)],
                                      "points": [{"id": number(p, 1), "stars": number(p, 3), "wins": number(p, 4)} for p in points]})
-        result["states"] = {key: save.get(key, {}) for key in ("guide", "activity_state", "recruit_state", "recruit_pending", "recharge_state", "last_battle")}
+        result["states"] = {key: save.get(key, {}) for key in ("guide", "activity_state", "activity_copy_state",
+                                                             "recruit_state", "recruit_pending", "recharge_state", "last_battle")}
         if save.get("has_role"):
             result["general_level_cap"] = min(result["level"] * int(role_config["global_kv"]["general_level"]["value"]),
                                                max(map(int, role_config["general_exp"])))

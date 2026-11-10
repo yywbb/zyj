@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 
-from .. import cheer, formation, player, qiankun, recruit, storage, training
+from .. import activity_copy, cheer, formation, player, qiankun, recruit, storage, training
 from ..protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 from ..session import Session
 from . import views
@@ -15,11 +15,13 @@ RESOURCES = {"gold": "元宝", "coin": "银币", "stamina": "体力", "energy": 
 ACTIONS = {"grant": "GM 调整与发放", "register": "创建登录账号", "backup": "创建备份",
            "restore": "恢复备份", "reset": "重置账号", "reset-guide": "重置引导", "config": "修改配置",
            "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将",
+           "reset-copy-counts": "重置活动副本次数",
            "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件", "kick": "强制下线",
            "transfer": "转移账号数据到测试号"}
 TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"grant": {"resources", "items"}, "inventory": {"cid", "count"},
-                  "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
+                  "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"},
+                  "reset-copy-counts": {"aid"}}
 COMMON_ITEMS = (20081, 20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
 
 
@@ -210,9 +212,11 @@ def validate(data, items):
     if not isinstance(data["reason"], str) or not data["reason"].strip() or len(data["reason"]) > 200:
         raise ValueError("请填写 1–200 字的操作原因")
     if action != "grant":
-        if any(type(data[key]) is not int or not (0 if key in ("count", "position") else 1) <= data[key] < (1 << 31)
+        if any(type(data[key]) is not int or not (0 if key in ("count", "position", "aid") else 1) <= data[key] < (1 << 31)
                for key in PLAYER_ACTIONS[action]):
             raise ValueError("物品、武将或数量参数无效")
+        if action == "reset-copy-counts" and data["aid"] > len(activity_copy.COPIES):
+            raise ValueError("活动副本编号无效")
         if action == "inventory" and data["cid"] == 1025:
             raise ValueError("仙元是角色资源，请通过发放物品或邮件调整")
         if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片", "战宠碎片", "宝物碎片", "装备碎片"):
@@ -252,6 +256,17 @@ def _manage(save, action, data, config, step_counts, now):
         if count == data["count"]:
             raise ValueError("物品数量未变化")
         player.change_item_count(save, data["cid"], data["count"] - count, config, now)
+        return
+    if action == "reset-copy-counts":
+        # 只清今日已用/已购买次数；通关进度、已尝试难度与日序号一律保留，也不退还已花的元宝。
+        state = activity_copy.get_state(save, config)
+        targets = [state["copies"][str(aid)] for aid in (activity_copy.COPIES if not data["aid"] else (data["aid"],))]
+        if not any(row["used"] or row["bought"] for row in targets):
+            raise ValueError("所选活动副本次数已经为零")
+        for row in targets:
+            row["used"] = 0
+            row["bought"] = 0
+        activity_copy.get_state(save, config)
         return
     if save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2:
         raise ValueError("请先完成新手引导后管理武将")
@@ -328,6 +343,15 @@ def changes(before, after):
                     if previous[attr] != current[attr]:
                         result.append({"name": f'{row["name"]} · {label}', "iid": row["iid"],
                                        "before": previous[attr], "after": current[attr]})
+    old_state, new_state = before.get("states", {}).get("activity_copy_state"), after.get("states", {}).get("activity_copy_state")
+    old_counts = old_state.get("copies", {}) if isinstance(old_state, dict) else {}
+    new_counts = new_state.get("copies", {}) if isinstance(new_state, dict) else {}
+    for key in sorted(set(old_counts) | set(new_counts)):
+        previous, current = old_counts.get(key, {}), new_counts.get(key, {})
+        for field, label in (("used", "今日已用"), ("bought", "今日已购买")):
+            start, end = previous.get(field, 0), current.get(field, 0)
+            if start != end:
+                result.append({"name": f"活动副本 {key} · {label}", "before": start, "after": end})
     return result
 
 

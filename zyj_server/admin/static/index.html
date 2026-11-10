@@ -68,6 +68,10 @@
                 <section class="panel"><div class="panel-heading"><h2>本次发放</h2><span id="cart-count" class="muted">0 种</span></div><div id="gm-cart"></div><p class="help">最多 32 种物品，装备和武将合计最多 100 个。武将发放需先完成新手引导。</p></section>
               </div>
               <section class="panel"><h2>操作说明</h2><label for="gm-reason">原因</label><textarea id="gm-reason" required maxlength="200" placeholder="例如：测试招募阵容、补偿道具"></textarea><div id="gm-preview"></div></section>
+              <section class="panel"><div class="panel-heading"><h2>重置次数</h2><span class="muted">首批支持活动副本</span></div>
+                <div class="filters"><div><label for="gm-reset-copy">活动副本</label><select id="gm-reset-copy"><option value="0">全部 6 类</option><option value="1">经验副本</option><option value="2">银币副本</option><option value="3">锻造石副本</option><option value="4">升星副本</option><option value="5">阵符副本</option><option value="6">法宝锻造副本</option></select></div>
+                  <button id="gm-reset-submit" type="button" class="button primary">重置所选次数</button></div>
+                <p class="help">只清空所选副本今日已用与已购买次数（含元宝购买次数），保留已通关难度、已尝试难度与日期；不返还已花费的元宝。操作原因使用上方「原因」栏，提交前自动备份，重登游戏生效。</p></section>
             </fieldset>
             <div class="submit-bar"><span>提交前自动备份，全部变更一次保存。</span><button id="gm-submit" class="primary" disabled>执行 GM 操作</button></div>
           </form>

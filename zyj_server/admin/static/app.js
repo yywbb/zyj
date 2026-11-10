@@ -3,6 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const resources = { gold: "元宝", coin: "银币", stamina: "体力", energy: "精力" };
 const tabs = { summary: "角色概况", roster: "武将与装备", inventory: "背包", progress: "副本与引导", business: "充值与活动", maintenance: "账号与备份" };
+const COPY_NAMES = { 1: "经验副本", 2: "银币副本", 3: "锻造石副本", 4: "升星副本", 5: "阵符副本", 6: "法宝锻造副本" };
 const state = { token: "", accounts: [], account: 1, page: "overview", accountOffset: 0, configOffset: 0, catalogOffset: 0, operationsOffset: 0, mailOffset: 0, mailCatalogOffset: 0 };
 let info, editing, management, gmTarget = null, cart = [], mailCart = [], pendingGrant = null, submitting = false;
 let navigation = 0, accountRequest = 0, configRequest = 0, catalogRequest = 0, gmRequest = 0, logRequest = 0, mailRequest = 0, mailCatalogRequest = 0;
@@ -153,6 +154,10 @@ async function loadAccount(id, tab = "summary") {
       ["星级宝箱", (r) => r.boxes.map((v) => ({ 0: "未记录", 1: "未达标", 2: "可领取", 3: "已领取" }[v] || "未知")).join(" / ")],
       ["关卡", (r) => r.points.map((p) => `${p.id}关：${p.stars}星，胜${p.wins}次`).join("；")]])));
     detail.append(section("引导", table(Object.entries(row.states.guide?.sections || {}), [["章节", (r) => r[0]], ["状态", (r) => ({ 1: "进行中", 2: "已完成" }[r[1].status] || "未开始")], ["当前步骤", (r) => r[1].step], ["已确认步骤数", (r) => r[1].steps?.length || 0]])));
+    const copies = row.states.activity_copy_state?.copies;
+    if (copies) detail.append(section("活动副本次数", table(Object.entries(copies), [["副本", (r) => COPY_NAMES[r[0]] || r[0]],
+      ["今日已用", (r) => number(r[1].used)], ["今日已购买", (r) => number(r[1].bought)],
+      ["已通关难度", (r) => number(r[1].cleared)], ["已尝试难度", (r) => number(r[1].tried)]])));
   } else if (tab === "business") renderBusiness(detail, row.business);
   else renderMaintenance(detail, row);
 }
@@ -394,6 +399,17 @@ function renderPreview() {
     const delta = Number($(`gm-${key}`).value); return { name, change: `${delta > 0 ? "+" : ""}${number(delta)}`, after: gmTarget ? number(gmTarget[key] + delta) : "—" };
   });
   $("gm-preview").replaceChildren(table(rows, [["资源", (r) => r.name], ["调整", (r) => r.change], ["预计余额（未计离线恢复）", (r) => r.after]], cart.length ? `将发放 ${cart.length} 种物品，实际入账见执行结果。` : "填写资源或选择物品后，在此核对调整。"));
+}
+async function submitResetCopyCounts() {
+  if (submitting || pendingGrant) throw new Error("请先确认上一次 GM 操作的结果。");
+  if (!gmTarget || gmTarget.id !== Number($("gm-account").value)) throw new Error("请先读取目标玩家。");
+  const reason = $("gm-reason").value.trim();
+  if (!reason) { $("gm-reason").focus(); throw new Error("请填写本次操作原因。"); }
+  rememberGrant({ account: gmTarget.id, data: {
+    action: "reset-copy-counts", operation_id: crypto.randomUUID().replaceAll("-", ""),
+    revision: gmTarget.revision, reason, aid: Number($("gm-reset-copy").value),
+  } });
+  await sendGmOperation();
 }
 async function submitGrant() {
   if (submitting) return;
@@ -1043,6 +1059,7 @@ $("account-next").onclick = () => { state.accountOffset += 25; renderAccounts();
 $("gm-account").oninput = () => { gmRequest++; gmTarget = null; $("gm-identity").textContent = "账号已改变，请重新读取玩家。"; grantLock(); };
 $("gm-target-form").onsubmit = (event) => { event.preventDefault(); run(() => loadGmAccount(Number($("gm-account").value))); };
 $("gm-form").onsubmit = (event) => { event.preventDefault(); run(submitGrant); };
+$("gm-reset-submit").onclick = () => run(submitResetCopyCounts);
 $("close-manager").onclick = () => $("manager").close();
 $("manage-form").onsubmit = (event) => { event.preventDefault(); run(submitManagement); };
 $("catalog-search").onclick = () => run(() => loadCatalog(0));
