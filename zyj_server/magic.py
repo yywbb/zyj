@@ -11,6 +11,9 @@ OPCODES = QUERIES + MUTATIONS
 FIELDS = {"atk": 6, "def": 7, "hp": 8, "critical": 10, "dodge": 11, "parry": 12,
           "resilience": 13, "hit": 14, "arp": 15, "criticaldmg": 16}
 COUNTERS = ("stone_copy", "blackmarketgoldbuycount")
+# 自动锻造不再读取 global_kv.automatic_artifact_number（原值 1000）作为业务次数上限：
+# 次数由玩家实际资源决定，这里只保留协议/内存安全阀，打包客户端注入同一个值。
+MAX_AUTOMATIC_ROLLS = 100000
 
 
 def values(row, prefix):
@@ -240,7 +243,7 @@ def prepare(opcode, save, body, config, seed):
             if count not in ((1, 10, 50) if large else (1, 10)):
                 raise ValueError("法宝锻造次数尚未解锁")
         elif (level < int(config["global_kv"]["automatic_forging"]["value"]) and not config["vip"][str(save["role_state"]["vip"])]["vip_automatic_forging"]
-              or not 1 <= count <= int(config["global_kv"]["automatic_artifact_number"]["value"])
+              or not 1 <= count <= MAX_AUTOMATIC_ROLLS
               or any(v not in (0, 1) for v in flags) or pending):
             raise ValueError("自动锻造未解锁、次数/筛选无效或仍有待确认预览")
         if data == values(row, "init"):

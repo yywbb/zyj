@@ -13,6 +13,7 @@ import shutil
 import re
 
 from zyj_server.configuration import iter_config_bytes
+from zyj_server.magic import MAX_AUTOMATIC_ROLLS
 from zyj_server.timebag import GIFTS
 
 DELTA = 0x9E3779B9
@@ -1629,6 +1630,9 @@ return magic''')
             self.rootItems.donum:setString(self.donum)
         end,
         {fontSize=33,fontColor=self.rootItems.donum:getColor(),PlaceHolder="",length=4}):setTouchPriority(self.touchPriority)''')
+    marker = 'PlaceHolder="",length=4'
+    assert code.count(marker) == 1
+    code = code.replace(marker, f'PlaceHolder="",length={len(str(MAX_AUTOMATIC_ROLLS))}')
     marker = "function instrumentForgeAutomatic.close(self)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + "    self.localMagicWindow = (self.localMagicWindow or 0)+1\n")
@@ -1648,7 +1652,25 @@ return magic''')
         end
     end'''
     assert code.count(marker) == 1
-    code = code.replace(marker, '    local maxnum = tonumber(gamedata.config.global_kv["automatic_artifact_number"].value)')
+    code = code.replace(marker, f"    local maxnum = {MAX_AUTOMATIC_ROLLS}")
+    # 次数放开后组数可能上千，逐组 0.05 秒动画会拖成几十秒并屏蔽点击；一次填入后统一刷新。
+    start = code.index('    print("instrumentForgeAutomatic reloadData times1:"')
+    end = code.index("function instrumentForgeAutomatic.close(", start)
+    code = code[:start] + '''    self.isfull = false
+    gameTouch:clickprofbytime(0.5)
+    for i = 1,rnum do
+        self.status[tostring(i)] = status[tostring(i)]
+    end
+    if self.ListTableView then
+        self.ListTableView:reloadData()
+        self.ListTableView:setLuaContentOffset(0,(self.rootItems.listnode:getContentSize().height > table.getTableLength(self.status)*220) and (self.rootItems.listnode:getContentSize().height - table.getTableLength(self.status)*220) or 0)
+    end
+    if rnum > 0 then
+        runGamePrompt({msg = "自动锻造完成"})
+    end
+end
+
+''' + code[end:]
     patched["window_instrumentForgeAutomatic"] = code
     return patched
 
