@@ -582,6 +582,7 @@ class MagicTests(unittest.TestCase):
                 if k=="getPositionX" or k=="getPositionY" then return function() return 0 end end
                 if k=="setString" then return function(self,v) self.text=v end end
                 if k=="setVisible" then return function(self,v) self.visible=v end end
+                if k=="getParent" then return function() return node() end end
                 return function() end
             end}) end
             function items() return setmetatable({}, {__index=function(t,k) local n=node();rawset(t,k,n);return n end}) end
@@ -595,7 +596,8 @@ class MagicTests(unittest.TestCase):
             gameWindows={windows={},openWindow=function() end};gameTouch={clickprofbytime=function() end};ccc3=function() return {} end
             guide={controller={addComplete=function() end}};LuaEventHandler={create=function(self,f) lastListHandler=f;return f end}
             CCTableViewCell={create=node}
-            setSpriteFrameByName=function() end;runGamePrompt=function() end''')
+            setSpriteFrameByName=function() end;runGamePrompt=function() end
+            CCControlButton={create=function() return node() end};CCSizeMake=function() end;ccp=function() end;setControlButtonFrame=function() end''')
         page = lua.execute(self.client_scripts()["assets/scripts/Layer_magic.so"].decode())
         lua.globals().GameScene.layers.magic = lua.table_from({"show": True, "module": page})
         lua.execute(self.client_scripts()["assets/scripts/UIMagic.so"].decode())
@@ -716,6 +718,21 @@ class MagicTests(unittest.TestCase):
                 window.numchange(window, 4990)
                 self.assertEqual(window.donum, 10)
                 window.close(window)
+
+    def test_actual_auto_window_max_button_submits_affordable_count(self):
+        lua, page = self.ui_lua()
+        window = lua.execute(self.client_scripts()["assets/scripts/window_instrumentForgeAutomatic.so"].decode())
+        lua.globals().GameScene.roleinfo.level = 80
+        lua.globals().GameScene.roleinfo.coin = 1000000000
+        window.open(window, -100, lua.table_from({"iid": 1, "method": 2, "tuPoStatus": 0, "view": page.localMagicView}), None)
+        window.hasstonenum = 700
+        window.rootItems.localMaxButton.callback()
+        request = lua.globals().requests[len(lua.globals().requests)]
+        self.assertEqual((request.type, request.xlnum), (1364, 700 // window.stonenum))
+        window.hasstonenum = 0
+        before = len(lua.globals().requests)
+        window.rootItems.localMaxButton.callback()
+        self.assertEqual(len(lua.globals().requests), before)
 
     def test_actual_auto_window_reload_fills_large_result_list_in_one_pass(self):
         lua, page = self.ui_lua()

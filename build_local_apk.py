@@ -1633,6 +1633,43 @@ return magic''')
     marker = 'PlaceHolder="",length=4'
     assert code.count(marker) == 1
     code = code.replace(marker, f'PlaceHolder="",length={len(str(MAX_AUTOMATIC_ROLLS))}')
+    # 自动满级：按当前资源可负担的最大次数一键提交；服务端遇属性满级即停，只按实际次数扣费。
+    marker = "    self.rootItems.doButton:setTouchPriority(self.touchPriority)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + '''
+    local maxButton = CCControlButton:create("自动满级", "Helvetica-Bold", 26)
+    maxButton:setPreferredSize(CCSizeMake(190, 70))
+    maxButton:setAnchorPoint(ccp(0.5, 0.5))
+    maxButton:setPosition(ccp(self.rootItems.doButton:getPositionX() - 230, self.rootItems.doButton:getPositionY()))
+    setControlButtonFrame(maxButton, "b_n_button5")
+    maxButton:addHandleOfControlEvent(function()
+        local count = self:maxAffordable()
+        if count < 1 then return end
+        self.donum = 0
+        self:numchange(count)
+        self.rootItems.doButton.callback()
+    end, CCControlEventTouchUpInside)
+    maxButton:setSwallowsTouch(true)
+    maxButton:setTouchPriority(self.touchPriority)
+    self.rootItems.doButton:getParent():addChild(maxButton)
+    self.rootItems.localMaxButton = maxButton
+''')
+    marker = "function instrumentForgeAutomatic.initnum(self,num)\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''function instrumentForgeAutomatic.maxAffordable(self)
+    local count = %d
+    local function limit(has, unit)
+        if unit and unit > 0 then count = math.min(count, math.floor((has or 0)/unit)) end
+    end
+    limit(self.hasstonenum, self.stonenum)
+    if self.costcid == 1000 then limit(GameScene.roleinfo.coin, self.costnum)
+    elseif self.costcid == 1001 then limit(GameScene.roleinfo.gold, self.costnum)
+    elseif self.costcid == 1025 then limit(GameScene.roleinfo.g_gold, self.costnum) end
+    if count < 1 then runGamePrompt({msg = "资源不足，无法自动满级"}) end
+    return count
+end
+
+''' % MAX_AUTOMATIC_ROLLS + marker)
     marker = "function instrumentForgeAutomatic.close(self)\n"
     assert code.count(marker) == 1
     code = code.replace(marker, marker + "    self.localMagicWindow = (self.localMagicWindow or 0)+1\n")
