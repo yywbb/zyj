@@ -16,6 +16,12 @@ function node(tag, text, className) {
   return element;
 }
 function link(text, href, className) { const a = node("a", text, className); a.href = href; return a; }
+function operationId() {
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
 function message(text, error = false) { $("notice").textContent = text; $("notice").className = error ? "notice error" : "notice"; $("notice").hidden = !text; }
 async function api(path, data) {
   const response = await fetch(path, {
@@ -246,7 +252,7 @@ function openManagement(account, action, item) {
 async function submitManagement() {
   if (submitting || pendingGrant) throw new Error("请先确认上一次 GM 操作的结果。");
   const { account, action, item } = management, data = {
-    action, operation_id: crypto.randomUUID().replaceAll("-", ""), revision: account.revision, reason: $("manager-reason").value.trim(),
+    action, operation_id: operationId(), revision: account.revision, reason: $("manager-reason").value.trim(),
     ...(action === "inventory" ? { cid: item.item_id, count: Number($("manager-value").value) } : { iid: item.iid }),
   };
   if (action === "general-level") data.level = Number($("manager-value").value);
@@ -422,7 +428,7 @@ async function submitGlobalReset(event) {
   resetSubmitting = true; $("reset-submit").disabled = true;
   try {
     const result = await api("/api/reset-copy-counts", {
-      operation_id: crypto.randomUUID().replaceAll("-", ""), reason, aid: Number($("reset-copy").value),
+      operation_id: operationId(), reason, aid: Number($("reset-copy").value),
     });
     const details = result.details || {}, affected = details.affected || [], skipped = details.skipped || [];
     $("reset-result").hidden = false;
@@ -442,7 +448,7 @@ async function submitGrant() {
     const deltas = Object.fromEntries(Object.keys(resources).map((key) => [key, Number($(`gm-${key}`).value)]).filter(([, value]) => value !== 0));
     if (!Object.keys(deltas).length && !cart.length) throw new Error("至少填写一项资源变更或添加一种物品。");
     rememberGrant({ account: gmTarget.id, cart: cart.map((item) => ({ ...item })), data: {
-      operation_id: crypto.randomUUID().replaceAll("-", ""), revision: gmTarget.revision, reason: $("gm-reason").value.trim(),
+      operation_id: operationId(), revision: gmTarget.revision, reason: $("gm-reason").value.trim(),
       resources: deltas, items: cart.map(({ cid, count }) => ({ cid, count })),
     } });
   }

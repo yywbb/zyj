@@ -1782,6 +1782,9 @@ class AdminHttpTests(AdminFixture):
         self.assertIn('$("reset-form").onsubmit', script)
         self.assertNotIn('id="gm-reset-submit"', html)
         self.assertNotIn("submitResetCopyCounts", script)
+        self.assertIn("function operationId()", script)
+        self.assertIn("crypto.getRandomValues", script)
+        self.assertNotIn("crypto.randomUUID", script)
 
     def test_global_reset_copy_counts_http_route_summary_and_idempotent_retry(self):
         for account in (1, 2):
