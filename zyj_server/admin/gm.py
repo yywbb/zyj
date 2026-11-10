@@ -315,6 +315,16 @@ def changes(before, after):
     return result
 
 
+def _copy_count_save(store, account, snapshot):
+    """活动副本次数以在线会话的内存存档为准；否则会话下一次落盘会覆盖重置结果。"""
+    session = store.sessions.get(account)
+    if session is None:
+        return snapshot["save"], None
+    if not isinstance(getattr(session, "save", None), dict):
+        raise ValueError(f"账号 {account} 的在线会话存档异常")
+    return session.save, session
+
+
 class Workbench:
     def __init__(self, accounts):
         self.accounts = accounts
@@ -379,20 +389,21 @@ class Workbench:
             rows = []
             for account in self.accounts.account_ids():
                 snapshot = self.accounts.snapshot(account)
-                state = snapshot["save"].get("activity_copy_state")
+                save, _ = _copy_count_save(self.accounts, account, snapshot)
+                state = save.get("activity_copy_state")
                 if snapshot["error"] or not snapshot["has_save"] or not isinstance(state, dict):
                     continue
                 copies = state.get("copies")
                 if not isinstance(copies, dict):
                     continue
-                rows.append({"account": account, "name": snapshot["save"].get("role_name", ""),
+                rows.append({"account": account, "name": save.get("role_name", ""),
                              "online": snapshot["online"], "day": state.get("day", 0),
                              "copies": {key: {"used": row.get("used", 0), "bought": row.get("bought", 0)}
                                         for key, row in copies.items() if isinstance(row, dict)}})
             return {"rows": rows}
 
     def reset_copy_counts(self, data):
-        """独立全局功能：不绑定账号，一次重置所有离线账号的活动副本次数。"""
+        """独立全局功能：不绑定账号，一次重置所有账号（含在线账号）的活动副本次数。"""
         if (not isinstance(data, dict) or set(data) != {"operation_id", "reason", "aid"}
                 or not isinstance(data["operation_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", data["operation_id"])
                 or not isinstance(data["reason"], str) or not data["reason"].strip() or len(data["reason"]) > 200
@@ -412,25 +423,23 @@ class Workbench:
             try:
                 keys = [str(aid) for aid in (activity_copy.COPIES if not data["aid"] else (data["aid"],))]
                 plans, skipped = [], []
-                # 先整体预检，任一账号状态异常时一笔都不写。
+                # 先整体预检，任一账号状态异常时一笔都不写；在线账号以会话内存存档为源。
                 for account in store.account_ids():
                     snapshot = store.snapshot(account)
-                    if snapshot["online"]:
-                        skipped.append({"account": account, "reason": "账号在线，请先退出游戏"})
-                        continue
                     if snapshot["error"]:
                         skipped.append({"account": account, "reason": "存档损坏"})
                         continue
-                    if not snapshot["has_save"] or not snapshot["save"].get("has_role"):
+                    live, session = _copy_count_save(store, account, snapshot)
+                    save = copy.deepcopy(live)
+                    if not snapshot["has_save"] or not save.get("has_role"):
                         continue
-                    save = copy.deepcopy(snapshot["save"])
                     state = activity_copy.get_state(save, store.role_config)
                     targets = [state["copies"][key] for key in keys]
                     if not any(target["used"] or target["bought"] for target in targets):
                         continue
-                    plans.append((account, save, targets))
+                    plans.append((account, session, save, targets, snapshot["online"]))
                 affected, used, bought = [], 0, 0
-                for account, save, targets in plans:
+                for account, session, save, targets, online in plans:
                     for target in targets:
                         used += target["used"]
                         bought += target["bought"]
@@ -441,7 +450,11 @@ class Workbench:
                                                store.path(account).read_bytes())
                     if not player.save_role(save, store.path(account), store.step_counts):
                         raise OSError("活动副本次数重置保存失败")
-                    affected.append({"account": account, "name": save.get("role_name", ""), "backup_id": backup_id})
+                    # 与登录共用离线锁，在线会话无法并发写回；同步其内存存档，避免下次落盘把次数带回来。
+                    if session is not None and store.sessions.get(account) is session:
+                        session.save = save
+                    affected.append({"account": account, "name": save.get("role_name", ""),
+                                     "backup_id": backup_id, "online": online})
                 row.update(status="success", details={"aid": data["aid"], "affected": affected, "skipped": skipped,
                                                       "cleared_used": used, "cleared_bought": bought})
                 self._write(row)

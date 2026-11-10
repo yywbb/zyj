@@ -365,7 +365,7 @@ async function loadResetPage() {
   });
   $("reset-rows").replaceChildren(table(rows, [
     ["账号", (r) => r.account], ["角色", (r) => r.name || "—"],
-    ["状态", (r) => badge(r.online ? "在线（跳过）" : "离线", r.online ? "online" : "")],
+    ["状态", (r) => badge(r.online ? "在线（同步重置）" : "离线", r.online ? "online" : "")],
     ["日序号", (r) => number(r.day)], ["六类已用合计", (r) => number(r.used)], ["六类已购买合计", (r) => number(r.bought)],
   ], rows.length ? "" : "暂无已创建角色的活动副本状态。"));
 }
@@ -384,9 +384,10 @@ async function submitGlobalReset(event) {
     $("reset-result").replaceChildren(node("h2", "全局重置完成"),
       fields([["操作编号", result.id], ["清除已用次数", number(details.cleared_used || 0)],
         ["清除已购买次数", number(details.cleared_bought || 0)], ["变更账号数", number(affected.length)], ["跳过账号数", number(skipped.length)]]),
-      section("已变更账号", table(affected, [["账号", (r) => r.account], ["角色", (r) => r.name || "—"], ["备份编号", (r) => r.backup_id]])),
+      section("已变更账号", table(affected, [["账号", (r) => r.account], ["角色", (r) => r.name || "—"],
+        ["状态", (r) => badge(r.online ? "在线已同步" : "离线", r.online ? "online" : "")], ["备份编号", (r) => r.backup_id]])),
       section("跳过账号", table(skipped, [["账号", (r) => r.account], ["原因", (r) => r.reason]])));
-    message(`已重置 ${affected.length} 个账号的活动副本次数，跳过 ${skipped.length} 个在线或损坏账号。`);
+    message(`已重置 ${affected.length} 个账号（含在线账号）的活动副本次数，跳过 ${skipped.length} 个损坏账号。`);
     await loadResetPage();
   } finally { resetSubmitting = false; $("reset-submit").disabled = false; }
 }

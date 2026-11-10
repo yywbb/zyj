@@ -1387,6 +1387,12 @@ class GmResetCopyCountsTests(AdminFixture):
             player.save_role(save, self.store.path(account), COUNTS)
         self.gm = gm.Workbench(self.store)
 
+    def online(self, account=2):
+        self.store.register(account, PASSWORD, self.store.snapshot(account)["revision"])
+        session = self.store.open_session(account, PASSWORD, ("phone", account))
+        self.addCleanup(self.store.close_session, account)
+        return session
+
     def request(self, aid=0, **changes):
         return {"operation_id": uuid.uuid4().hex, "reason": "全局重置次数测试", "aid": aid, **changes}
 
@@ -1437,21 +1443,60 @@ class GmResetCopyCountsTests(AdminFixture):
         self.assertEqual(self.bytes(), saved)
         self.assertEqual(len(self.gm.history()["rows"]), 2)
 
-    def test_global_reset_skips_online_accounts_and_atomic_failures(self):
-        self.store.active[2] = {"address": "phone", "connected_at": 1}
+    def test_global_reset_includes_online_account_and_syncs_live_session(self):
+        session = self.online(2)
         result = self.gm.reset_copy_counts(self.request())
-        self.assertEqual([row["account"] for row in result["details"]["affected"]], [1])
-        self.assertEqual([row["account"] for row in result["details"]["skipped"]], [2])
-        self.assertEqual(self.state(1)["copies"]["1"]["used"], 0)
-        self.assertEqual(self.state(2)["copies"]["1"]["used"], 4)
+        details = result["details"]
+        self.assertEqual(result["status"], "success")
+        self.assertEqual([row["account"] for row in details["affected"]], [1, 2])
+        self.assertEqual([row["online"] for row in details["affected"]], [False, True])
+        self.assertEqual(details["skipped"], [])
+        self.assertEqual((details["cleared_used"], details["cleared_bought"]), (48, 24))
+        for account in (1, 2):
+            self.assertEqual((self.state(account)["copies"]["1"]["used"],
+                              self.state(account)["copies"]["1"]["bought"]), (0, 0))
+        self.assertEqual(session.save["activity_copy_state"]["day"], 20833)
+        self.assertEqual(session.save["activity_copy_state"]["copies"]["1"]["cleared"], 2)
+        # 在线会话随后的落盘不能把已重置的次数带回磁盘。
+        self.assertTrue(player.save_role(session.save, self.store.path(2), COUNTS))
+        self.assertEqual((self.state(2)["copies"]["1"]["used"],
+                          self.state(2)["copies"]["1"]["bought"]), (0, 0))
+
+    def test_global_reset_uses_live_save_and_handles_online_without_session(self):
+        session = self.online(2)
+        session.save["activity_copy_state"]["copies"]["1"]["used"] = 3
+        session.save["online_only_marker"] = 42
+        result = self.gm.reset_copy_counts(self.request())
+        self.assertEqual((result["details"]["cleared_used"], result["details"]["cleared_bought"]), (47, 24))
+        disk = self.store.snapshot(2)["save"]
+        self.assertEqual(disk["online_only_marker"], 42)
+        self.assertEqual(disk["activity_copy_state"]["copies"]["1"]["used"], 0)
+        self.assertEqual(disk["activity_copy_state"]["copies"]["1"]["cleared"], 2)
+        # 重连窗口仅有登录占用、尚无会话时，仍然重置磁盘存档而不跳过。
         self.store.close_session(2)
+        self.store.active[2] = {"address": "phone", "connected_at": 1}
+        save = copy.deepcopy(self.store.snapshot(2)["save"])
+        save["activity_copy_state"]["copies"]["2"].update(used=2, bought=2)
+        player.save_role(save, self.store.path(2), COUNTS)
+        result = self.gm.reset_copy_counts(self.request(aid=2))
+        self.assertEqual([row["account"] for row in result["details"]["affected"]], [2])
+        self.assertTrue(result["details"]["affected"][0]["online"])
+        self.assertEqual((self.state(2)["copies"]["2"]["used"],
+                          self.state(2)["copies"]["2"]["bought"]), (0, 0))
+
+    def test_global_reset_atomic_failures_leave_online_session_unchanged(self):
+        session = self.online(2)
         before = self.bytes()
+        live_before = copy.deepcopy(session.save)
         with patch.object(storage, "backup", side_effect=OSError("full")), self.assertRaises(OSError):
             self.gm.reset_copy_counts(self.request())
         self.assertEqual(self.bytes(), before)
+        self.assertEqual(session.save, live_before)
         with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
             self.gm.reset_copy_counts(self.request())
         self.assertEqual(self.bytes(), before)
+        self.assertEqual(session.save, live_before)
+        self.assertEqual(self.gm.history()["rows"][0]["status"], "failed")
 
     def test_copy_counts_summary_is_read_only_and_marks_online(self):
         before = self.bytes()
@@ -1461,6 +1506,15 @@ class GmResetCopyCountsTests(AdminFixture):
         self.assertFalse(rows[0]["online"])
         self.store.active[1] = {"address": "phone", "connected_at": 1}
         self.assertTrue(self.gm.copy_counts()["rows"][0]["online"])
+        self.assertEqual(self.bytes(), before)
+
+    def test_copy_counts_summary_reads_online_session_state(self):
+        session = self.online(1)
+        session.save["activity_copy_state"]["copies"]["1"]["used"] = 3
+        before = self.bytes()
+        rows = self.gm.copy_counts()["rows"]
+        self.assertEqual(rows[0]["copies"]["1"], {"used": 3, "bought": 2})
+        self.assertTrue(rows[0]["online"])
         self.assertEqual(self.bytes(), before)
 
 
@@ -1622,6 +1676,11 @@ class AdminHttpTests(AdminFixture):
         self.assertIn("function operationId()", script)
         self.assertIn("crypto.getRandomValues", script)
         self.assertNotIn("crypto.randomUUID", script)
+        self.assertIn("含在线账号", html)
+        self.assertIn("在线账号同步重置", html)
+        self.assertNotIn("在线账号会跳过", html)
+        self.assertNotIn("在线（跳过）", script)
+        self.assertIn("在线已同步", script)
 
     def test_grant_page_is_removed_and_system_mail_is_the_only_grant_entry(self):
         html = self.request("/")[2].decode()
@@ -1670,6 +1729,26 @@ class AdminHttpTests(AdminFixture):
         self.assertEqual((detail["used"], detail["bought"]), (0, 0))
         self.assertEqual(self.request("/api/reset-copy-counts", payload)[2]["status"], "success")
         self.assertEqual(self.request("/api/reset-copy-counts", {**payload, "aid": 9})[0], 400)
+
+    def test_global_reset_copy_counts_over_http_resets_online_session(self):
+        for account in (1, 2):
+            if account == 2:
+                self.save(2)
+            save = self.store.snapshot(account)["save"]
+            save["activity_copy_state"] = {"day": 20833, "copies": {
+                str(aid): {"cleared": 1, "used": 3, "tried": 1, "bought": 1} for aid in range(1, 7)}}
+            player.save_role(save, self.store.path(account), COUNTS)
+        self.store.register(2, PASSWORD, self.store.snapshot(2)["revision"])
+        session = self.store.open_session(2, PASSWORD, ("phone", 2))
+        self.addCleanup(self.store.close_session, 2)
+        payload = {"operation_id": uuid.uuid4().hex, "reason": "HTTP 在线全局重置", "aid": 0}
+        code, _, result = self.request("/api/reset-copy-counts", payload)
+        self.assertEqual((code, result["status"]), (200, "success"))
+        self.assertEqual([row["account"] for row in result["details"]["affected"]], [1, 2])
+        self.assertEqual([row["online"] for row in result["details"]["affected"]], [False, True])
+        self.assertEqual(session.save["activity_copy_state"]["copies"]["1"]["used"], 0)
+        summary = self.request("/api/reset-copy-counts")[2]["rows"]
+        self.assertEqual([row["copies"]["1"]["used"] for row in summary], [0, 0])
 
     def test_gm_catalog_and_structured_views_are_read_only_and_paginated(self):
         before = self.store.path(1).read_bytes()

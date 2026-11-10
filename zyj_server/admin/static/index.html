@@ -269,13 +269,13 @@
         </section>
 
         <section id="reset-page" aria-labelledby="reset-title" hidden>
-          <div class="page-heading"><div><h1 id="reset-title">重置次数</h1><p>全局维护功能，不需要选择角色：一次重置所有离线账号的活动副本次数，立即生效、无需重启。</p></div></div>
+          <div class="page-heading"><div><h1 id="reset-title">重置次数</h1><p>全局维护功能，不需要选择角色：一次重置所有账号（含在线账号）的活动副本次数，立即生效、无需重启。</p></div></div>
           <section class="panel"><div class="panel-heading"><h2>当前各账号次数</h2><span class="muted">只读汇总 · UTC+8 日序号</span></div><div id="reset-rows" aria-live="polite"></div></section>
           <section class="panel"><h2>执行重置</h2>
             <form id="reset-form" class="filters"><div><label for="reset-copy">活动副本</label><select id="reset-copy"><option value="0">全部 6 类</option><option value="1">经验副本</option><option value="2">银币副本</option><option value="3">锻造石副本</option><option value="4">升星副本</option><option value="5">阵符副本</option><option value="6">法宝锻造副本</option></select></div>
               <div class="grow"><label for="reset-reason">操作原因</label><input id="reset-reason" type="text" maxlength="200" required placeholder="例如：测试活动副本重置"></div>
               <button id="reset-submit" class="primary" type="submit">一键重置所选次数</button></form>
-            <p class="help">只清空今日已用与已购买次数（含元宝购买次数），保留已通关难度、已尝试难度、日期、累计充值和已领奖记录；不返还已花费的元宝。在线账号会跳过并在结果中列出；每个变更的账号先备份再原子保存，操作编号可重复查询而不会重复执行。</p>
+            <p class="help">只清空今日已用与已购买次数（含元宝购买次数），保留已通关难度、已尝试难度、日期、累计充值和已领奖记录；不返还已花费的元宝。在线账号同步重置，无需退出游戏；若游戏界面仍显示旧次数，重新进入活动副本或重新登录即可刷新。仅存档损坏的账号会跳过并列出；每个变更的账号先备份再原子保存，操作编号可重复查询而不会重复执行。</p>
           </section>
           <section id="reset-result" class="panel" aria-live="polite" hidden></section>
         </section>
