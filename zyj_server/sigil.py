@@ -187,12 +187,15 @@ def prepare(opcode, save, body, config):
         original = item[:]
         advance(item, gems, groups, config)
         for iid in values[1:]:
+            # 到达满级／符之王门槛后立刻停止吞噬：一键添加的后续材料既不消耗，
+            # 也不再参与校验，原样留在库存。若先校验再 break，多余材料里的满级、
+            # 异类或未拥有 IID 会把整批已结算结果回滚，客户端只显示「无效请求」。
+            if not can_level(item, gems, groups, config):
+                break
             if (iid not in gems or iid in occupied
                     or config["sigil"][str(gems[iid][1])]["type"] != config["sigil"][str(item[1])]["type"]
                     or not config["sigil"][str(gems[iid][1])]["nextid"]):
                 raise ValueError("魔符材料无效、正在镶嵌或类型不符")
-            if not can_level(item, gems, groups, config):
-                break
             food = gems.pop(iid)
             item[3] += config["sigil"][str(food[1])]["self_exp"] + food[3]
             if not 0 <= item[3] < (1 << 31):

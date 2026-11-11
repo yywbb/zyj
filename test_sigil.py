@@ -147,6 +147,31 @@ class SigilTests(unittest.TestCase):
         self.assertEqual([food in self.gems() for food in foods], [False, False, True, True, True])
         self.assert_rejected(1140, recharge.ids([target, self.gem(33014)]))
 
+    def test_surplus_foods_after_max_level_are_never_validated_or_consumed(self):
+        # 一键添加一次提交至多 8 枚材料；前两枚把目标推到满级后，其余材料
+        # 必须原样留在库存，不能再逐个校验，否则整批已结算结果会被回滚。
+        target = self.gem(33014)
+        self.call(1141, [11, target])
+        foods = [self.gem(33013) for _ in range(2)]
+        maxed, other, unowned = self.gem(33015), self.gem(33031), 999999
+        self.call(1140, [target] + foods + [maxed, other, unowned])
+        self.assertEqual(self.gems()[target][1:3], [33015, 15])
+        self.assertFalse(any(food in self.gems() for food in foods))
+        self.assertIn(maxed, self.gems())
+        self.assertIn(other, self.gems())
+
+    def test_surplus_foods_after_king_gate_are_never_validated_or_consumed(self):
+        # 符之王越过外围等级门槛同理：门槛之后的满级材料不得让整批请求失败。
+        self.outer(8)
+        king = self.gem(33082)
+        self.call(1141, [16, king])
+        foods = [self.gem(33082) for _ in range(3)]
+        maxed = self.gem(33090)
+        self.call(1140, [king] + foods + [maxed])
+        self.assertEqual(self.gems()[king][1:3], [33084, 9])
+        self.assertFalse(any(food in self.gems() for food in foods))
+        self.assertIn(maxed, self.gems())
+
     def test_invalid_materials_and_unowned_targets_never_consume(self):
         target, first = self.gem(33014), self.gem(33014)
         self.call(1141, [11, target])
