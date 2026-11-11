@@ -1310,6 +1310,8 @@ class GmManagementTests(AdminFixture):
                    ("formation", {"iid": 7059, "position": 0}), ("formation", {"iid": 7060, "position": 4}),
                    ("formation", {"iid": 7060, "position": 8}), ("formation", {"iid": 7061, "position": 0}),
                    ("remove-general", {"iid": 7059}), ("remove-general", {"iid": 7060}), ("remove-general", {"iid": True}),
+                   ("role-exp", {"exp": 0}), ("role-exp", {"exp": True}), ("role-exp", {"exp": 1 << 31}),
+                   ("role-exp", {"exp": 100, "extra": 0}),
                    ("unknown", {}), ([], {})]
         for action, values in invalid:
             with self.subTest(action=action, values=values), self.assertRaises(ValueError):
@@ -1317,10 +1319,47 @@ class GmManagementTests(AdminFixture):
             self.assertEqual(self.store.path(1).read_bytes(), before)
         self.assertEqual(self.store.backups(1), [])
 
+    def test_role_exp_grants_levels_rewards_and_audits_changes(self):
+        before = self.detail()
+        request = self.request("role-exp", exp=5_000_000)
+        result = self.gm.apply(1, request)
+        after = self.detail()
+        self.assertGreater(after["level"], before["level"])
+        self.assertLess(after["exp"], after["nextexp"])
+        self.assertEqual(after["exp"], before["exp"] + 5_000_000
+                         - sum(CONFIG["role_exp"][str(lv)]["nextexp"] for lv in range(before["level"], after["level"])))
+        for field, reward in (("coin", "c_reward"), ("gold", "g_reward")):
+            self.assertEqual(after[field] - before[field],
+                             sum(CONFIG["role_exp"][str(lv)][reward] for lv in range(before["level"] + 1, after["level"] + 1)))
+        self.assertEqual(after["maxstamina"] - before["maxstamina"],
+                         CONFIG["role_exp"][str(after["level"])]["maxstamina"] - CONFIG["role_exp"][str(before["level"])]["maxstamina"])
+        self.assertEqual(after["maxenergy"] - before["maxenergy"],
+                         CONFIG["role_exp"][str(after["level"])]["maxenergy"] - CONFIG["role_exp"][str(before["level"])]["maxenergy"])
+        self.assertIn({"name": "角色等级", "before": before["level"], "after": after["level"]}, result["changes"])
+        self.assertIn({"name": "角色经验", "before": before["exp"], "after": after["exp"]}, result["changes"])
+        # 不足一级时只累积经验；已领奖励不重复发放
+        gain = max(1, (after["nextexp"] - after["exp"]) // 2)
+        self.gm.apply(1, self.request("role-exp", exp=gain))
+        partial = self.detail()
+        self.assertEqual(partial["level"], after["level"])
+        self.assertEqual(partial["exp"], after["exp"] + gain)
+        self.assertEqual(partial["coin"], after["coin"])
+        saved = self.store.path(1).read_bytes()
+        self.gm.apply(1, request)
+        self.assertEqual(self.store.path(1).read_bytes(), saved)
+        # 未完成新手引导时拒绝（Session 会按已确认步骤数重算引导状态）
+        save = self.store.snapshot(1)["save"]
+        save["guide"]["sections"]["1"].update(status=1, step=30, steps=list(range(1, 31)))
+        player.save_role(save, self.store.path(1), COUNTS)
+        with self.assertRaisesRegex(ValueError, "新手引导"):
+            self.gm.apply(1, self.request("role-exp", exp=100))
+        self.assertEqual(self.detail()["level"], after["level"])
+
     def test_new_actions_share_offline_revision_backup_and_save_guards(self):
         before = self.store.path(1).read_bytes()
         actions = [("inventory", {"cid": 20100, "count": 2}), ("general-level", {"iid": 7060, "level": 6}),
-                   ("formation", {"iid": 7061, "position": 2}), ("remove-general", {"iid": 7061})]
+                   ("formation", {"iid": 7061, "position": 2}), ("remove-general", {"iid": 7061}),
+                   ("role-exp", {"exp": 500_000})]
         for action, values in actions:
             with self.subTest(action=action):
                 self.store.active[1] = {"address": "phone", "connected_at": 1}

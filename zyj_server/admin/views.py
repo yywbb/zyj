@@ -19,7 +19,7 @@ def summary(snapshot, step_counts, role_config):
                       guide=guide.describe_guide(guide.get_guide_sections(save, step_counts), step_counts))
         if save.get("has_role") or save.get("role_state") or save.get("role_snapshot"):
             state = player.get_role_state(save, role_config)
-            result.update({key: state.get(key) for key in ("level", "coin", "gold", "stamina", "energy", "maxstamina", "maxenergy", "vip", "power")})
+            result.update({key: state.get(key) for key in ("level", "exp", "nextexp", "coin", "gold", "stamina", "energy", "maxstamina", "maxenergy", "vip", "power")})
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         result["error"] = f"存档状态无法解析: {error}"
     return result

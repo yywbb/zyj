@@ -19,12 +19,14 @@ RESOURCES = {"gold": "元宝", "coin": "银币", "stamina": "体力", "energy": 
 ACTIONS = {"grant": "历史发放（已下线）", "register": "创建登录账号", "backup": "创建备份",
            "restore": "恢复备份", "reset": "重置账号", "reset-guide": "重置引导", "config": "修改配置",
            "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将",
+           "role-exp": "赠送角色经验",
            "reset-copy-counts": "重置活动副本次数",
            "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件", "kick": "强制下线",
            "transfer": "转移账号数据到测试号"}
 TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"inventory": {"cid", "count"},
-                  "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
+                  "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"},
+                  "role-exp": {"exp"}}
 COMMON_ITEMS = (20081, 20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
 # 系统邮件附件数量上限：可堆叠道具/碎片 1 亿，武将/装备/战宠等实体 1000。
 # 两者都远低于服务端与协议的 int32 上限，避免一次发放把背包数量顶到溢出。
@@ -236,7 +238,7 @@ def validate(data, items):
         raise ValueError("请填写 1–200 字的操作原因")
     if any(type(data[key]) is not int or not (0 if key in ("count", "position") else 1) <= data[key] < (1 << 31)
            for key in PLAYER_ACTIONS[action]):
-        raise ValueError("物品、武将或数量参数无效")
+        raise ValueError("物品、武将、经验或数量参数无效")
     if action == "inventory" and data["cid"] == 1025:
         raise ValueError("仙元是角色资源，请通过系统邮件发放")
     if action == "inventory" and items.get(data["cid"], {}).get("kind") not in ("道具", "武将碎片", "战宠碎片", "宝物碎片", "装备碎片"):
@@ -255,6 +257,14 @@ def _manage(save, action, data, config, step_counts, now):
         if count == data["count"]:
             raise ValueError("物品数量未变化")
         player.change_item_count(save, data["cid"], data["count"] - count, config, now)
+        return
+    if action == "role-exp":
+        from .. import guild_rooms
+        if not save.get("has_role"):
+            raise ValueError("角色尚未创建")
+        if save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2:
+            raise ValueError("请先完成新手引导后使用角色经验")
+        guild_rooms.gain_exp(save, data["exp"], 0, config)
         return
     if save.get("guide", {}).get("sections", {}).get("1", {}).get("status") != 2:
         raise ValueError("请先完成新手引导后管理武将")
@@ -312,7 +322,7 @@ def _manage(save, action, data, config, step_counts, now):
 
 def changes(before, after):
     result = []
-    for key, label in {**RESOURCES, "power": "阵容战力"}.items():
+    for key, label in {**RESOURCES, "power": "阵容战力", "level": "角色等级", "exp": "角色经验"}.items():
         if before[key] != after[key]:
             result.append({"name": label, "before": before[key], "after": after[key]})
     for field, identity in (("inventory", "cid"), ("generals", "iid"), ("equipment", "iid")):

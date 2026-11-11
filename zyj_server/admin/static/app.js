@@ -143,7 +143,10 @@ async function loadAccount(id, tab = "summary") {
   if (request !== accountRequest || state.page !== "accounts") return;
   const detail = $("account-detail"), heading = node("div", undefined, "detail-heading"), identity = node("div"), actions = node("div", undefined, "actions");
   identity.append(node("small", `账号 ${row.id}`), node("h2", row.name), node("small", `最近保存 ${date(row.saved_at)}`));
-  actions.append(badge(row.online ? "在线" : "离线", row.online ? "online" : ""), link("发送系统邮件", `#mails/${row.id}`, "button primary"), link("操作记录", `#operations/${row.id}`, "button"));
+  const roleExp = button("赠送角色经验", () => openManagement(row, "role-exp", { name: "角色经验" }));
+  roleExp.classList.add("compact-btn");
+  roleExp.disabled = row.online || !!row.error || !row.has_role || row.states?.guide?.sections?.["1"]?.status !== 2;
+  actions.append(badge(row.online ? "在线" : "离线", row.online ? "online" : ""), link("发送系统邮件", `#mails/${row.id}`, "button primary"), link("操作记录", `#operations/${row.id}`, "button"), roleExp);
   heading.append(identity, actions); detail.replaceChildren(heading);
   if (row.error) detail.append(node("p", row.error, "error"));
   if (!row.has_save) detail.append(node("p", "尚无存档。在“账号与备份”中设置密码后，可使用此账号登录游戏。", "notice"));
@@ -151,7 +154,7 @@ async function loadAccount(id, tab = "summary") {
   for (const [key, name] of Object.entries(tabs)) { const a = link(name, `#account/${id}/${key}`); if (key === tab) a.setAttribute("aria-current", "page"); navigation.append(a); }
   detail.append(navigation);
   if (tab === "summary") {
-    detail.append(fields([["等级", number(row.level)], ["VIP", number(row.vip)], ["元宝", number(row.gold)], ["银币", number(row.coin)],
+    detail.append(fields([["等级", number(row.level)], ["经验", `${number(row.exp)} / ${number(row.nextexp)}`], ["VIP", number(row.vip)], ["元宝", number(row.gold)], ["银币", number(row.coin)],
       ["体力", `${number(row.stamina)} / ${number(row.maxstamina)}`], ["精力", `${number(row.energy)} / ${number(row.maxenergy)}`],
       ["战力", number(row.power)], ["武将数量", row.generals.length]], "resources"));
     detail.append(fields([["角色创建", date(row.created_at)], ["引导进度", row.guide], ["装备数量", row.equipment.length], ["背包种类", row.inventory.length]]));
@@ -222,10 +225,12 @@ function openManagement(account, action, item) {
   management = { account, action, item };
   $("manage-form").reset(); $("manager-fields").replaceChildren();
   $("manager-title").textContent = info.actions[action];
-  $("manager-target").textContent = `账号 ${account.id} · ${account.name} / ${item.name} (${item.iid || item.item_id})`;
+  $("manager-target").textContent = action === "role-exp"
+    ? `账号 ${account.id} · ${account.name} / 当前等级 ${account.level} · 经验 ${number(account.exp)}`
+    : `账号 ${account.id} · ${account.name} / ${item.name} (${item.iid || item.item_id})`;
   $("manager-submit").textContent = action === "remove-general" ? "移除武将" : "保存变更";
   if (action !== "remove-general") {
-    const input = node(action === "formation" ? "select" : "input"), label = node("label", action === "inventory" ? "目标数量" : action === "formation" ? "目标阵位" : "目标等级");
+    const input = node(action === "formation" ? "select" : "input"), label = node("label", { inventory: "目标数量", formation: "目标阵位", "role-exp": "经验数量" }[action] || "目标等级");
     input.id = "manager-value"; label.htmlFor = input.id;
     if (action === "formation") {
       for (let pos = 0; pos <= account.slot_limit; pos++) {
@@ -234,6 +239,9 @@ function openManagement(account, action, item) {
         option.disabled = pos === 0 && item.protagonist; input.append(option);
       }
       input.value = item.position || 1;
+    } else if (action === "role-exp") {
+      input.type = "number"; input.step = "1"; input.required = true;
+      input.min = 1; input.max = 2147483647; input.value = 100000;
     } else {
       input.type = "number"; input.step = "1"; input.required = true;
       input.min = action === "inventory" ? 0 : item.level + 1;
@@ -241,10 +249,12 @@ function openManagement(account, action, item) {
       input.value = action === "inventory" ? item.count : item.level + 1;
     }
     $("manager-fields").append(label, input);
-    if (action === "inventory") {
+    if (action === "inventory" || action === "role-exp") {
       const actions = node("div", undefined, "actions block");
-      for (const delta of [-10, -1, 1, 10]) actions.append(button(`${delta > 0 ? "+" : ""}${delta}`, () => { input.value = Math.max(0, Math.min(2147483647, Number(input.value) + delta)); }));
-      actions.append(button("清空", () => { input.value = 0; })); $("manager-fields").append(actions);
+      const deltas = action === "role-exp" ? [10000, 100000, 1000000] : [-10, -1, 1, 10];
+      for (const delta of deltas) actions.append(button(`${delta > 0 ? "+" : ""}${number(delta)}`, () => { input.value = Math.max(action === "role-exp" ? 1 : 0, Math.min(2147483647, Number(input.value) + delta)); }));
+      if (action === "inventory") actions.append(button("清空", () => { input.value = 0; }));
+      $("manager-fields").append(actions);
     }
   }
   $("manager-help").textContent = {
@@ -252,6 +262,7 @@ function openManagement(account, action, item) {
     "general-level": "GM 直接升级，不扣经验丹。按现有成长规则同步属性、潜力与战力，保留已有培养加成。",
     formation: "替换闲置武将继承阵位装备；移动已上阵武将会交换阵位及装备。主角必须留在阵中。",
     "remove-general": "移除此闲置武将及其培养进度，不返还材料或碎片。可通过本次操作的备份恢复。",
+    "role-exp": "按现有升级规则累加角色经验：自动结算升级、每级银币/元宝奖励与体力精力上限，到达配置最高等级后停止。",
   }[action];
   $("manager").showModal();
 }
@@ -260,7 +271,8 @@ async function submitManagement() {
   if (submitting || pendingOperation) throw new Error("请先确认上一次管理操作的结果。");
   const { account, action, item } = management, data = {
     action, operation_id: operationId(), revision: account.revision, reason: $("manager-reason").value.trim(),
-    ...(action === "inventory" ? { cid: item.item_id, count: Number($("manager-value").value) } : { iid: item.iid }),
+    ...(action === "inventory" ? { cid: item.item_id, count: Number($("manager-value").value) }
+        : action === "role-exp" ? { exp: Number($("manager-value").value) } : { iid: item.iid }),
   };
   if (action === "general-level") data.level = Number($("manager-value").value);
   if (action === "formation") data.position = Number($("manager-value").value);
