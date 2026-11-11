@@ -186,7 +186,20 @@ def prepare(opcode, save, body, config):
             raise ValueError("魔符已满级或符之王外围等级不足")
         original = item[:]
         advance(item, gems, groups, config)
-        for iid in values[1:]:
+        foods = values[1:]
+        if not foods and item == original:
+            # 未指定材料且本级自升级没有消耗时：自动挑选同类型的闲置魔符作材料。
+            target_type = config["sigil"][str(item[1])]["type"]
+            candidates = []
+            for iid in sorted(gems, key=lambda i: (gems[i][2], gems[i][3], i)):
+                if (iid != item[0] and iid not in occupied
+                        and config["sigil"][str(gems[iid][1])]["type"] == target_type
+                        and config["sigil"][str(gems[iid][1])]["nextid"]):
+                    candidates.append(iid)
+                    if len(candidates) == 8:
+                        break
+            foods = candidates
+        for iid in foods:
             # 到达满级／符之王门槛后立刻停止吞噬：一键添加的后续材料既不消耗，
             # 也不再参与校验，原样留在库存。若先校验再 break，多余材料里的满级、
             # 异类或未拥有 IID 会把整批已结算结果回滚，客户端只显示「无效请求」。

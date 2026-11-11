@@ -132,6 +132,19 @@ class SigilTests(unittest.TestCase):
         self.assertEqual(self.gems()[target][1:], [33085, 10, 320])
         self.assert_rejected(1140, recharge.ids([target]))
 
+    def test_single_target_upgrade_auto_consumes_idle_same_type_materials_when_no_banked_exp(self):
+        target = self.gem(33001)
+        self.call(1141, [11, target])
+        food1 = self.gem(33001)
+        food2 = self.gem(33002)
+        diff_type = self.gem(33016)
+        self.call(1140, [target])
+        self.assertEqual(self.gems()[target][1:], [33003, 3, 0])
+        self.assertNotIn(food1, self.gems())
+        self.assertNotIn(food2, self.gems())
+        self.assertIn(diff_type, self.gems())
+        self.assert_rejected(1140, recharge.ids([target]))
+
     def test_batch_upgrade_stops_at_king_gate_and_max_level_keeping_surplus_foods(self):
         self.outer(8)
         target, foods = self.gem(33082), [self.gem(33082) for _ in range(4)]
