@@ -4,12 +4,12 @@ import copy
 import hashlib
 import random
 
-from . import activity_copy, arena, babel_tower, champion, friend_copy, mieshendian, nightclub, online_rewards, penglai, recharge, single_boss, watchstar, welfare
+from . import activity_copy, arena, babel_tower, champion, friend_copy, mieshendian, nightclub, online_rewards, penglai, recharge, single_boss, star_copy, watchstar, welfare
 from .penglai import comb
 from .protocol import encode_pb_field, iter_pb_fields, pack_frame, pb_get_varint
 
 
-SUPPORTED = {(2, aid) for aid in activity_copy.COPIES} | {(3, aid) for aid in (1, 2, 3, 5, 9, 10, 12, 15)}
+SUPPORTED = {(2, aid) for aid in activity_copy.COPIES} | {(2, 7)} | {(3, aid) for aid in (1, 2, 3, 5, 9, 10, 12, 15)}
 
 
 def require_open(save, config):
@@ -60,7 +60,8 @@ def parse(body, config):
             raise ValueError("助手项目重复或不存在")
         seen.add(key)
         if key in SUPPORTED:
-            used = 2 if key in ((3, 5), (3, 10), (3, 12), (3, 15)) else 1
+            # (2,7) 名将允许 p1 次数、p2 地图、p3 关卡；p4/p5 保留为 0。
+            used = 3 if key == (2, 7) else 2 if key in ((3, 5), (3, 10), (3, 12), (3, 15)) else 1
             if any(params[used:]) or params[0] > 1000:
                 raise ValueError("助手项目含多余参数或执行次数过大")
     extras = messages[2]
@@ -84,6 +85,10 @@ def query(save, config, now):
     for aid in available:
         row = challenges["copies"][str(aid)]
         challenge_rows.extend((aid, row["used"], row["cleared"]))
+    # 挑战7 名将副本：原生客户端按 id 取三元组，maxLevel>0 才允许勾选。
+    star = star_copy.settle(save, config, now)
+    challenge_rows.extend((7, sum(star["wins"].values()),
+                           max((int(mid) for mid in star["progress"]), default=0)))
     activity_rows = {i: [i, 0, 0, 0, 0, 0, 0, 0] for i in range(1, 16)}
     state = mieshendian.settle(save, config, now)
     activity_rows[1][1:5] = [state["resets"], state["maxfloor"],
@@ -136,6 +141,61 @@ def sweep_options(value):
     return count, text[-1] == "9"
 
 
+def star_settings(row, config):
+    """报价阶段只校验名将助手的参数形状，不读取实时次数或地图状态。"""
+    _, _, p1, p2, p3, p4, p5 = row
+    if (p4 or p5 or bool(p2) != bool(p3)
+            or p1 > int(config["global_kv"]["star_copy_times"]["value"])):
+        raise ValueError("名将助手设置无效")
+
+
+def star_targets(row, save, config, now):
+    """名将助手的真实选关：优先推进未首通关卡，再用已首通关卡补满剩余胜利次数。
+
+    p1 次数（0=用尽当日剩余），p2/p3 指定地图/关卡（0=自动），p4/p5 必须为 0。
+    只选择当前普通地图已解锁、顺序可达、当日尚未战胜的真实关卡，不购买次数、
+    不挑战旧关以外的虚构目标，也不改变胜负判定。
+    """
+    _, _, p1, p2, p3, p4, p5 = row
+    star_settings(row, config)
+    if not star_copy.unlocked(save, config):
+        raise ValueError("名将副本尚未解锁")
+    limit = int(config["global_kv"]["star_copy_times"]["value"])
+    state = star_copy.settle(save, config, now)
+    remaining = limit - sum(state["wins"].values())
+    if remaining <= 0:
+        raise ValueError("名将副本今日可战胜次数已用完")
+    if p1 > remaining:
+        raise ValueError("名将助手挑战次数超过今日剩余胜利次数")
+    available = star_copy.available_maps(save, config)
+    if not available:
+        raise ValueError("请先通关对应普通地图以解锁名将副本")
+    if p2 or p3:
+        mid, pid = str(p2), str(p3)
+        if (not p2 or not p3 or mid not in config["star_copy"] or pid not in config["star_copy"][mid]
+                or mid not in available
+                or int(pid) > state["progress"].get(mid, 0) + 1
+                or state["wins"].get(f"{mid}/{pid}", 0) >= config["star_copy"][mid][pid]["challenge"]):
+            raise ValueError("名将助手指定关卡尚未解锁或今日已战胜")
+        if p1 > 1:
+            raise ValueError("名将副本指定关卡每日只能战胜一次")
+        return [(mid, pid)], 1
+    progress_points, repeat_points = [], []
+    for mid in sorted(available, key=int):
+        points = config["star_copy"][mid]
+        progress = state["progress"].get(mid, 0)
+        for pid in sorted(points, key=int):
+            if (int(pid) > progress + 1
+                    or state["wins"].get(f"{mid}/{pid}", 0) >= points[pid]["challenge"]):
+                continue
+            (progress_points if int(pid) > progress else repeat_points).append((mid, pid))
+    repeat_points.reverse()
+    targets = progress_points + repeat_points
+    if not targets:
+        raise ValueError("当前没有可挑战的名将副本关卡")
+    return targets, p1 or remaining
+
+
 def estimate(rows, save, config, now):
     save = copy.deepcopy(save)
     vip = config["vip"][str(save["role_state"]["vip"])]
@@ -170,6 +230,9 @@ def estimate(rows, save, config, now):
         elif (page, item) == (3, 15):
             # 私服规则：挑战不设全局次数上限，无需购买次数。
             babel_tower.settle(save, config, now)
+        elif (page, item) == (2, 7):
+            # 报价阶段只校验选关参数，不战斗、不抽奖、不扣元宝；次数/解锁状态在执行时按实时状态判定。
+            star_settings((page, item, p1, p2, p3, p4, p5), config)
     if gold >= (1 << 31):
         raise ValueError("游戏助手报价超出范围")
     return gold, active
@@ -207,7 +270,7 @@ def execute_item(row, save, config, now, step_counts):
         nonlocal cost
         previous = save["role_state"]["gold"]
         data = player.prepare_recorded_response(opcode, b"", save, recharge.ids(values), step_counts, config, now)
-        if opcode in (*activity_copy.BATTLES, 1611):
+        if opcode in (*activity_copy.BATTLES, 1611, 1351):
             prize = next((v for n, w, v in iter_pb_fields(data) if (n, w) == (4, 2)), b"")
         elif opcode in (2128, 2705):
             prize = next(v for n, w, raw in iter_pb_fields(data) if (n, w) == (1, 2) and pb_get_varint(raw, 1) == (1 if opcode == 2705 else 3)
@@ -220,7 +283,19 @@ def execute_item(row, save, config, now, step_counts):
         rewards.append(prize)
         return data
 
-    if page == 2:
+    if (page, item) == (2, 7):
+        targets, attempts = star_targets(row, save, config, now)
+        wins, tried = 0, 0
+        for mid, pid in targets[:attempts]:
+            result = run(1351, [int(mid), int(pid)])
+            tried += 1
+            if not pb_get_varint(result, 1):
+                break
+            wins += 1
+        counts[4] += wins
+        message = (f"名将副本真实挑战{tried}次、胜利{wins}次；"
+                   + ("遇败停止" if wins < tried else "已用尽所选次数") + "，不购买次数")
+    elif page == 2:
         state = activity_copy.settle(save, config, now)
         table, opcode, _, limit = activity_copy.COPIES[item]
         current = state["copies"][str(item)]

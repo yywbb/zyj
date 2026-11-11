@@ -117,9 +117,16 @@ class BabelTowerTests(unittest.TestCase):
         report = json.loads(next(v for n, w, v in protocol.iter_pb_fields(parts[1]) if (n, w) == (5, 2)))
         self.assertTrue(report["result"])
         self.assertEqual(row["stars"], [1, 1, 1])
-        self.assertEqual((row["daily"], row["first"], self.state()["used"]), (1, 1, 1))
+        # 私服规则取消全局挑战次数上限：全局 used 恒为 0，单关 row["used"] 仍按真实挑战递增。
+        self.assertEqual((row["daily"], row["first"], self.state()["used"]), (1, 1, 0))
+        self.assertEqual(row["used"], 1)
         self.assertEqual(self.session.save["last_babel_tower_battle"]["stars"], [1, 1, 1])
-        self.assert_rejected(7013, [1])
+        # 私服规则：已通关关卡可复战且不再计全局次数，但不重复首通/当日奖励。
+        repeat = self.call(7013, [1], seq=192)
+        self.assertEqual(struct.unpack(">IIII", repeat[0][:16])[2], 7013)
+        self.assertEqual(self.state()["used"], 0)
+        self.assertEqual(self.state()["levels"]["1"][0]["used"], 1)
+        self.assertEqual(self.state()["levels"]["1"][0]["first"], 1)
         self.session = self.reconnect()
         self.assertEqual(self.state()["levels"]["1"][0]["stars"], [1, 1, 1])
 

@@ -903,15 +903,14 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
             change_item_count(save, cid, -count, role_config, now)
         if reward:
             apply_reward(save, reward, role_config, now)
-    elif opcode == 1350:
-        body = star_copy.query(save, request_body, role_config, now)
+    elif opcode in star_copy.OPCODES:
+        body, reward = star_copy.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        if reward:
+            apply_reward(save, reward, role_config, now)
     elif opcode in (*activity_copy.QUERIES, *activity_copy.BATTLES, *activity_copy.SWEEPS):
         body, reward = activity_copy.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         if reward:
             apply_reward(save, reward, role_config, now)
-    elif opcode == 1351:
-        body, reward = star_copy.fight(save, request_body, role_config, now, random.getrandbits(64))
-        apply_reward(save, reward, role_config, now)
     elif opcode in (*friend_copy.QUERIES, *friend_copy.MUTATIONS):
         body, reward = friend_copy.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         if reward:

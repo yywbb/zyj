@@ -381,7 +381,7 @@ class Session:
         # 7010 是跨系统的购买次数协议；只有 sysId=450 属于通天塔，其余仍走录制帧/兜底。
         tower_buy = opcode == babel_tower.BUY_TIMES and next(
             (value for n, w, value in iter_pb_fields(body) if (n, w) == (1, 0)), None) == 450
-        if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or tower_buy or opcode in (301, 1016, 1305, 1306, 1307, 1351, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1004, 1005, 1007, 1009, 1130, 2038, *babel_tower.MUTATIONS, *ascension_sendai.MUTATIONS, *welfare.CLAIMS,
+        if sign_comb or break_comb or rob_comb or watch_comb or pet_comb or local_box or local_development or tower_buy or opcode in (301, 1016, 1305, 1306, 1307, *star_copy.MUTATIONS, *mieshendian.MUTATIONS, 1403, 7111, 7112, 7113, 115, 1003, 1004, 1005, 1007, 1009, 1130, 2038, *babel_tower.MUTATIONS, *ascension_sendai.MUTATIONS, *welfare.CLAIMS,
                                   *pets.MUTATIONS, *timebag.MUTATIONS, *friend_copy.MUTATIONS, *activity_copy.BATTLES, *activity_copy.SWEEPS, *hades_copy.MUTATIONS, *arena.MUTATIONS,
                                   *watchstar.MUTATIONS, *artifact.MUTATIONS, *antique.MUTATIONS, *champion.MUTATIONS, *nightclub.MUTATIONS, *dragon_wishing.MUTATIONS, *gamestar.MUTATIONS, *deployment.MUTATIONS, *partner_growth.MUTATIONS,
                                   *qiankun.MUTATIONS, *secret_shop.MUTATIONS,
@@ -435,7 +435,7 @@ class Session:
         if opcode in activities.UNSUPPORTED_OPCODES:
             return unavailable_response(opcode, seq, body, "此活动操作尚缺原版结算数据，未扣除资源。")
 
-        if opcode in (204, 300, *exchange.QUERIES, 1304, 1350, *hades_copy.QUERIES, *antique.QUERIES, *collection.QUERIES, *achievements.QUERIES, *soul.QUERIES, *player.WORLD_QUERY_IDS, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
+        if opcode in (204, 300, *exchange.QUERIES, 1304, *star_copy.QUERIES, *hades_copy.QUERIES, *antique.QUERIES, *collection.QUERIES, *achievements.QUERIES, *soul.QUERIES, *player.WORLD_QUERY_IDS, *mieshendian.QUERIES, 1402, 2037, 2410, 2411, 6517, 3611, 7110, *rob.QUERIES, *daily_events.QUERIES, *development.QUERIES, *welfare.QUERIES, *recharge.OPCODES, *activities.TRANSACTION_OPCODES,
                       *shop.QUERIES, *artifact.QUERIES, *champion.QUERIES, *nightclub.QUERIES, *dragon_wishing.QUERIES, *gamestar.QUERIES, *deployment.QUERIES, *fashion.QUERIES, *blackmarket.QUERIES, *watchstar.QUERIES, *qiankun.QUERIES, *secret_shop.QUERIES,
                       *pets.QUERIES, *timebag.QUERIES, *world_boss.QUERIES, *friend_copy.QUERIES, *activity_copy.QUERIES, *arena.QUERIES, *favorite.QUERIES, *cornucopia.QUERIES, *penglai.QUERIES, *single_boss.QUERIES, *sigil.QUERIES, *magic.QUERIES, *wing.QUERIES, *cover.QUERIES, *illusion.QUERIES, *partner_growth.QUERIES, *babel_tower.QUERIES, *ascension_sendai.QUERIES, *pending_features.QUERIES):
             working = copy.deepcopy(self.save)

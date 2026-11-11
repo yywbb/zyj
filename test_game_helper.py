@@ -1,6 +1,7 @@
 """游戏助手：只操作临时账号，验证真实玩法、报价和原生回调。"""
 
 import copy
+import json
 import re
 import unittest
 import zipfile
@@ -410,6 +411,71 @@ class GameHelperTests(unittest.TestCase):
         self.assertEqual(len(result[b"data"][b"rewards"]), 3)
         self.assertEqual(result[b"data"][b"rewards"][3][b"errorcode"], 71)
         self.assertIn("后续批次".encode(), result[b"data"][b"rewards"][3][b"helperMessage"])
+
+    def unlock_star(self, maps=(42101, 42102, 42103, 42104, 42105)):
+        """按原生 1300 结构标记对应普通地图全三星，只解锁这些名将章节。"""
+        copies = []
+        for mid in maps:
+            points = b"".join(protocol.encode_pb_field(7, 2, protocol.encode_pb_field(1, 0, int(pid))
+                              + protocol.encode_pb_field(3, 0, 3))
+                              for pid in self.config["copy"][str(mid)])
+            copies.append(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid) + points))
+        self.save["world_state"]["1300"] = b"".join(copies).hex()
+
+    def test_mingjiang_query_and_quote_advertise_real_times_without_cost(self):
+        self.unlock_star()
+        groups = self.groups(self.success(1, 6211))
+        challenge = protocol.parse_ids_pb(groups[2])
+        self.assertEqual(len(challenge) % 3, 0)
+        self.assertEqual(challenge[-3:], [7, 0, 0])
+        supported = protocol.parse_ids_pb(groups[20])
+        self.assertIn((2, 7), [tuple(supported[i:i + 2]) for i in range(0, len(supported), 2)])
+        before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+        quote = self.quote([(2, 7, 0, 0, 0, 0, 0)])
+        self.assertEqual(quote[1:3], [0, 1])
+        self.assertEqual((self.save, self.store.path(1).read_bytes()), (before, disk))
+
+    def test_mingjiang_helper_challenges_real_unlocked_points_and_reports_count(self):
+        self.unlock_star()
+        self.strong()
+        before = copy.deepcopy(self.save)
+        groups, quote, _ = self.execute([(2, 7, 0, 0, 0, 0, 0)])
+        self.assertEqual(quote[1], 0)
+        after = json.loads(self.store.path(1).read_text())
+        state = after["star_copy_state"]
+        self.assertEqual(sum(state["wins"].values()), 5)
+        self.assertEqual(sorted(state["progress"]), ["42101", "42102", "42103", "42104", "42105"])
+        self.assertEqual(protocol.parse_ids_pb(groups[100])[4], 5)
+        self.assertEqual(after["role_state"]["gold"] - before["role_state"]["gold"], 200)
+        self.assertIn("名将副本真实挑战5次、胜利5次", next(iter(self.reasons(groups).values())))
+        self.assertEqual(after["world_state"]["1300"], before["world_state"]["1300"])
+        # 次数用尽后同一设置再次执行只记原因，不扣费、不重复发奖。
+        second, _, _ = self.execute([(2, 7, 0, 0, 0, 0, 0)])
+        self.assertTrue(str(next(k for k in second if k not in (100, 200))).endswith("71"))
+
+    def test_mingjiang_helper_explicit_target_stops_on_loss_and_rejects_bad_settings(self):
+        self.unlock_star()
+        self.strong(weak=True)
+        groups, quote, _ = self.execute([(2, 7, 0, 42101, 1, 0, 0)])
+        self.assertEqual(quote[1], 0)
+        self.assertIn("遇败停止", next(iter(self.reasons(groups).values())))
+        self.assertEqual(json.loads(self.store.path(1).read_text())["star_copy_state"]["wins"], {})
+        # 形状合法但目标/次数不合法的选关只在执行阶段按单项记原因，不影响其它项目。
+        for row in ((2, 7, 2, 42101, 1, 0, 0), (2, 7, 0, 99999, 1, 0, 0),
+                    (2, 7, 0, 42101, 2, 0, 0)):
+            with self.subTest(row=row):
+                before = copy.deepcopy(self.save)
+                groups, _, _ = self.execute([row])
+                self.assertTrue(str(next(k for k in groups if k not in (100, 200))).endswith("71"))
+                self.assertEqual(self.save["star_copy_state"]["wins"], before["star_copy_state"]["wins"])
+        # 多余参数与成对校验在请求解析阶段直接拒绝。
+        self.assert_rejected(6212, raw=self.body([(2, 7, 0, 0, 0, 1, 0)]))
+        self.assert_rejected(6212, raw=self.body([(2, 7, 0, 42101, 0, 0, 0)]))
+        self.assert_rejected(6212, raw=self.body([(2, 7, 6, 0, 0, 0, 0)]))
+        # 未解锁任何名将章节时只记录原因，不伪造挑战。
+        self.save["world_state"]["1300"] = ""
+        groups, _, _ = self.execute([(2, 7, 0, 0, 0, 0, 0)])
+        self.assertTrue(str(next(k for k in groups if k not in (100, 200))).endswith("71"))
 
     def ui_lua(self):
         from lupa.lua51 import LuaRuntime

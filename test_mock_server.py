@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, fashion, formation, guide, mieshendian, pets, player, protocol, qiankun, ranking, recharge, recruit, replay, rob, secret_shop, shop, star_copy, training, welfare
+from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, fashion, formation, guide, mieshendian, pets, player, protocol, qiankun, ranking, recharge, recruit, replay, rob, secret_shop, shop, training, welfare
 from zyj_server.session import Session
 
 
@@ -9482,8 +9482,11 @@ class ReplayRoutingTests(unittest.TestCase):
         body = self.query_world(1350)
         groups = self.star_copy_groups(body)
         self.assertEqual(groups[0], [0])
-        self.assertEqual(set(groups), {0, 42101, 42102, 42103, 42104, 42105})
+        # 62 章 310 张地图全部回报，未满足对应普通地图的章节只给 [map,-1]。
+        self.assertEqual(set(groups), {0, *map(int, self.role_config["star_map"])})
+        self.assertEqual(len(groups), 311)
         self.assertEqual(groups[42101], [42101, 0, 1, -1, 0])
+        self.assertEqual(groups[42410], [42410, -1])
         self.assertTrue(all(groups[mid] == [mid, -1] for mid in range(42102, 42106)))
         after = json.loads(self.save_path.read_text())
         self.assertEqual(before["guide"], after["guide"])
@@ -9514,7 +9517,7 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(after.get(key), before.get(key))
         for mid in (1002, 1012, 1107, 1300):
             self.assertEqual(after["world_state"][str(mid)], before["world_state"][str(mid)])
-        self.assertEqual(self.star_copy_groups(self.query_world(1350))[42101], [42101, 1, 1, 1, 0])
+        self.assertEqual(self.star_copy_groups(self.query_world(1350))[42101], [42101, 1, 1, 1, 1])
         result = self.replay([self.activity_request(1351, [42101, 1])])
         self.assertEqual(result[0]["opcode"], 999999)
 
@@ -9550,7 +9553,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.clock.return_value += 86400
         rows = self.star_copy_groups(self.query_world(1350))
         self.assertEqual(rows[0], [0])
-        self.assertEqual(rows[42101], [42101, 1, 1, 0, 0])
+        self.assertEqual(rows[42101], [42101, 1, 1, 0, 1])
         self.assertEqual(rows[42102], [42102, 0, 1, -1, 0])
         self.replay([self.activity_request(1351, [42101, 1])])
         repeated = json.loads(self.save_path.read_text())
@@ -9558,7 +9561,7 @@ class ReplayRoutingTests(unittest.TestCase):
         self.clock.return_value -= 86400
         rows = self.star_copy_groups(self.query_world(1350))
         self.assertEqual(rows[0], [1])
-        self.assertEqual(rows[42101], [42101, 1, 1, 1, 0])
+        self.assertEqual(rows[42101], [42101, 1, 1, 1, 1])
         result = self.replay([self.activity_request(1351, [42101, 1])])
         self.assertEqual(result[0]["opcode"], 999999)
 
@@ -9623,7 +9626,7 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(protocol.pb_get_varint(bytes.fromhex(result[0]["hex"]), 1), 1)
         groups = self.star_copy_groups(self.query_world(1350))
         self.assertEqual(groups[0], [5])
-        self.assertEqual(groups[42104], [42104, 1, 1, 1, 0, 2, 1, 0])
+        self.assertEqual(groups[42104], [42104, 1, 1, 1, 1, 2, 1, 1])
         self.assertEqual(groups[42105], [42105, 0, 1, -1, 0])
         before = self.save_path.read_bytes()
         result = self.replay([self.activity_request(1351, [42105, 1])])
@@ -9634,9 +9637,10 @@ class ReplayRoutingTests(unittest.TestCase):
             self.assertEqual(self.replay([self.activity_request(1351, [42105, pid])])[0]["opcode"], 1351)
         groups = self.star_copy_groups(self.query_world(1350))
         self.assertEqual(groups[0], [2])
-        self.assertEqual(groups[42105], [42105, 1, 1, 1, 0, 2, 1, 0])
+        self.assertEqual(groups[42105], [42105, 1, 1, 1, 1, 2, 1, 1])
+        # 第二章已开放但对应普通地图未通关，仍按真实条件拒绝，不再是章节硬限制。
         result = self.replay([self.activity_request(1351, [42106, 1])])
-        self.assert_unavailable_response(result, 1351, 20000, "仅开放第一章")
+        self.assert_unavailable_response(result, 1351, 20000, "关卡尚未解锁")
 
     def test_star_copy_maps_follow_ordinary_conditions_not_an_extra_named_map_gate(self):
         saved = self.prepare_star_copy()
@@ -9668,12 +9672,12 @@ class ReplayRoutingTests(unittest.TestCase):
         saved = self.prepare_star_copy()
         checked = 0
         for mid, points in self.role_config["star_copy"].items():
-            if self.role_config["star_map"][mid]["section"] != star_copy.SECTION:
+            if self.role_config["star_map"][mid]["section"] != 40001:
                 continue
             for pid, point in points.items():
                 with self.subTest(map=mid, point=pid):
                     checked += 1
-                    attack, defense = battle.rosters(saved, point, self.role_config)
+                    attack, defense = battle.rosters(saved, battle.sanitize_breakthrough(dict(point), self.role_config), self.role_config)
                     self.assert_battle_report(battle.simulate(attack, defense, self.role_config, 7))
                     for i in range(1, 6):
                         if point[f"drop{i}"] and point[f"drop{i}prob"]:

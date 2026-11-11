@@ -73,6 +73,47 @@ GENERAL_FIELDS = {"cid": 1, "iid": 2, "level": 3, "advance": 4, "exp": 5,
                   "hit": 14, "arp": 15, "criticaldmg": 16, "skilllevel": 18}
 
 
+def supported_breakthrough(config):
+    """v2 引擎当前支持的突破被动集合；副本准备 NPC 时共用，避免各模块口径漂移。"""
+    return DYNAMIC_BASE | HADES_EFFECTS | PARTNER_EFFECTS | LEAD_GOLD_EFFECTS
+
+
+def sanitize_breakthrough(point, config):
+    """按共享白名单逐档收敛 NPC 突破等级，不静默丢弃关卡或伪造胜利。
+
+    少数配置行（如 break9=9000291「气场之上I」attr=ap/target=6）没有已实现的
+    静态属性语义；只降低该 NPC 的突破等级，保留其余真实被动与 ``*-correct``
+    修正，绝不把整关变成固定胜负。通天塔与名将副本共用本函数。
+    """
+    dynamic = supported_breakthrough(config)
+    stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
+
+    def supported(pid):
+        row = config["breakskill"].get(str(pid))
+        if row is None:
+            return False
+        code = row["type_param"] or row["id"]
+        if 9100001 <= row["id"] <= 9100007:
+            code = row["id"]
+        return bool(row["type"] == 0 and code not in range(9100001, 9100005)
+                    and row["attr"] in (*stats, "ap", "dmg", "fdmg") and row["target"] in ("1", "2", "3", "4", "5", "7")
+                    or code in dynamic)
+
+    for index in range(1, 8):
+        monster_id = point.get(f"p{index}")
+        if not monster_id:
+            continue
+        general = config["general"][str(config["copy_monster"][str(monster_id)]["generalid"])]
+        advance = int(point.get(f"break{index}-correct", 0))
+        while advance > 0:
+            pids = {general.get(f"break{level}", 0) for level in range(1, advance + 1)} - {0}
+            if all(supported(pid) for pid in pids):
+                break
+            advance -= 1
+        point[f"break{index}-correct"] = advance
+    return point
+
+
 def _copy_points(save, map_id):
     copies = bytes.fromhex(save["world_state"]["1300"])
     current = next((v for n, w, v in iter_pb_fields(copies)

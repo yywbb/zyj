@@ -170,34 +170,8 @@ def refresh_progress(state, config, map_id):
 
 
 def sanitize_breakthrough(point, config):
-    """按 v2 引擎白名单收敛 NPC 突破等级，避免个别 break9 属性行让整关不可打。"""
-    dynamic = battle.DYNAMIC_BASE | battle.HADES_EFFECTS | battle.PARTNER_EFFECTS | battle.LEAD_GOLD_EFFECTS
-    stats = ("atk", "def", "hp", "speed", "critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
-
-    def supported(pid):
-        row = config["breakskill"].get(str(pid))
-        if row is None:
-            return False
-        code = row["type_param"] or row["id"]
-        if 9100001 <= row["id"] <= 9100007:
-            code = row["id"]
-        return bool(row["type"] == 0 and code not in range(9100001, 9100005)
-                    and row["attr"] in (*stats, "ap", "dmg", "fdmg") and row["target"] in ("1", "2", "3", "4", "5", "7")
-                    or code in dynamic)
-
-    for index in range(1, 8):
-        monster_id = point.get(f"p{index}")
-        if not monster_id:
-            continue
-        general = config["general"][str(config["copy_monster"][str(monster_id)]["generalid"])]
-        advance = int(point.get(f"break{index}-correct", 0))
-        while advance > 0:
-            pids = {general.get(f"break{level}", 0) for level in range(1, advance + 1)} - {0}
-            if all(supported(pid) for pid in pids):
-                break
-            advance -= 1
-        point[f"break{index}-correct"] = advance
-    return point
+    """共用 battle.py 的 v2 白名单收敛 NPC 突破等级，避免个别 break9 属性行让整关不可打。"""
+    return battle.sanitize_breakthrough(point, config)
 
 
 def battle_result(report, reward):
