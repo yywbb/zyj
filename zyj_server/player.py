@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import skytoken, activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, hades_copy, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, antique, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, illusion, nightclub, partner_growth, soul, wing
+from . import achievements, antique, artifact, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, gamestar, illusion, nightclub, partner_growth, pending_features, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -89,7 +89,7 @@ def load_role_config(config_path):
                              "athletics_copy2", "athletics_choice", "athletics_rewards", "athletics_rewards2", "athletics_rewards3", "athletics_npc", "token", "token_fragment",
                              "champion_paramete", "champion_produce", "champion_refresh", "champion_goods",
                              "antique_item", "antique_appraisal", "antique_fast", "antique_npc",
-                             "exclusive", "ID_dictionary",
+                             "exclusive", "ID_dictionary", "dew_pool_achievement", "dew_pool_task", "dew_pool_shop",
                              *(row[0] for row in activity_copy.COPIES.values()), *sign_tables))
 
 
@@ -675,6 +675,8 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = online_rewards.prepare(opcode, save, request_body, role_config)
         if opcode == 2038:
             apply_reward(save, body, role_config, now)
+    elif opcode in pending_features.OPCODES:
+        body = pending_features.reply(opcode, request_body, role_config)
     elif opcode in timebag.OPCODES:
         body = timebag.prepare(opcode, save, request_body, role_config, now, body)
         if opcode == 2881:
