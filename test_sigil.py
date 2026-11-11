@@ -132,14 +132,31 @@ class SigilTests(unittest.TestCase):
         self.assertEqual(self.gems()[target][1:], [33085, 10, 320])
         self.assert_rejected(1140, recharge.ids([target]))
 
-    def test_invalid_materials_cap_excess_and_unowned_targets_never_consume(self):
+    def test_batch_upgrade_stops_at_king_gate_and_max_level_keeping_surplus_foods(self):
+        self.outer(8)
+        target, foods = self.gem(33082), [self.gem(33082) for _ in range(4)]
+        self.call(1141, [16, target])
+        self.call(1140, [target] + foods)
+        self.assertEqual(self.gems()[target][1:], [33084, 9, 0])
+        self.assertEqual([food in self.gems() for food in foods], [False, False, False, True])
+        self.assert_rejected(1140, recharge.ids([target, self.gem(33076)]))
+        target, foods = self.gem(33014), [self.gem(33013) for _ in range(5)]
+        self.call(1141, [11, target])
+        self.call(1140, [target] + foods)
+        self.assertEqual(self.gems()[target][1:], [33015, 15, 0])
+        self.assertEqual([food in self.gems() for food in foods], [False, False, True, True, True])
+        self.assert_rejected(1140, recharge.ids([target, self.gem(33014)]))
+
+    def test_invalid_materials_and_unowned_targets_never_consume(self):
         target, first = self.gem(33014), self.gem(33014)
         self.call(1141, [11, target])
         for values in ([target, target], [target, first, first], [target, self.gem(33016)],
-                       [target, self.gem(33015)], [target, first, self.gem(33001)], [999999, first]):
+                       [target, self.gem(33015)], [999999, first]):
             self.assert_rejected(1140, recharge.ids(values))
-        self.call(1140, [target, first])
+        surplus = self.gem(33001)
+        self.call(1140, [target, first, surplus])
         self.assertEqual(self.gems()[target][1:3], [33015, 15])
+        self.assertIn(surplus, self.gems())
         self.assert_rejected(1140, recharge.ids([target, self.gem(33001)]))
         idle = self.gem(33001)
         self.assert_rejected(1140, recharge.ids([idle, self.gem(33001)]))

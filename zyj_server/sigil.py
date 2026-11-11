@@ -187,10 +187,12 @@ def prepare(opcode, save, body, config):
         original = item[:]
         advance(item, gems, groups, config)
         for iid in values[1:]:
-            if (iid not in gems or iid in occupied or not can_level(item, gems, groups, config)
+            if (iid not in gems or iid in occupied
                     or config["sigil"][str(gems[iid][1])]["type"] != config["sigil"][str(item[1])]["type"]
                     or not config["sigil"][str(gems[iid][1])]["nextid"]):
-                raise ValueError("魔符材料无效、正在镶嵌或超过当前可升级数量")
+                raise ValueError("魔符材料无效、正在镶嵌或类型不符")
+            if not can_level(item, gems, groups, config):
+                break
             food = gems.pop(iid)
             item[3] += config["sigil"][str(food[1])]["self_exp"] + food[3]
             if not 0 <= item[3] < (1 << 31):
