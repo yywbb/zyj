@@ -102,7 +102,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 search = query.get("q", [""])[0].casefold()
                 kind = query.get("kind", [""])[0]
                 offset = int(query.get("offset", ["0"])[0])
-                valid_kinds = ("", "道具", "战宠", "战宠碎片", "专属装备", "武将", "武将碎片", "普通装备", "装备碎片", "宝物碎片", "战魂", "魔符")
+                valid_kinds = ("", "道具", "战宠", "战宠碎片", "专属装备", "武将", "武将碎片", "普通装备", "装备碎片", "宝物碎片", "战魂", "魔符", "时装")
                 if len(search) > 100 or offset < 0 or kind not in valid_kinds:
                     raise ValueError("物品查询参数无效")
                 rows = [row for row in self.server.gm.items.values() if (not kind or row["kind"] == kind)

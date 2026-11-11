@@ -14,7 +14,7 @@ import urllib.parse
 import uuid
 from unittest.mock import patch
 
-from zyj_server import accounts, configuration, cup, examination, formation, friends, guide, player, protocol, recharge, replay, storage, world_boss
+from zyj_server import accounts, configuration, cup, examination, fashion, formation, friends, guide, player, protocol, recharge, replay, storage, world_boss
 from zyj_server.admin import gm, views
 from zyj_server.admin.http import start_admin
 from zyj_server.session import Session
@@ -1755,10 +1755,13 @@ class AdminHttpTests(AdminFixture):
         self.assertEqual(limits, {"stack": gm.MAIL_STACK_MAX, "unit": gm.MAIL_UNIT_MAX})
         self.assertEqual((gm.MAIL_STACK_MAX, gm.MAIL_UNIT_MAX), (100_000_000, 1_000))
         catalog = self.http.gm.items
-        self.assertEqual({row["max"] for row in catalog.values()}, {limits["stack"], limits["unit"]})
+        self.assertEqual({row["max"] for row in catalog.values()}, {limits["stack"], limits["unit"], 1})
         self.assertEqual(catalog[20014]["max"], limits["stack"])
         unit = next(row for row in catalog.values() if row["kind"] == "武将")
         self.assertEqual(unit["max"], limits["unit"])
+        fashion = next(row for row in catalog.values() if row["kind"] == "时装")
+        self.assertEqual(fashion["cid"], 80001)
+        self.assertEqual(fashion["max"], 1)
         html = self.request("/")[2].decode()
         script = self.request("/app.js")[2].decode()
         self.assertIn(f'id="mail-batch-qty" type="number" min="1" max="{gm.MAIL_STACK_MAX}"', html)
@@ -1793,6 +1796,18 @@ class AdminHttpTests(AdminFixture):
         self.assertEqual(q6["kind"], "普通装备")
         self.assertIn("坐骑 / 品质5", q5["description"])
         self.assertIn("坐骑 / 品质6", q6["description"])
+        code, _, fashion_catalog = self.request("/api/catalog?kind=" + urllib.parse.quote("时装"))
+        self.assertEqual(code, 200)
+        fashion_rows = {row["cid"]: row for row in fashion_catalog["rows"]}
+        self.assertEqual({row["cid"] for row in fashion_catalog["rows"]}, {int(k) for k in CONFIG["fashioncoat"]})
+        self.assertEqual(fashion_rows[80001]["name"], CONFIG["fashioncoat"]["80001"]["10101"]["name"])
+        self.assertEqual(fashion_rows[80001]["max"], 1)
+        self.assertIn("时装商城 3999", fashion_rows[80001]["description"])
+        self.assertEqual(fashion_rows[80002]["name"], CONFIG["fashioncoat"]["80002"]["10101"]["name"])
+        self.assertNotIn("折扣价", fashion_rows[80002]["description"])
+        code, _, by_name = self.request("/api/catalog?q=" + urllib.parse.quote("荒尘战甲"))
+        self.assertEqual(code, 200)
+        self.assertIn(80001, {row["cid"] for row in by_name["rows"]})
         common = self.request("/api/status")[2]["common_items"]
         self.assertIn(20100, [row["cid"] for row in common])
         self.assertTrue(all(row["name"] == CONFIG["props"][str(row["cid"])]["name"] for row in common))
@@ -1977,6 +1992,15 @@ class AdminHttpTests(AdminFixture):
             "reason": "测试账号1月卡与招募令"
         })
 
+        # GM 发送主角时装邮件：附件 cid 属于 fashioncoat，数量必须为 1，领取时按 grant 直接写入时装拥有
+        self.request("/api/mails", {
+            "target": 1,
+            "title": "时装赠送",
+            "content": "荒尘战甲已放入附件",
+            "items": [{"cid": 80001, "count": 1}],
+            "reason": "测试GM时装发放"
+        })
+
         # 模拟账号 1 客户端登录并与服务端通信
         self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
         session = self.store.open_session(1, PASSWORD, ("127.0.0.1", 12345))
@@ -1988,26 +2012,34 @@ class AdminHttpTests(AdminFixture):
             self.assertEqual(opcode, 3100)
             body = packets[0][16:]
             fields = list(protocol.iter_pb_fields(body))
-            # 账号 1 应该收到两封邮件（全服邮件 + 个人月卡邮件）
-            self.assertEqual(len([f for f in fields if f[0] == 2]), 2)
+            # 账号 1 应该收到三封邮件（全服邮件 + 个人月卡邮件 + 时装邮件）
+            self.assertEqual(len([f for f in fields if f[0] == 2]), 3)
 
-            mail_ids = []
+            mail_titles = {}
             for _, _, raw_mail in [f for f in fields if f[0] == 2]:
                 m_fields = dict((n, v) for n, w, v in protocol.iter_pb_fields(raw_mail))
-                mid = m_fields[1]
-                mail_ids.append(mid)
+                mail_titles[m_fields[1]] = m_fields[5].decode("utf-8")
                 status = m_fields[4]
                 self.assertEqual(status, 0) # 未领取
 
-            self.assertEqual(len(mail_ids), 2)
-            personal_mid = max(mail_ids)
-            global_mid = min(mail_ids)
+            self.assertEqual(len(mail_titles), 3)
+            global_mid = next(mid for mid, title in mail_titles.items() if title == "全服充值福利")
+            personal_mid = next(mid for mid, title in mail_titles.items() if title == "专属月卡体验")
+            fashion_mid = next(mid for mid, title in mail_titles.items() if title == "时装赠送")
 
             # 2. 未领取有附件的邮件，删除应被拒绝 (999999)
             del_packet = session.handle(3102, 2, protocol.encode_pb_field(1, 0, personal_mid))
             self.assertEqual(struct.unpack(">IIII", del_packet[0][:16])[2], 999999)
 
-            # 3. 领取账号 1 的个人邮件 (月卡 + 10个招募令 + 50亿银币)
+            # 3. 领取时装邮件：80001 直接写入时装拥有，不占用道具背包（领取前补齐新手引导状态）
+            session.save.setdefault("guide", {}).setdefault("sections", {}).setdefault("1", {})["status"] = 2
+            claim_fashion = session.handle(3101, 8, protocol.encode_pb_field(1, 0, fashion_mid))
+            self.assertEqual(struct.unpack(">IIII", claim_fashion[0][:16])[2], 3101)
+            fashion_state = fashion.get_state(session.save, CONFIG)
+            self.assertEqual(fashion_state["levels"], {"80001": 1})
+            self.assertNotIn("80001", [str(cid) for n, w, v in protocol.iter_pb_fields(bytes.fromhex(session.save["world_state"]["1200"]))
+                                       for cid in [protocol.pb_get_varint(v, 1)] if n == 1 and w == 2])
+            # 3a. 领取账号 1 的个人邮件 (月卡 + 10个招募令 + 50亿银币)
             before_gold = session.save["role_state"]["gold"]
             before_coin = session.save["role_state"]["coin"]
             claim_packet = session.handle(3101, 3, protocol.encode_pb_field(1, 0, personal_mid))
@@ -2042,12 +2074,12 @@ class AdminHttpTests(AdminFixture):
             del_packet2 = session.handle(3102, 6, protocol.encode_pb_field(1, 0, personal_mid))
             self.assertEqual(struct.unpack(">IIII", del_packet2[0][:16])[2], 3102)
 
-            # 再次查询 3100，个人邮件已不在列表中，全服邮件状态为已领取 (status=2)
+            # 再次查询 3100，个人月卡邮件已不在列表中，全服与时装邮件状态为已领取 (status=2)
             packets2 = session.handle(3100, 7, b"")
             remaining_mails = [f for f in protocol.iter_pb_fields(packets2[0][16:]) if f[0] == 2]
-            self.assertEqual(len(remaining_mails), 1)
+            self.assertEqual(len(remaining_mails), 2)
             remaining_fields = dict((n, v) for n, w, v in protocol.iter_pb_fields(remaining_mails[0][2]))
-            self.assertEqual(remaining_fields[1], global_mid)
+            self.assertIn(remaining_fields[1], (global_mid, fashion_mid))
             self.assertEqual(remaining_fields[4], 2) # status=2 (已领取)
         finally:
             self.store.close_session(1)

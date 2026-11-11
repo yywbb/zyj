@@ -199,6 +199,21 @@ def catalog(config):
                 rows.append({"cid": cid, "name": name, "kind": "魔符",
                              "description": row.get("desc", ""), "max": MAIL_UNIT_MAX})
 
+    # 14. 主角时装 (fashioncoat)：玩家领取含时装附件的邮件时按 grant 直接写入时装拥有，数量固定为 1。
+    if "fashioncoat" in config:
+        for key, coats in config["fashioncoat"].items():
+            cid = int(key)
+            if cid not in seen:
+                seen.add(cid)
+                sample = next(iter(coats.values()))
+                shop_row = config.get("fashion_gift_bag", {}).get(key)
+                if shop_row:
+                    description = f"主角时装 / 时装商城 {shop_row['gold']} 元宝，活动折扣价 {shop_row['price']} 元宝"
+                else:
+                    description = "主角时装 / 邮件领取即拥有，可穿戴并强化"
+                rows.append({"cid": cid, "name": sample.get("name", "") or get_dict_name(cid, f"时装{cid}"),
+                             "kind": "时装", "description": description, "max": 1})
+
     return sorted(rows, key=lambda row: row["cid"])
 
 
