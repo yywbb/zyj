@@ -24,6 +24,7 @@ def setUpModule():
 AUTO_RESEARCH_LUA = r'''
 generalup={};print=function() end;printT=function() end
 clock=0;timers={};requests={};conflicting=0;level=0;heart=0;dropLeft=0;dropEvery=0;netdelay=0.05
+lostEvery=0;lostCount=0;resyncs=0;n5513Sent=0
 local function node(name)
   return setmetatable({name=name,
     runAction=function(self,a) if a and a.fn then table.insert(timers,{at=clock+(a.delay or 0.3),fn=a.fn,node=self}) end end,
@@ -65,6 +66,9 @@ function UIRequest(req)
   elseif req.type==5513 then
     if gamedata.ext.localPartnerGrowthBusy then conflicting=conflicting+1 end
     local p={};gamedata.ext.localPartnerGrowthBusy=p;gamedata.ext.localFormationBusy=p
+    n5513Sent=n5513Sent+1
+    -- 偶发整包丢失：没有成功回包、没有错误回包，网络层的 busy 锁会残留。
+    if lostEvery>0 and n5513Sent%lostEvery==0 then lostCount=lostCount+1;return end
     local up=req.isBreak==1
     table.insert(timers,{at=clock+netdelay,node=netnode,fn=function()
       gamedata.ext.localPartnerGrowthBusy=nil;gamedata.ext.localFormationBusy=nil
@@ -73,6 +77,13 @@ function UIRequest(req)
       local xl={heart1=heart,heart2=0} for i=1,8 do xl["attr"..i]=0 end
       page:xiuLianSuccess({general={iid=7,cid=10830,level1=300,level6=level,level7=0},generalXiuLian=xl})
     end})
+  elseif req.type==5511 then
+    page.data.general.level6=level
+  elseif req.type==5512 then
+    -- 重查 5512 会把服务端真实进度/序号回灌，并解除续接器的重查门禁。
+    resyncs=resyncs+1
+    local xl={iid=req.iid,heart1=heart,heart2=0} for i=1,8 do xl["attr"..i]=0 end
+    page:getXiuLianData({general=xl})
   end
 end
 local xl0={heart1=0,heart2=0} for i=1,8 do xl0["attr"..i]=0 end
@@ -702,7 +713,8 @@ class PartnerGrowthTests(unittest.TestCase):
         lua = LuaRuntime()
         lua.execute(AUTO_RESEARCH_LUA)
         for name in ("executeXiulian", "setXiuLianStateShow", "getXiulianProp",
-                     "setXiuLianPropShow", "xiuLianSuccess", "autoResearchKick"):
+                     "setXiuLianPropShow", "xiuLianSuccess", "autoResearchKick",
+                     "getXiuLianData"):
             start = code.index("function generalup.%s(" % name)
             lua.execute(code[start:code.index("\nend", start)+len("\nend")])
         for key, value in settings.items():
@@ -731,6 +743,12 @@ class PartnerGrowthTests(unittest.TestCase):
         self.assertIn("function generalup.autoResearchKick(self)", code)
         self.assertIn("localPartnerGrowthBusy", code)
         self.assertIn("    self:setXiuLianStateShow()\n    self:autoResearchKick()", code)
+        # 在途锁超时自愈：只清本模块 pending，重查 5511/5512 后由回显解除门禁。
+        self.assertIn("localAutoResearchWaits", code)
+        self.assertIn("localAutoResearchResync", code)
+        self.assertIn("UIRequest({type=5512,iid=iid})", code)
+        start = code.index("function generalup.getXiuLianData(")
+        self.assertIn("self:autoResearchKick()", code[start:code.index("\nend", start)])
         # 新函数必须插在顶层 return 之前，否则整个脚本编译失败。
         self.assertLess(code.index("function generalup.autoResearchKick"), code.index("\nreturn generalup"))
         LuaRuntime().compile(code)
@@ -752,6 +770,99 @@ class PartnerGrowthTests(unittest.TestCase):
                 self.assertTrue(bool(g.page.autoXiulian), label)
                 self.assertGreater(int(g.level), 5, label)
                 self.assertGreater(int(lua.eval('#timers')), 0, label)
+
+    def test_native_auto_research_recovers_when_5513_reply_is_lost(self):
+        # 5513 整包丢失（既没有成功回包也没有错误回包）时，网络层的 busy 锁残留；
+        # 旧续接器把两者都当作「5513 在途」无限排队，auto 仍为真却再也不发请求。
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        for label, settings, minimum in (
+            ("偶发丢失一次 5513 回包", {"lostEvery": 25}, 60),
+            ("频繁丢失 5513 回包", {"lostEvery": 7}, 40),
+            ("慢回显叠加丢包", {"netdelay": 0.35, "lostEvery": 25}, 40),
+        ):
+            with self.subTest(label):
+                lua = self._research_lua(code, **settings)
+                self._pump_research(lua)
+                g = lua.globals()
+                self.assertGreater(int(g.lostCount), 0, label)
+                self.assertGreater(int(g.resyncs), 0, label)
+                self.assertGreaterEqual(int(g.n5513), minimum, label)
+                self.assertEqual(int(g.conflicting), 0, label)
+                self.assertTrue(bool(g.page.autoXiulian), label)
+                self.assertGreater(int(g.level), 5, label)
+                self.assertGreater(int(lua.eval('#timers')), 0, label)
+
+    def test_lost_5513_is_never_followed_by_a_stale_retry(self):
+        # 结果未知的 5513 不能补发：丢包后的下一笔进修之前必须先有 5512 重查，
+        # 让服务端真实进度/序号回灌，避免重复扣费或旧序号被拒后停住。
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        lua = self._research_lua(code, lostEvery=7)
+        self._pump_research(lua, steps=160)
+        lua.execute('''
+            seen=0;bad=0;waiting=false;resynced=0
+            for _,r in ipairs(requests) do
+              if r.type==5513 then
+                seen=seen+1
+                if seen%7==0 then waiting=true
+                elseif waiting then
+                  if resynced==0 then bad=bad+1 end
+                  waiting=false;resynced=0
+                end
+              elseif r.type==5512 then resynced=resynced+1
+              end
+            end
+        ''')
+        g = lua.globals()
+        self.assertGreater(int(g.seen), 21)
+        self.assertEqual(int(g.bad), 0)
+        self.assertEqual(int(g.conflicting), 0)
+        self.assertTrue(bool(g.page.autoXiulian))
+
+    def test_auto_research_busy_timeout_resyncs_only_own_pending(self):
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        lua = self._research_lua(code)
+        lua.execute('''
+            local p={opcode=5513,iid=7}
+            gamedata.ext.localPartnerGrowthBusy=p;gamedata.ext.localFormationBusy=p
+            page.autoXiulian=true;page:autoResearchKick()
+            for i=1,25 do
+              if #timers==0 then break end
+              table.sort(timers,function(a,b) return a.at<b.at end)
+              local t=table.remove(timers,1);clock=t.at;t.fn()
+            end
+            cleared=gamedata.ext.localPartnerGrowthBusy==nil and gamedata.ext.localFormationBusy==nil
+            n5511=0;n5512=0
+            for _,r in ipairs(requests) do
+              if r.type==5511 then n5511=n5511+1 elseif r.type==5512 then n5512=n5512+1 end
+            end
+        ''')
+        g = lua.globals()
+        self.assertTrue(bool(g.cleared))          # 只清本模块自己设置的同一把锁
+        self.assertGreater(int(g.n5511), 0)       # 重查等级
+        self.assertGreater(int(g.n5512), 0)       # 重查真实进度与序号后才继续
+        self.assertEqual(int(g.conflicting), 0)
+        self.assertTrue(bool(g.page.autoXiulian))
+
+    def test_auto_research_never_clears_another_modules_lock(self):
+        code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()
+        lua = self._research_lua(code)
+        lua.execute('''
+            local other={opcode=1017}
+            gamedata.ext.localFormationBusy=other
+            page.autoXiulian=true;page:autoResearchKick()
+            for i=1,25 do
+              if #timers==0 then break end
+              table.sort(timers,function(a,b) return a.at<b.at end)
+              local t=table.remove(timers,1);clock=t.at;t.fn()
+            end
+            kept=gamedata.ext.localFormationBusy==other
+            stopped=not page.autoXiulian
+            n5513=0;for _,r in ipairs(requests) do if r.type==5513 then n5513=n5513+1 end end
+        ''')
+        g = lua.globals()
+        self.assertTrue(bool(g.kept))     # 别人的在途锁不能动
+        self.assertTrue(bool(g.stopped))  # 但也不能永远显示「取消」空转
+        self.assertEqual(int(g.n5513), 0)
 
     def test_auto_research_kick_stops_when_cancelled_or_generation_changes(self):
         code = self.client_scripts()["assets/scripts/Layer_generalup.so"].decode()

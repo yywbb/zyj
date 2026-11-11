@@ -2824,6 +2824,10 @@ AUTO_RESEARCH_KICK = '''
 -- 原实现只在 setXiuLianPropShow 里起 0.3s 定时器；回显被页面刷新/动画打断后
 -- autoXiulian 仍为真却没有定时器，玩家必须点一次取消再点一次才能继续。
 -- 上一笔 5513 在途时只排队等待，不并发发请求；材料未刷新时补查一次。
+-- 5513 整包丢失（无成功也无错误回包）时网络层的 busy 锁会残留，旧实现把
+--「在途」当成永久状态无限排队：按钮仍显示「取消」却再也不发请求。这里给等待
+-- 加超时，超时只清本模块自己设置的同一把锁，重查 5511/5512 让服务端真实进度
+-- 与序号回灌后才继续；结果未知的 5513 绝不补发，别人的共享锁绝不动。
 function generalup.autoResearchKick(self)
     if self.autoXiulian ~= true or self.selectpage ~= "xiulian" then return end
     if not self.data.general or self.localAutoResearchPending then return end
@@ -2834,7 +2838,40 @@ function generalup.autoResearchKick(self)
         self.localAutoResearchPending=false
         if generation~=self.localPartnerGeneration or not self.data.general or iid~=self.data.general.iid then return end
         if self.selectpage~="xiulian" or self.autoXiulian~=true then return end
-        if (gamedata.ext or {}).localPartnerGrowthBusy or (gamedata.ext or {}).localFormationBusy then
+        local ext=gamedata.ext or {}
+        if ext.localPartnerGrowthBusy or ext.localFormationBusy then
+            self.localAutoResearchWaits=(self.localAutoResearchWaits or 0)+1
+            if self.localAutoResearchWaits>=20 then
+                self.localAutoResearchWaits=nil
+                local pending=ext.localPartnerGrowthBusy
+                if pending and ext.localFormationBusy==pending then
+                    -- 只清本模块 send() 设置的同一把锁；不假设那笔 5513 成功或失败。
+                    ext.localPartnerGrowthBusy=nil;ext.localFormationBusy=nil
+                    self.localAutoResearchResync=true
+                    self.xiuLianHave=nil
+                    self.localAutoResearchMisses=nil
+                    UIRequest({type=5511,update=true})
+                    UIRequest({type=5512,iid=iid})
+                    self:setXiuLianStateShow()
+                else
+                    -- 其它模块占用共享锁：不能清，明确停止而不是永远显示「取消」空转。
+                    self.autoXiulian=false
+                    self:setXiuLianStateShow()
+                    return
+                end
+            end
+            self:autoResearchKick()
+            return
+        end
+        self.localAutoResearchWaits=nil
+        if self.localAutoResearchResync then
+            -- 等 5512 回显解除门禁；结果未知的进修请求不能补发。
+            self.localAutoResearchMisses=(self.localAutoResearchMisses or 0)+1
+            if self.localAutoResearchMisses>20 then
+                self.autoXiulian=false
+                self:setXiuLianStateShow()
+                return
+            end
             self:autoResearchKick()
             return
         end
@@ -2901,6 +2938,7 @@ def patch_partner_growth_scripts(patched):
         self.xiuLianData[hero.iid]=nil
         self.isRefreshXiulianProps=nil;self.xiuLianHave=nil
         self.autoJuexing=false;self.autoXiulian=false;self.localAutoResearchPending=nil
+        self.localAutoResearchWaits=nil;self.localAutoResearchResync=nil;self.localAutoResearchMisses=nil
     end
 ''')
             marker = "    if not self.xiuLianData[self.data.general.iid] then\n"
@@ -2917,6 +2955,7 @@ def patch_partner_growth_scripts(patched):
             assert code.count(marker) == 1
             code = code.replace(marker, marker+'''    if self.autoXiulian ~= true then
         self.localAutoResearchPending=nil
+        self.localAutoResearchWaits=nil;self.localAutoResearchResync=nil;self.localAutoResearchMisses=nil
         self.rootItems.xiuliannode:stopAllActions()
     end
 ''')
@@ -2933,11 +2972,24 @@ def patch_partner_growth_scripts(patched):
             head = block.index("    if self.autoXiulian == true then\n")
             assert "(not self.levelUp)" in block[head:]
             code = code[:start]+block[:head]+"    self:autoResearchKick()\nend"+code[end:]
+            # 5512 回显把服务端真实进度/序号写回后，才解除「结果未知」门禁并重启续接器。
+            start = code.index("function generalup.getXiuLianData(")
+            end = code.index("\nend", start)+len("\nend")
+            block = code[start:end]
+            assert block.endswith("\nend")
+            code = code[:start]+block[:-len("\nend")]+'''
+    if self.localAutoResearchResync then
+        self.localAutoResearchResync=nil
+        self.localAutoResearchWaits=nil
+        self.localAutoResearchMisses=nil
+        self:autoResearchKick()
+    end
+end'''+code[end:]
         for method in methods:
             marker = f"function {prefix}.{method}("
             assert code.count(marker) == 1
             pos = code.index("\n", code.index(marker))+1
-            code = code[:pos]+"    self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1\n    self.autoJuexing=false;self.autoXiulian=false;self.localAutoResearchPending=nil\n"+code[pos:]
+            code = code[:pos]+"    self.localPartnerGeneration=(self.localPartnerGeneration or 0)+1\n    self.autoJuexing=false;self.autoXiulian=false;self.localAutoResearchPending=nil\n    self.localAutoResearchWaits=nil;self.localAutoResearchResync=nil;self.localAutoResearchMisses=nil\n"+code[pos:]
             if name == "Layer_generalup" and method != "clear":
                 code = code[:pos]+"    self.xiuLianData={}\n    self.isRefreshXiulianProps=nil;self.xiuLianHave=nil\n"+code[pos:]
         if name == "Layer_generalup":
