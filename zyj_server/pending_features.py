@@ -1,19 +1,19 @@
-"""未开放玩法的只读状态应答；按真实协议/配置回包，不伪造进度或奖励。
+"""尚未开放玩法的只读状态应答；按真实协议/配置回包，不伪造进度或奖励。
 
 这些 opcode 此前在 session.py 落到通用兜底（999999 + 1999），客户端打开
 活动页时反复收到「此操作尚未实现或参数不受支持」。本模块只补查询／状态：
 所有进度都是真实的初始状态（活动未开启、未报名、未达成、无挑战次数），
 结算／领奖／挑战／购买类 opcode 仍不注册，避免凭空发奖或假装玩法已开放。
+通天塔 7010–7019 已由 babel_tower.py 完整实现，不再属于占位玩法。
 """
 
 from .protocol import encode_pb_field, iter_pb_fields
 
-QUERIES = (1600, 4702, 4820, 7011, 8055, 8120, 8122, 8250, 8251)
+QUERIES = (1600, 4702, 4820, 8055, 8120, 8122, 8250, 8251)
 OPCODES = QUERIES
 MASK = (1 << 64) - 1
 
 MINI_GAME_FIELDS = 26        # 10 项积分/状态 + 16 格棋盘
-BABEL_TOWER_FIELDS = 10      # 最高/当前层、挑战/购买次数、6 档奖励状态
 WORLD_WAR_FIELDS = 9         # 报名、赛区、晋级等
 GOD_COMPETITION_FIELDS = 24  # 届次/赛区/阶段、三个 Boss 的伤害与 buff
 MANOR_FIELDS = 23            # 名称/公告 + 6 项状态 + 5 座建筑×3
@@ -70,9 +70,6 @@ def reply(opcode, body, config):
     if opcode == 8055:
         _require_empty(body, "露水池查询")
         return dew_pool(config)
-    if opcode == 7011:
-        _require_empty(body, "通天塔查询")
-        return ids([0] * BABEL_TOWER_FIELDS)       # curPoint=0，客户端不会再发 7012
     if opcode in (8120, 8122):
         _require_empty(body, "成长计划查询")
         # 第 1 项是阶段，状态列表留空：客户端按 growplan_x2/x3 配置自行生成未达成奖励。

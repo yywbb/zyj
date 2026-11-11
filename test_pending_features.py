@@ -58,7 +58,7 @@ class PendingFeatureTests(unittest.TestCase):
         self.assertEqual(shop, [0] * len(self.config["dew_pool_shop"]))
 
     def test_status_queries_report_zero_progress_without_free_rewards(self):
-        self.assertEqual(protocol.parse_ids_pb(self.success(1, 7011)), [0] * pending_features.BABEL_TOWER_FIELDS)
+        self.assertNotIn(7011, pending_features.QUERIES)
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 4702)), [0] * pending_features.WORLD_WAR_FIELDS)
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 8120)), [1])
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 8122)), [1])

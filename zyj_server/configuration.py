@@ -92,7 +92,9 @@ def apply_overrides(name, data, overrides):
         for key in ("11", "104", "105", "106", "114", "115", "123", "124", "125", "126", "127", "128", "129"):
             data[key].update(open_type=1, begin="", end="", days_later=0, days_later2=0)
     if name == "build":
-        for key in ("113", "370", "371", "372", "387", "388", "405", "406", "407", "408", "409", "410", "411"):
+        # 本地常驻入口：通天塔/升仙台及其商店按 1 级开放，配置随 APK 一起下发。
+        for key in ("113", "370", "371", "372", "387", "388", "405", "406", "407", "408", "409", "410", "411",
+                    "450", "451", "664", "665"):
             data[key]["level"] = 1
     if name == "treasure2_fragment":
         for row in data.values():

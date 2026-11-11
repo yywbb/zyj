@@ -4,12 +4,12 @@ import copy
 import hashlib
 import random
 
-from . import activity_copy, arena, champion, friend_copy, mieshendian, nightclub, online_rewards, penglai, recharge, single_boss, watchstar, welfare
+from . import activity_copy, arena, babel_tower, champion, friend_copy, mieshendian, nightclub, online_rewards, penglai, recharge, single_boss, watchstar, welfare
 from .penglai import comb
 from .protocol import encode_pb_field, iter_pb_fields, pack_frame, pb_get_varint
 
 
-SUPPORTED = {(2, aid) for aid in activity_copy.COPIES} | {(3, aid) for aid in (1, 2, 3, 5, 9, 10, 12)}
+SUPPORTED = {(2, aid) for aid in activity_copy.COPIES} | {(3, aid) for aid in (1, 2, 3, 5, 9, 10, 12, 15)}
 
 
 def require_open(save, config):
@@ -60,7 +60,7 @@ def parse(body, config):
             raise ValueError("助手项目重复或不存在")
         seen.add(key)
         if key in SUPPORTED:
-            used = 2 if key in ((3, 5), (3, 10), (3, 12)) else 1
+            used = 2 if key in ((3, 5), (3, 10), (3, 12), (3, 15)) else 1
             if any(params[used:]) or params[0] > 1000:
                 raise ValueError("助手项目含多余参数或执行次数过大")
     extras = messages[2]
@@ -113,6 +113,12 @@ def query(save, config, now):
     cleared = state["cleared"][str(kind)]
     activity_rows[12][1:3] = [single_boss.levels(config, kind)[cleared-1]["id"] if cleared else 0,
                              config["vip"]["0"]["personalboss_times"]+state["bought"]-state["used"]]
+    tower = babel_tower.settle(save, config, now)
+    sweepable = []
+    for mid in babel_tower.maps(config):
+        rows = tower["levels"][str(mid)]
+        sweepable.append(max((index for index, row in enumerate(rows, 1) if all(row["stars"])), default=0))
+    activity_rows[15][1:8] = [tower["used"], *sweepable[:6]]
     return comb([(2, recharge.ids(challenge_rows)), (3, recharge.ids([v for row in activity_rows.values() for v in row])),
                  (4, recharge.ids([0, 0, 0])), (10, recharge.ids(partners)),
                  (20, recharge.ids([v for row in sorted(SUPPORTED) for v in row]))])
@@ -161,6 +167,16 @@ def estimate(rows, save, config, now):
                 raise ValueError("冠军试炼宝箱/重置设置超过剩余上限")
             gold += champion.auto_cost(state, p1, config) + p2*2*champion.box_cost(0, p1, config)
             gold += sum(config["buycount_price"][str(i)]["champion_cost"] for i in range(state["resets"]+1, state["resets"]+p2+1))
+        elif (page, item) == (3, 15):
+            state = babel_tower.settle(save, config, now)
+            free, max_buy = babel_tower.limits(save, state, config)
+            need = max(0, state["used"] + p1 - free - state["bought"])
+            if state["bought"] + need > max_buy:
+                raise ValueError("通天塔今日可购买次数不足，请修改助手设置")
+            prices = config["buycount_price"]
+            ceiling = max(map(int, prices))
+            gold += sum(int(prices[str(min(index, ceiling))]["tongtianta_goumai_jiage"])
+                        for index in range(state["bought"]+1, state["bought"]+need+1))
     if gold >= (1 << 31):
         raise ValueError("游戏助手报价超出范围")
     return gold, active
@@ -317,6 +333,38 @@ def execute_item(row, save, config, now, step_counts):
         run(3705, [p2, p1])
         last = save["last_single_boss_battle"]
         message = f"专用阵容真实挑战{last['attempts']}次、胜利{last['wins']}次；遇败停止"
+    elif (page, item) == (3, 15):
+        state = babel_tower.settle(save, config, now)
+        map_id = p2 if p2 in babel_tower.maps(config) else 1
+        rows = state["levels"][str(map_id)]
+        level = max((index for index, row in enumerate(rows, 1) if all(row["stars"])), default=0)
+        if not level or not p1:
+            raise ValueError("通天塔助手需要先通关关卡并设置挑战次数")
+        free, max_buy = babel_tower.limits(save, state, config)
+        need = max(0, state["used"] + p1 - free - state["bought"])
+        if state["bought"] + need > max_buy:
+            raise ValueError("通天塔今日可购买次数不足")
+        if need:
+            _, _, costs = babel_tower.buy_times(save, recharge.ids([450, need]), config, now)
+            for cid, amount in costs:
+                player.change_item_count(save, cid, -amount, config, now)
+                cost += amount
+        if state["cur_point"] != map_id:
+            babel_tower.prepare(7012, save, recharge.ids([map_id]), config, now, 0)
+        wins = 0
+        for attempt in range(p1):
+            _, reward, _ = babel_tower.prepare(7013, save, recharge.ids([level]), config, now,
+                                               random.getrandbits(64))
+            if reward:
+                player.apply_reward(save, reward, config, now)
+                rewards.append(reward)
+            if not save.get("last_babel_tower_battle", {}).get("won"):
+                break
+            wins += 1
+            if attempt + 1 < p1 and not babel_tower.remaining(save, state, config):
+                break
+        counts[5] += wins
+        message = f"通天塔第{map_id}章第{level}层真实挑战{wins}次；遇败停止，不重复领取章节奖励"
     return merge_rewards(rewards, cost), cost, counts, message
 
 

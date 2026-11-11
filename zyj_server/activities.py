@@ -132,7 +132,7 @@ def build_reward(save, specification, config, quantity=1):
             stamina += count
         elif cid == 1003:
             energy += count
-        elif (cid in (1004, 1005, 1008, 1009, 1019, 1025, 70000) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
+        elif (cid in (1004, 1005, 1008, 1009, 1019, 1025, 1044, 1045, 70000) or str(cid) in config["props"] or str(cid) in config["general_fragment"]
               or str(cid) in config["treasure2_fragment"] or str(cid) in config["equip_fragment"]
                or str(cid) in config["pet3_fragment"] or str(cid) in config["redl_awake_item"] or str(cid) in config["fashioncoat"]
                or str(cid) in config["trump_gem"] or str(cid) in config["token"] or str(cid) in config["token_fragment"]
