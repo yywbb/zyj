@@ -96,6 +96,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not writing and route.path == "/api/status":
                 return self._send(200, {"token": self.server.token, "config": configs.status(),
                                         "started_at": self.server.started_at, "actions": gm.ACTIONS,
+                                        "mail_limits": {"stack": gm.MAIL_STACK_MAX, "unit": gm.MAIL_UNIT_MAX},
                                         "common_items": [self.server.gm.items[cid] for cid in gm.COMMON_ITEMS if cid in self.server.gm.items]})
             if not writing and route.path == "/api/catalog":
                 search = query.get("q", [""])[0].casefold()

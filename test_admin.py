@@ -1750,6 +1750,33 @@ class AdminHttpTests(AdminFixture):
         summary = self.request("/api/reset-copy-counts")[2]["rows"]
         self.assertEqual([row["copies"]["1"]["used"] for row in summary], [0, 0])
 
+    def test_mail_item_quantity_limits_are_raised(self):
+        limits = self.request("/api/status")[2]["mail_limits"]
+        self.assertEqual(limits, {"stack": gm.MAIL_STACK_MAX, "unit": gm.MAIL_UNIT_MAX})
+        self.assertEqual((gm.MAIL_STACK_MAX, gm.MAIL_UNIT_MAX), (100_000_000, 1_000))
+        catalog = self.http.gm.items
+        self.assertEqual({row["max"] for row in catalog.values()}, {limits["stack"], limits["unit"]})
+        self.assertEqual(catalog[20014]["max"], limits["stack"])
+        unit = next(row for row in catalog.values() if row["kind"] == "武将")
+        self.assertEqual(unit["max"], limits["unit"])
+        html = self.request("/")[2].decode()
+        script = self.request("/app.js")[2].decode()
+        self.assertIn(f'id="mail-batch-qty" type="number" min="1" max="{gm.MAIL_STACK_MAX}"', html)
+        self.assertIn('data-qty="10000000">1000万', html)
+        self.assertIn("道具1亿/武将与装备1000", html)
+        self.assertIn(f"let mailStackMax = {gm.MAIL_STACK_MAX};", script)
+        self.assertIn("info.mail_limits?.stack", script)
+        self.assertNotIn("Math.min(1000000,", script)
+        self.assertNotIn("max: 1000000", script)
+        code, _, result = self.request("/api/mails", {"target": 1, "title": "大额物品福利", "content": "",
+            "items": [{"cid": 20014, "count": 50_000_000}, {"cid": unit["cid"], "count": limits["unit"]}],
+            "reason": "邮件物品上限调整验证"})
+        self.assertEqual(code, 200, result)
+        self.assertEqual(result["attachments"]["20014"], 50_000_000)
+        self.assertEqual(result["attachments"][str(unit["cid"])], limits["unit"])
+        self.assertEqual(self.request("/api/mails", {"title": "仍超限", "target": 1,
+            "items": [{"cid": 20014, "count": 1 << 31}]})[0], 400)
+
     def test_gm_catalog_and_structured_views_are_read_only_and_paginated(self):
         before = self.store.path(1).read_bytes()
         code, _, catalog = self.request("/api/catalog?q=20014")

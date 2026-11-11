@@ -26,6 +26,10 @@ TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"inventory": {"cid", "count"},
                   "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"}}
 COMMON_ITEMS = (20081, 20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
+# 系统邮件附件数量上限：可堆叠道具/碎片 1 亿，武将/装备/战宠等实体 1000。
+# 两者都远低于服务端与协议的 int32 上限，避免一次发放把背包数量顶到溢出。
+MAIL_STACK_MAX = 100_000_000
+MAIL_UNIT_MAX = 1_000
 
 
 def catalog(config):
@@ -41,7 +45,7 @@ def catalog(config):
 
     # 0. 仙元：作为资源存放在角色数据里，不在 props 表中，这里补进物品库，邮件/发放与普通道具一样添加。
     seen.add(1025)
-    rows.append({"cid": 1025, "name": "仙元", "kind": "道具", "description": "仙界货币，用于仙界相关功能", "max": 1000000})
+    rows.append({"cid": 1025, "name": "仙元", "kind": "道具", "description": "仙界货币，用于仙界相关功能", "max": MAIL_STACK_MAX})
 
     # 1. 道具 (props)
     if "props" in config:
@@ -49,7 +53,7 @@ def catalog(config):
             cid = int(key)
             seen.add(cid)
             rows.append({"cid": cid, "name": row.get("name", ""), "kind": "道具", "description": row.get("desc", ""),
-                         "max": 1000000})
+                         "max": MAIL_STACK_MAX})
 
     # 2. 战宠碎片 (pet3_fragment) - 包含 91008 鲲碎片 等
     if "pet3_fragment" in config:
@@ -60,7 +64,7 @@ def catalog(config):
             name = get_dict_name(debris, f"{pet_name}碎片")
             seen.add(debris)
             rows.append({"cid": debris, "name": name, "kind": "战宠碎片",
-                         "description": row.get("desc", "") or f"合成战宠【{pet_name}】所需碎片", "max": 1000000})
+                         "description": row.get("desc", "") or f"合成战宠【{pet_name}】所需碎片", "max": MAIL_STACK_MAX})
 
     # 3. 战宠 (pet3_attr) - 包含 90008 鲲 等
     if "pet3_attr" in config:
@@ -71,7 +75,7 @@ def catalog(config):
             q = row.get("0", {}).get("quality", "")
             seen.add(cid)
             rows.append({"cid": cid, "name": name, "kind": "战宠",
-                         "description": f"战宠 / {ptype} / 品质{q}", "max": 100})
+                         "description": f"战宠 / {ptype} / 品质{q}", "max": MAIL_UNIT_MAX})
 
     # 4. 专属装备 (exclusive) - 包含 201532 紫霄神鲲 等
     if "exclusive" in config:
@@ -79,7 +83,7 @@ def catalog(config):
             cid = int(key)
             seen.add(cid)
             rows.append({"cid": cid, "name": row.get("name", ""), "kind": "专属装备",
-                         "description": row.get("describe", "") or row.get("desc", ""), "max": 100})
+                         "description": row.get("describe", "") or row.get("desc", ""), "max": MAIL_UNIT_MAX})
 
     # 5. 武将碎片 (general_fragment)
     if "general_fragment" in config:
@@ -90,7 +94,7 @@ def catalog(config):
                 gname = config["general"][gid].get("name") or get_dict_name(gid, "武将")
                 seen.add(cid)
                 rows.append({"cid": cid, "name": f"{gname}碎片", "kind": "武将碎片",
-                             "description": f"合成武将【{gname}】所需碎片", "max": 1000000})
+                             "description": f"合成武将【{gname}】所需碎片", "max": MAIL_STACK_MAX})
 
     # 6. 武将 (general)
     if "general" in config:
@@ -101,7 +105,7 @@ def catalog(config):
                     seen.add(cid)
                     desc = f"武将 / 品质{row.get('quality')} / 资质{row.get('aptitude', '')}"
                     rows.append({"cid": cid, "name": row.get("name", ""), "kind": "武将",
-                                 "description": desc, "max": 100})
+                                 "description": desc, "max": MAIL_UNIT_MAX})
 
     # 7. 宝物碎片 / 坐骑碎片 (treasure2_fragment)
     if "treasure2_fragment" in config:
@@ -110,7 +114,7 @@ def catalog(config):
             if cid not in seen:
                 seen.add(cid)
                 rows.append({"cid": cid, "name": row.get("name", ""), "kind": "宝物碎片",
-                             "description": "宝物/坐骑合成碎片", "max": 1000000})
+                             "description": "宝物/坐骑合成碎片", "max": MAIL_STACK_MAX})
 
     # 8. 装备碎片 (equip_fragment)
     if "equip_fragment" in config:
@@ -120,7 +124,7 @@ def catalog(config):
                 seen.add(cid)
                 name = row.get("name", "")
                 rows.append({"cid": cid, "name": name if name.endswith("碎片") else f"{name}碎片", "kind": "装备碎片",
-                             "description": "装备合成碎片", "max": 1000000})
+                             "description": "装备合成碎片", "max": MAIL_STACK_MAX})
 
     # 9. 普通装备 / 坐骑 / 宝物 (equip)
     if "equip" in config:
@@ -140,7 +144,7 @@ def catalog(config):
                     if q:
                         desc = f"{type_label} / 品质{q} · {desc}" if desc else f"{type_label} / 品质{q}"
                     rows.append({"cid": cid, "name": row.get("name", ""), "kind": "普通装备",
-                                 "description": desc, "max": 100})
+                                 "description": desc, "max": MAIL_UNIT_MAX})
 
     # 10. 觉醒道具 (redl_awake_item)
     if "redl_awake_item" in config:
@@ -150,7 +154,7 @@ def catalog(config):
                 seen.add(cid)
                 name = row.get("name", "")
                 rows.append({"cid": cid, "name": name if name.endswith("丹") else f"{name}突破觉醒丹", "kind": "道具",
-                             "description": row.get("desc", ""), "max": 1000000})
+                             "description": row.get("desc", ""), "max": MAIL_STACK_MAX})
 
     # 11. 令牌 (token) & 令牌碎片 (token_fragment)
     if "token" in config:
@@ -159,14 +163,14 @@ def catalog(config):
             if cid not in seen:
                 seen.add(cid)
                 rows.append({"cid": cid, "name": row.get("desc", "") or f"令牌{cid}", "kind": "道具",
-                             "description": row.get("desc", ""), "max": 1000000})
+                             "description": row.get("desc", ""), "max": MAIL_STACK_MAX})
     if "token_fragment" in config:
         for key, row in config["token_fragment"].items():
             cid = int(key)
             if cid not in seen:
                 seen.add(cid)
                 rows.append({"cid": cid, "name": row.get("name", "") or f"令牌碎片{cid}", "kind": "道具",
-                             "description": row.get("desc", ""), "max": 1000000})
+                             "description": row.get("desc", ""), "max": MAIL_STACK_MAX})
 
     # 12. 法宝宝石 (trump_gem)
     if "trump_gem" in config:
@@ -175,7 +179,7 @@ def catalog(config):
             if cid not in seen:
                 seen.add(cid)
                 rows.append({"cid": cid, "name": row.get("desc", "") or f"宝石{cid}", "kind": "道具",
-                             "description": row.get("desc", ""), "max": 1000000})
+                             "description": row.get("desc", ""), "max": MAIL_STACK_MAX})
 
     # 13. 战魂 (soul) & 魔符 (sigil)
     if "soul" in config:
@@ -185,7 +189,7 @@ def catalog(config):
                 name = get_dict_name(cid, f"战魂{cid}")
                 seen.add(cid)
                 rows.append({"cid": cid, "name": name, "kind": "战魂",
-                             "description": "命格战魂", "max": 100})
+                             "description": "命格战魂", "max": MAIL_UNIT_MAX})
     if "sigil" in config:
         for key, row in config["sigil"].items():
             cid = int(key)
@@ -193,7 +197,7 @@ def catalog(config):
                 name = get_dict_name(cid, f"魔符{cid}")
                 seen.add(cid)
                 rows.append({"cid": cid, "name": name, "kind": "魔符",
-                             "description": row.get("desc", ""), "max": 100})
+                             "description": row.get("desc", ""), "max": MAIL_UNIT_MAX})
 
     return sorted(rows, key=lambda row: row["cid"])
 

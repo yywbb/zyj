@@ -5,6 +5,12 @@ const tabs = { summary: "角色概况", roster: "武将与装备", inventory: "�
 const COPY_NAMES = { 1: "经验副本", 2: "银币副本", 3: "锻造石副本", 4: "升星副本", 5: "阵符副本", 6: "法宝锻造副本" };
 const state = { token: "", accounts: [], account: 1, page: "overview", accountOffset: 0, configOffset: 0, operationsOffset: 0, mailOffset: 0, mailCatalogOffset: 0 };
 let info, editing, management, mailCart = [], pendingOperation = null, submitting = false;
+// 邮件附件数量上限以 /api/status 的 mail_limits 为准；状态尚未取回时先使用同一默认值。
+let mailStackMax = 100000000;
+function mailQty(item, value) {
+  const max = Math.max(1, Number(item?.max || info?.mail_limits?.stack || mailStackMax));
+  return Math.max(1, Math.min(max, Math.floor(Number(value) || 1)));
+}
 let navigation = 0, accountRequest = 0, configRequest = 0, logRequest = 0, mailRequest = 0, mailCatalogRequest = 0;
 // 沿用旧键，刷新后仍可按原编号查询在途的档案修正操作。
 try { pendingOperation = JSON.parse(sessionStorage.getItem("gm-pending") || "null"); } catch { /* 浏览器存储不可用时仍保留本页回执。 */ }
@@ -77,6 +83,8 @@ function valueText(value) { return typeof value === "object" ? JSON.stringify(va
 
 async function status() {
   info = await api("/api/status"); state.token = info.token;
+  mailStackMax = Number(info.mail_limits?.stack) || mailStackMax;
+  $("mail-batch-qty").max = mailStackMax;
   $("pending").hidden = !info.config.restart_required;
   $("connection").textContent = `已连接 · 更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
   configNames();
@@ -553,7 +561,7 @@ function updateMailSummary() {
 }
 
 function addMailItem(item) {
-  const defaultQty = Math.max(1, Number($("mail-batch-qty").value) || 1);
+  const defaultQty = mailQty(item, $("mail-batch-qty").value);
   const existing = mailCart.find((r) => r.cid === item.cid);
   if (existing) {
     message(`「${item.name || item.cid}」已在附件清单中。`);
@@ -566,7 +574,7 @@ function addMailItem(item) {
 
 function addSelectedCatalogItems() {
   if (mailSelectedCatalogCids.size === 0) return;
-  const qty = Math.max(1, Number($("mail-batch-qty").value) || 1);
+  const raw = $("mail-batch-qty").value;
   let addedCount = 0;
   for (const cid of mailSelectedCatalogCids) {
     let item = mailCatalogRows.find((r) => r.cid === cid);
@@ -574,6 +582,7 @@ function addSelectedCatalogItems() {
       item = info.common_items.find((r) => r.cid === cid);
     }
     if (item) {
+      const qty = mailQty(item, raw);
       const existing = mailCart.find((r) => r.cid === item.cid);
       if (existing) {
         existing.count = qty;
@@ -587,7 +596,7 @@ function addSelectedCatalogItems() {
   renderMailCatalogRows();
   updateCatalogBatchBar();
   renderMailCart();
-  message(`已将 ${addedCount} 种物品批量加入附件清单 (数量: ${qty})。`);
+  message(`已将 ${addedCount} 种物品批量加入附件清单（数量按各自上限钳制）。`);
 }
 
 function applyBatchQuantity(customQty) {
@@ -596,7 +605,7 @@ function applyBatchQuantity(customQty) {
     return;
   }
   const isMax = customQty === "max";
-  const qty = isMax ? null : Math.max(1, Math.min(1000000, Number(customQty ?? $("mail-batch-qty").value) || 1));
+  const qty = isMax ? null : Math.max(1, Math.min(mailStackMax, Math.floor(Number(customQty ?? $("mail-batch-qty").value) || 1)));
   if (!isMax) {
     $("mail-batch-qty").value = qty;
   }
@@ -606,7 +615,7 @@ function applyBatchQuantity(customQty) {
     : mailCart;
 
   for (const item of targetList) {
-    item.count = isMax ? (item.max || 1000000) : Math.min(qty, item.max || 1000000);
+    item.count = isMax ? mailQty(item, item.max || mailStackMax) : mailQty(item, qty);
   }
 
   renderMailCart();
@@ -668,7 +677,7 @@ function renderMailCart() {
       const input = node("input");
       input.type = "number";
       input.min = "1";
-      input.max = r.max || 1000000;
+      input.max = r.max || mailStackMax;
       input.step = "1";
       input.required = true;
       input.value = r.count;
@@ -676,7 +685,7 @@ function renderMailCart() {
       input.style.padding = "4px 6px";
       input.setAttribute("aria-label", `${r.name || r.cid}数量`);
       input.oninput = () => {
-        r.count = Math.max(1, Number(input.value) || 1);
+        r.count = mailQty(r, input.value);
         updateMailSummary();
       };
       return input;
@@ -792,7 +801,7 @@ function fillMailSkyTokenBundle() {
   for (const item of SKYTOKEN_BUNDLE) {
     const existing = mailCart.find((r) => r.cid === item.cid);
     if (existing) existing.count = item.count;
-    else mailCart.push({ ...item, kind: "道具", max: 1000000 });
+    else mailCart.push({ ...item, kind: "道具", max: mailStackMax });
   }
   if ($("mail-title").value === "GM系统福利发放") $("mail-title").value = "天机令满配大礼包福利";
   renderMailCart();
@@ -946,7 +955,7 @@ async function submitSendMail(event) {
     title,
     content,
     resources,
-    items: mailCart.map(({ cid, count }) => ({ cid, count })),
+    items: mailCart.map((item) => ({ cid: item.cid, count: mailQty(item, item.count) })),
     recharge: rechargeInfo,
     reason
   };

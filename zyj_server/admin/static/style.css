@@ -182,7 +182,7 @@ time { white-space: nowrap; }
 .batch-qty-bar { display: inline-flex; align-items: center; gap: 5px; background: #eef3f7; padding: 2px 6px; border-radius: 4px; border: 1px solid #cbd5e1; }
 .batch-qty-label { font-size: 11px; color: var(--muted); margin: 0; white-space: nowrap; }
 .batch-qty-input { width: 68px !important; padding: 3px 5px !important; font-size: 12px !important; border-radius: 3px !important; text-align: center; }
-.quick-preset-pills { display: inline-flex; gap: 3px; }
+.quick-preset-pills { display: inline-flex; gap: 3px; flex-wrap: wrap; }
 .pill-btn { padding: 2px 6px; font-size: 11px; border: 1px solid #c4d0dc; background: white; border-radius: 3px; cursor: pointer; line-height: 1.3; }
 .pill-btn:hover { background: #dceef2; border-color: var(--accent); color: var(--accent); }
 .pill-btn-max { font-weight: 600; color: #0d6e82; background: #e6f4f7; border-color: #8accd8; }
