@@ -136,6 +136,8 @@ def settle(save, config, now):
             for row in rows:
                 row.update(used=0, daily=0, auto=0)
     state["checked_at"] = max(now, state["checked_at"])
+    # 私服规则：挑战不设全局上限，全局已用次数恒为 0，客户端剩余次数展示恒为满。
+    state["used"] = 0
     save["babel_tower_state"] = state
     return state
 
@@ -327,8 +329,6 @@ def prepare(opcode, save, body, config, now, seed):
             raise ValueError("通天塔章节尚未解锁")
         if state["cur_point"] not in (0, map_id):
             raise ValueError("请先退出当前通天塔章节")
-        if not remaining(save, state, config):
-            raise ValueError("通天塔今日挑战次数已用完")
         state["cur_point"] = map_id
         return b"".join(level_values(row) for row in state["levels"][str(map_id)]), b"", []
     if opcode == 7017:
@@ -355,18 +355,18 @@ def prepare(opcode, save, body, config, now, seed):
             if not previous["stars"][0] or not previous["daily"]:
                 raise ValueError("请先通关上一层通天塔")
         row = state["levels"][str(map_id)][level_id - 1]
-        if row["used"] >= int(point["challenge"]):
+        # 私服规则：通关过（有星）的关卡复战不计时；新关卡保留原版单关 3 次/天。
+        already = any(row["stars"])
+        if not already and row["used"] >= int(point["challenge"]):
             raise ValueError("该通天塔关卡今日挑战次数已用完")
-        if not remaining(save, state, config):
-            raise ValueError("通天塔今日挑战次数已用完")
         attack, defense = battle.rosters(save, sanitize_breakthrough(dict(point), config), config)
         report = battle.simulate(attack, defense, config, seed,
                                  attack_pet=pets.combat(save, config), attack_cheer=cheer.combat(save, config))
         report["meta"]["attack"]["n"] = save["role_name"]
         report["meta"]["defense"]["n"] = point["name"]
         gained = stars(point, report, config)
-        row["used"] += 1
-        state["used"] += 1
+        if not already:
+            row["used"] += 1
         row["stars"] = [max(old, new) for old, new in zip(row["stars"], gained)]
         spec = ""
         if report["result"]:

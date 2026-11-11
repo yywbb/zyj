@@ -168,15 +168,8 @@ def estimate(rows, save, config, now):
             gold += champion.auto_cost(state, p1, config) + p2*2*champion.box_cost(0, p1, config)
             gold += sum(config["buycount_price"][str(i)]["champion_cost"] for i in range(state["resets"]+1, state["resets"]+p2+1))
         elif (page, item) == (3, 15):
-            state = babel_tower.settle(save, config, now)
-            free, max_buy = babel_tower.limits(save, state, config)
-            need = max(0, state["used"] + p1 - free - state["bought"])
-            if state["bought"] + need > max_buy:
-                raise ValueError("通天塔今日可购买次数不足，请修改助手设置")
-            prices = config["buycount_price"]
-            ceiling = max(map(int, prices))
-            gold += sum(int(prices[str(min(index, ceiling))]["tongtianta_goumai_jiage"])
-                        for index in range(state["bought"]+1, state["bought"]+need+1))
+            # 私服规则：挑战不设全局次数上限，无需购买次数。
+            babel_tower.settle(save, config, now)
     if gold >= (1 << 31):
         raise ValueError("游戏助手报价超出范围")
     return gold, active
@@ -340,15 +333,6 @@ def execute_item(row, save, config, now, step_counts):
         level = max((index for index, row in enumerate(rows, 1) if all(row["stars"])), default=0)
         if not level or not p1:
             raise ValueError("通天塔助手需要先通关关卡并设置挑战次数")
-        free, max_buy = babel_tower.limits(save, state, config)
-        need = max(0, state["used"] + p1 - free - state["bought"])
-        if state["bought"] + need > max_buy:
-            raise ValueError("通天塔今日可购买次数不足")
-        if need:
-            _, _, costs = babel_tower.buy_times(save, recharge.ids([450, need]), config, now)
-            for cid, amount in costs:
-                player.change_item_count(save, cid, -amount, config, now)
-                cost += amount
         if state["cur_point"] != map_id:
             babel_tower.prepare(7012, save, recharge.ids([map_id]), config, now, 0)
         wins = 0
@@ -361,8 +345,6 @@ def execute_item(row, save, config, now, step_counts):
             if not save.get("last_babel_tower_battle", {}).get("won"):
                 break
             wins += 1
-            if attempt + 1 < p1 and not babel_tower.remaining(save, state, config):
-                break
         counts[5] += wins
         message = f"通天塔第{map_id}章第{level}层真实挑战{wins}次；遇败停止，不重复领取章节奖励"
     return merge_rewards(rewards, cost), cost, counts, message
