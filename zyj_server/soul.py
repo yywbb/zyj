@@ -204,8 +204,11 @@ def prepare(opcode, save, body, config, now, seed):
                 if not 0 <= chance <= 1:
                     raise ValueError("猎命进阶概率配置无效")
                 state["hunt"] = stage + 1 if stage < 5 and rng.random() < chance else 1
-        if spent > save["role_state"]["coin"] or len(items) > LIMIT:
-            raise ValueError("银币不足以完成整批猎命或命格背包已满；整批未扣款")
+        if spent > save["role_state"]["coin"]:
+            raise ValueError(f"银币不足：本批需要{spent}，现有{save['role_state']['coin']}；整批未扣款")
+        if len(items) > LIMIT:
+            raise ValueError(f"命格背包空间不足（{len(before)-len(legacy)}/{LIMIT}，本批新增{len(got)}个）；"
+                             "请到“命格→批量分解”手动整理闲置命格；自动分解不含橙色，整批未扣款")
         costs.append((1000, spent))
         reward = activities.build_reward(save, f"20099,{dust}", config) if dust else b""
         reply = guild.message(1, query(state, got, spent)) + guild.message(2, reward)

@@ -73,6 +73,55 @@ class SoulTests(unittest.TestCase):
     def refresh(self):
         self.save = self.sessions[1].save
 
+    def fixed_hunt(self, cid):
+        for row in self.config["soul"].values():
+            for stage in range(1, 7):
+                row[f"rang{stage}"] = int(row["id"] == cid)
+
+    def hunt_error(self, values=(), raw=None):
+        before, disk = copy.deepcopy(self.sessions[1].save), self.store.path(1).read_bytes()
+        packets = self.request(1, 2502, values=values, raw=raw)
+        self.assertEqual([mid for mid, _ in packets], [999999, 1999])
+        self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+        return next(v.decode() for n, w, v in protocol.iter_pb_fields(packets[1][1]) if (n, w) == (1, 2)), packets[0][1]
+
+    def test_fast_hunt_full_orange_bag_reports_required_space_without_charging(self):
+        self.save["role_state"].update(level=70, coin=757707661084)
+        self.grant(70004, 100); self.grant(20617, 100)
+        self.wear(min(self.items())); self.refresh()
+        self.fixed_hunt(70004)
+        for method, count in ((10, 10), (100, 100), (1000, 1000), (60, 10), (600, 100)):
+            with self.subTest(method=method):
+                message, _ = self.hunt_error([method, 1, 1, 1])
+                for text in ("100/100", f"本批新增{count}个", "命格→批量分解", "橙色", "整批未扣款"):
+                    self.assertIn(text, message)
+                self.assertNotIn("银币不足", message)
+
+    def test_fast_hunt_silver_shortage_is_distinct_from_capacity(self):
+        self.save["role_state"].update(level=70, coin=5000)
+        self.grant(20617, 100)
+        for method in (10, 100, 60, 600):
+            with self.subTest(method=method):
+                message, _ = self.hunt_error([method, 1, 1, 1])
+                for text in ("银币不足", "本批需要", "现有5000", "整批未扣款"):
+                    self.assertIn(text, message)
+                self.assertNotIn("背包", message)
+
+    def test_full_bag_allows_auto_decomposed_draws_and_exact_capacity(self):
+        self.grant(70004, 100)
+        self.fixed_hunt(70001)
+        before, dust = copy.deepcopy(self.items()), self.props(20099)
+        self.success(1, 2502, values=[10, 1, 1, 1]); self.refresh()
+        self.assertEqual(self.items(), before)
+        self.assertEqual(self.props(20099), dust + 10 * self.config["soul"]["70001"]["eatexp"])
+        self.success(1, 2506, values=[min(self.items())]); self.refresh()
+        self.fixed_hunt(70004)
+        self.success(1, 2502, values=[1, 0, 0, 0]); self.refresh()
+        self.assertEqual(len(self.items()), 100)
+        message, _ = self.hunt_error([1, 0, 0, 0])
+        self.assertIn("100/100", message)
+        self.assertIn("本批新增1个", message)
+
     def test_query_legacy_tokens_reward_currency_and_monotonic_iids_survive_reconnect(self):
         self.grant(70000, 100)
         raw = self.success(1, 2501)
@@ -510,6 +559,38 @@ class SoulTests(unittest.TestCase):
         self.assertEqual(lua.globals().UISoulHuntCallBack(lua.table_from({b"param":1}))[0],1)
         self.assertEqual(self.save["role_state"]["gold"],gold)
         self.assertIsNone(lua.globals().gameConfig)
+
+    def test_actual_fast_hunt_buttons_report_full_bag_and_matching_errors_allow_retry(self):
+        self.save["role_state"].update(level=70, coin=757707661084)
+        self.grant(70004, 100); self.grant(20617, 100)
+        self.fixed_hunt(70004)
+        ui = self.ui_lua()
+        ui.execute('''GameScene.roleinfo.coin=757707661084
+            page.systemId=9;page.itemId=20617;page.itemNum=100''')
+        window = ui.execute(self.client_scripts()["assets/scripts/window_soul_fast.so"].decode())
+        ui.globals().gameWindows.windows.soulfast = ui.table_from({"show": True, "module": window})
+        net = self.network_lua(native_protobuf=True)
+        net.globals().props_raw = bytes.fromhex(self.save["world_state"]["1200"])
+        net.execute(b'local t=require("idnums_pb").IdNums();t:ParseFromString(props_raw);gamedata:Props(t.idnums)')
+        for kind, button, method in ((1, 1, 10), (1, 2, 100), (1, 3, 1000), (6, 1, 60), (6, 2, 600)):
+            with self.subTest(method=method):
+                ui.globals().gameWindows.windows.soulfast.show = True
+                window.open(window, -103, ui.table_from({"hunt": kind, "xnum": 5000}), None)
+                window.rootItems[f"doButton{button}"].callback()
+                request = ui.globals().requests[len(ui.globals().requests)]
+                self.assertEqual((request.type, request.param), (2502, method))
+                data = {key.encode(): request[key] for key in ("param", "param1", "param2", "param3")}
+                mode, opcode, raw = net.globals().UISoulHuntCallBack(net.table_from(data))
+                self.assertEqual((mode, opcode, protocol.parse_ids_pb(raw)), (1, 2502, [method, 1, 1, 1]))
+                message, error = self.hunt_error(raw=raw)
+                self.assertIn("100/100", message)
+                self.assertIn("命格→批量分解", message)
+                net.globals().NetErrorMessageCallback9(net.table_from({b"rbuf": error, b"ser": 7}))
+                cache, ext = net.globals().gamedata[b"cache"], net.globals().gamedata[b"ext"]
+                self.assertIsNone(ext[b"localSoulBusy"])
+                self.assertEqual(len(ext[b"localSoulPending"][2502]), 0)
+                self.assertEqual(cache[b"role"][b"coin"], 757707661084)
+                self.assertEqual(cache[b"props"][20617][b"num"], 100)
 
     def test_actual_pb_compound_purchase_quick_wear_and_full_query_remove_old_soul_cache(self):
         main,food=self.grant(70052),self.grant(70004)
