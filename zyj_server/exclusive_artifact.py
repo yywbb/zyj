@@ -14,8 +14,8 @@ exclusive_skills 进入 battle._prepare_teams。未实现的触发型技能行�
 不会让整场战斗抛「尚不支持该突破被动」。加成只作用于战斗 unit，不写
 world_state["1002"]，因此角色面板战力不变（与 cover/soul 的战斗专用加成同口径）。
 
-边界：激活副本按已尝试次数取 exclusive_copy 的对应 checkpoint，原生客户端一次
-胜利即打开激活窗口；阵位页图标是否置灰仍读取角色快照 General.ids[11] 的
+边界：激活副本的 11 个 checkpoint 按挑战者战力定档（matched_checkpoint 本地口径），
+原生客户端一次胜利即打开激活窗口；阵位页图标是否置灰仍读取角色快照 General.ids[11] 的
 exclusiveArtifactCid，服务端不改写该幻化共用字段，详情/强化页按 8101 数据正常显示。
 build611–618 的本地 1 级开放随 configuration.apply_overrides 下发，需重打 APK 才可见；
 guide_section 113 同步改为首次升级(2级)触发，S114–S119 仍由原生 NewSystem 首入触发。
@@ -657,6 +657,29 @@ def strengthen(save, state, config, body, now):
     return artifacts_reply(state, config, [key]), b"", costs
 
 
+def side_power(side):
+    """四围战力代理：与 battle 内自研战力同口径的简化版，只用于激活定档比较。"""
+    return sum(unit["atk"] + unit["def"] + unit["hp"] // 10 for unit in side.values())
+
+
+def matched_checkpoint(save, config, copies):
+    """激活挑战定档（本地口径）：按挑战者战力取「打得过的最强一档」。
+
+    exclusive_copy 的 11 个 checkpoint 是同一场激活挑战的从强到弱修正阶梯
+    （最强档守军血量为最弱档的 133 倍、减伤 90% 对 30%），且 26 组副本共用
+    同一套模板值；原生服务器按什么规则选档未随包下发。按「当日尝试次数」
+    取档且日切清零会让所有玩家永远面对最强档（守军代理战力为玩家的 17.8
+    倍，伤害可忽略），故改为用同一套四围代理估算挑战者与各档守军，取守军
+    不超过挑战者的最强一档；全部超限时打最弱一档，仍是真实战斗、不保证
+    胜负。"""
+    attack, _ = _rosters(save, copies[min(copies, key=int)], config)
+    power = side_power(attack)
+    for key in sorted(map(int, copies)):
+        if side_power(_rosters(save, copies[str(key)], config)[1]) <= power:
+            return key
+    return max(map(int, copies))
+
+
 def activate(save, state, config, body, now, seed):
     general_iid = parse(body, 1)[0]
     key = str(general_iid)
@@ -675,8 +698,7 @@ def activate(save, state, config, body, now, seed):
     copies = config["exclusive_copy"].get(str(exclusive["copy"]))
     if not isinstance(copies, dict) or not copies:
         raise ValueError("激活副本配置不存在")
-    # 11 个 checkpoint 是同一场激活挑战的逐档配置；按已尝试次数取对应档，不跳过真实战斗。
-    checkpoint = min(max(int(key) for key in copies), used + 1)
+    checkpoint = matched_checkpoint(save, config, copies)
     point = copies.get(str(checkpoint))
     if not isinstance(point, dict):
         raise ValueError("激活副本配置不存在")

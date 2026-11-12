@@ -221,10 +221,10 @@ class ExclusiveArtifactTests(unittest.TestCase):
         if 2 in parts:
             self.assertEqual(len(values(parts[2])), 12)
 
-    def test_second_activation_attempt_uses_next_checkpoint(self):
-        iid, _ = self.activate()
-        self.state()["artifacts"].pop(str(iid))
-        self.commit()
+    def test_activation_checkpoint_matches_challenger_power(self):
+        # 定档本地口径：按挑战者战力取「打得过的最强一档」。普通队伍战力有限，
+        # 不应面对最强档（ck1 守军血量为最弱档 133 倍、减伤 90%，必然打不动）。
+        iid = self.make_gold_general()
         captured = []
         original = artifact._fight
 
@@ -234,7 +234,21 @@ class ExclusiveArtifactTests(unittest.TestCase):
 
         with patch.object(artifact, "_fight", side_effect=probe):
             self.success(8103, [iid], seq=182)
-        self.assertEqual(captured, [2])
+        expected = artifact.matched_checkpoint(self.session.save, self.config,
+                                               self.config["exclusive_copy"]["47030"])
+        self.assertGreater(captured[-1], 1)
+        self.assertEqual(captured, [expected])
+        # 战力提升后定档收敛到最强档，且真实战胜（激活成功形状不变）。
+        # 定档保证的是势均力敌的真实战斗，不保证普通队伍必胜，故先清掉可能存在的神器。
+        self.state()["artifacts"].pop(str(iid), None)
+        self.commit()
+        self.power()
+        with patch.object(artifact, "_fight", side_effect=probe):
+            reply = self.success(8103, [iid], seq=183)
+        self.assertEqual(captured[-1], 1)
+        self.assertEqual(set(messages(reply)), {1, 2})
+        self.assertEqual(protocol.pb_get_varint(messages(reply)[1], 1), 1)
+        self.assertEqual(values(messages(reply)[2])[0], iid)
 
     def test_activation_daily_limit_and_reconnect(self):
         iid, _ = self.activate()
