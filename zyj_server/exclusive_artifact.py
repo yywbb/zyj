@@ -8,11 +8,9 @@
 所有等级、消耗、掉落、概率、次数与战斗都来自 configs_sec5.zip 的真实表；
 重生返还按本模块逐笔记录的真实消耗，不按理论累计值凭空发料。
 
-战斗加成：combat_bonuses() 只读计算本体基础/强化、器灵基础/强化、随机属性与
-套装，battle.rosters 按上阵 IID 注入 unit；已实现的静态属性行与动态被动行通过
-exclusive_skills 进入 battle._prepare_teams。未实现的触发型技能行会被显式过滤，
-不会让整场战斗抛「尚不支持该突破被动」。加成只作用于战斗 unit，不写
-world_state["1002"]，因此角色面板战力不变（与 cover/soul 的战斗专用加成同口径）。
+combat_bonuses() 共用配置计算本体、器灵、随机属性与套装；常驻属性按 applied
+台账差值写入人物与战力，旧档在成功事务内补齐一次。战斗先剥离已入账部分再投影，
+保留幻化后的加成时点，不重复加算。尚未实现的触发型技能仍属于后续批次。
 
 边界：激活副本的 11 个 checkpoint 按挑战者战力定档（matched_checkpoint 本地口径），
 原生客户端一次胜利即打开激活窗口；阵位页图标是否置灰仍读取角色快照 General.ids[11] 的
@@ -28,7 +26,7 @@ from collections import Counter
 from fractions import Fraction
 
 from . import activities, battle, cheer, formation, pets
-from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
+from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_varint
 from .recharge import ids
 
 QUERIES = (8101, 8105, 8109, 8201)
@@ -139,6 +137,12 @@ def get_state(save):
                 if not level.isdigit() or cleared not in (0, 1):
                     raise ValueError
         worn = set()
+        applied = state.get("applied", {})
+        if (not isinstance(applied, dict)
+                or any(not isinstance(key, str) or not key.isdigit() or not isinstance(values, list)
+                       or len(values) != 12 or any(type(v) is not int or not -(1 << 31) < v < (1 << 31) for v in values)
+                       for key, values in applied.items())):
+            raise ValueError
         for key, artifact in state["artifacts"].items():
             if (not key.isdigit() or not isinstance(artifact, dict)
                     or not integer(artifact["cid"], 0, 1 << 31) or not integer(artifact["level"], 0, 70)
@@ -269,15 +273,15 @@ def suit_ids(artifact, state, config):
     for suit, count in suits.items():
         candidates = [row for row in config["exclusive_device_spirit_suit"].values()
                       if int(row["suit"]) == suit and int(row["activate_suit"]) <= count]
-        if candidates:
-            activated.append(max(candidates, key=lambda row: (int(row["activate_suit"]), -int(row["sorting"]))))
+        activated.extend(candidates)
     activated.sort(key=lambda row: int(row["sorting"]))
     return [*(int(row["id"]) for row in activated[:SUIT_SLOTS]), *([0] * max(0, SUIT_SLOTS - len(activated)))]
 
 
-# ---- 战斗加成（只读，不写存档、不改写 1002 面板战力） ----
+# ---- 配置加成与常驻属性差值 ----
 RATE_STATS = ("critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
 BASE_STATS = ("atk", "def", "hp", "speed")
+STAT_FIELDS = {name: field for field, name in enumerate((*BASE_STATS, *RATE_STATS), 6)}
 ATTR_ALIAS = {name: name for name in (*BASE_STATS, *RATE_STATS)}
 ATTR_ALIAS.update({"g_atk": "atk", "g_def": "def", "g_hp": "hp",
                    **{f"g_{name}": name for name in RATE_STATS}})
@@ -348,9 +352,7 @@ def add_stat(bonus, attr, value, method, fairy):
 def combat_bonuses(save, config):
     """按上阵伙伴 IID 返回专属神器/器灵/套装的真实战斗加成。
 
-    纯只读：不调用会写存档的 get_state()/settle()，坏档只跳过该条，绝不让
-    别的系统战斗因专属神器状态崩溃。属性只在 battle.rosters 的 unit 上生效，
-    不改 world_state["1002"]，因此面板战力不变（与 cover/soul 的战斗专用加成同口径）。
+    纯只读；保存出口和战斗共用，不能从此函数直接改人物或存档。
     """
     state = save.get("exclusive_artifact_state")
     if not isinstance(state, dict):
@@ -419,9 +421,90 @@ def combat_bonuses(save, config):
         except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError, OverflowError):
             continue
         bonus["skills"] = sorted({skill for skill in bonus["skills"]
-                                  if skill in allowed and supported_skill(skill, config, dynamic)})
+                                   if skill in allowed and supported_skill(skill, config, dynamic)})
+        combat_skills = []
+        for skill in bonus["skills"]:
+            row = config["breakskill"][str(skill)]
+            if row["type"] == 0 and row["target"] == "3" and row["attr"] in STAT_FIELDS:
+                value = Fraction(str(row["value"])) * (-1 if row["kind"] == "1" else 1)
+                add_stat(bonus, row["attr"], value, row["method"], fairy)
+            else:
+                combat_skills.append(skill)
+        bonus["skills"] = combat_skills
         result[iid] = bonus
     return result
+
+
+def attributes(raw, bonus, config):
+    """百分比只乘武将基础成长，概率保留 Fraction 供战斗使用。"""
+    values = dict.fromkeys(range(6, 17), Fraction(0))
+    if bonus:
+        row = config["general"][str(pb_get_varint(raw, 1))]
+        for name, field in STAT_FIELDS.items():
+            values[field] = bonus["fixed"].get(name, 0) + bonus["rates"].get(name, 0)
+            if name in bonus["percent"]:
+                values[field] += int(battle.general_base(row, name, pb_get_varint(raw, 3),
+                                                        pb_get_varint(raw, 4) or 0, config) * bonus["percent"][name])
+    return values
+
+
+def differences(save, previous, config):
+    """只对实际已入账的 applied 求差，兼容旧档和同一事务内多次调用。"""
+    from . import development
+
+    state = save.get("exclusive_artifact_state")
+    if not state:
+        return b"", 0
+    get_state(save)
+    members, slots = generals(save)
+    active = {pb_get_varint(slot, 2) for slot in slots.values()}
+    bonuses = combat_bonuses(save, config)
+    applied = state.get("applied", {})
+    current, update, power = {}, b"", 0
+    for key in sorted(set(applied) | {str(iid) for iid in bonuses}, key=int):
+        iid = int(key)
+        if iid not in members:
+            continue
+        raw = members[iid]
+        bonus = bonuses.get(iid)
+        stats = attributes(raw, bonus, config)
+        values = [int(stats[field]) for field in range(6, 17)]
+        values.append(sum(bonus["flat"]) if bonus else 0)
+        old = applied.get(key, [0] * 12)
+        if bonus:
+            current[key] = values
+        if values == old:
+            continue
+        changed, delta = development.adjust(raw, {field: values[field-6] - old[field-6] for field in range(6, 17)})
+        flat = values[-1] - old[-1]
+        total = (pb_get_varint(changed, 20) or 0) + flat
+        if not 0 <= total < (1 << 31):
+            raise ValueError("专属神器战力超出范围")
+        changed = pb_set_varint(changed, 20, total)
+        update += encode_pb_field(1, 2, changed)
+        if iid in active:
+            power += delta + flat
+    if current or applied:
+        state["applied"] = current
+    return update, power
+
+
+def frozen(save):
+    """只冻结出战伙伴的战斗资料，不携带消耗收据、未穿戴器灵和每日次数。"""
+    state = save.get("exclusive_artifact_state")
+    if not state:
+        return None
+    _, slots = generals(save)
+    active = {str(pb_get_varint(slot, 2)) for slot in slots.values()}
+    artifacts = {key: {name: copy.deepcopy(item[name]) for name in ("cid", "level", "inlay")}
+                 for key, item in state["artifacts"].items() if key in active}
+    if not artifacts:
+        return None
+    worn = {str(iid) for item in artifacts.values() for iid in item["inlay"] if iid}
+    return {"artifacts": artifacts,
+            "qilings": {key: {name: copy.deepcopy(item[name]) for name in ("cid", "level", "attrs")}
+                        for key, item in state["qilings"].items() if key in worn},
+            "applied": {key: list(values) for key, values in state.get("applied", {}).items() if key in active}}
 
 
 def artifact_values(state, config, key):

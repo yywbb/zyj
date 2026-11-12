@@ -118,6 +118,7 @@ class ExclusiveBattleGuideTests(unittest.TestCase):
 
     def test_qiling_percent_and_fixed_attributes_are_applied(self):
         iid = self.slot_iid()
+        before = self.units()[iid]["atk"]
         self.make_artifact(iid)
         percent_qiling = self.make_qiling(201604)  # atk / percent / 0.15 / location 4
         self.success(8104, [iid, 4, percent_qiling], seq=181)
@@ -130,14 +131,9 @@ class ExclusiveBattleGuideTests(unittest.TestCase):
         unit = self.units()[iid]
         general_row = self.config["general"][str(unit["cid"])]
         expected_percent = int(battle.general_base(general_row, "atk", unit["level"], unit["advance"], self.config)
-                               * Fraction("0.15"))
+                               * Fraction("0.24"))  # 器灵15% + 实际两件套9%。
         self.assertGreater(expected_percent, 0)
-        self.assertGreater(unit["atk"], self.units(self.blank_save())[iid]["atk"] + bonus["fixed"]["atk"])
-
-    def blank_save(self):
-        save = copy.deepcopy(self.session.save)
-        save.pop("exclusive_artifact_state", None)
-        return save
+        self.assertEqual(unit["atk"], before + bonus["fixed"]["atk"] + expected_percent)
 
     def test_corrupt_state_never_breaks_battle_rosters(self):
         save = copy.deepcopy(self.session.save)

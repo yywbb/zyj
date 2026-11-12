@@ -39,6 +39,7 @@ def protected(save):
     iids.update(iid for team in save.get("single_boss_state", {}).get("teams", {}).values() if team for iid in team[:7])
     iids.update(job["iid"] for job in save.get("nightclub_state", {}).get("jobs", {}).values())
     iids.update(entry[0] for entry in save.get("illusion_state", {}).get("items", {}).values())
+    iids.update(map(int, save.get("exclusive_artifact_state", {}).get("artifacts", {})))
     return iids - {None, 0}
 
 

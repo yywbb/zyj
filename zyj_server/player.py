@@ -417,7 +417,11 @@ def settle_self_stats(save, role_config):
     update = development.migrate_self_stats(save, role_config)
     if update:
         record_slot_update(save, update)
-    return update + equip_evolve.settle(save, role_config)
+    update += equip_evolve.settle(save, role_config)
+    changed, delta = exclusive_artifact.differences(save, save, role_config)
+    if changed:
+        update += apply_sigil_update(save, changed, delta, role_config)
+    return update
 
 
 def change_item_count(save, cid, delta, role_config, now=None):
@@ -1369,7 +1373,7 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
         packets.append(pack_frame(8110, 0, illusion.query(save, role_config)))
     # 神器和全队条件随换将/成长变化；统一结算差值，不能再次当作基础成长。
     update = b""
-    for module in (artifact, deployment):
+    for module in (artifact, exclusive_artifact, deployment):
         changed, delta = module.differences(save, before, role_config)
         if changed:
             apply_sigil_update(save, changed, delta, role_config)

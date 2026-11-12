@@ -75,10 +75,15 @@ def get_state(state, config, now):
 
 
 def freeze(save):
+    from . import exclusive_artifact
+
     snapshot = copy.deepcopy({k: save[k] for k in ("role_state", "role_name", "pet_state", "guild_skills", "wing_state", "cover_state", "illusion_state", "partner_growth_state") if k in save})
     if "cover_state" in snapshot:
         snapshot["cover_state"].update(shop={}, day=0, checked_at=0)
     snapshot["world_state"] = {"1002": save["world_state"]["1002"]}
+    exclusive = exclusive_artifact.frozen(save)
+    if exclusive:
+        snapshot["exclusive_artifact_state"] = exclusive
     if "illusion_state" in snapshot:
         snapshot["illusion_frozen_at"] = int(time.time())
     return snapshot

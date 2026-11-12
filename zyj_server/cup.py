@@ -167,11 +167,16 @@ def profile(save, account):
 
 
 def frozen(save, account, config):
+    from . import exclusive_artifact
+
     names = ("role_state", "role_name", "pet_state", "sigil_state", "guild_skills", "magic_state", "wing_state", "cover_state", "illusion_state", "partner_growth_state")
     snapshot = copy.deepcopy({k: save[k] for k in names if k in save})
     if "cover_state" in snapshot:
         snapshot["cover_state"].update(shop={}, day=0, checked_at=0)
     snapshot["world_state"] = {"1002": friends.public_slots(save).hex()}
+    exclusive = exclusive_artifact.frozen(save)
+    if exclusive:
+        snapshot["exclusive_artifact_state"] = exclusive
     if "illusion_state" in snapshot:
         snapshot["illusion_frozen_at"] = int(time.time())
     attack, defense = battle.rosters(copy.deepcopy(snapshot), config["copy"]["42101"]["1"], config, illusion_mode="pvp")

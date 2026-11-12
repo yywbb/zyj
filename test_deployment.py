@@ -283,7 +283,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(self.save["last_activity_battle"]["won"])
         self.assertEqual(self.save["last_activity_battle"]["damage_percent"], 100)
         self.assertEqual(self.props(20293), 41)
-        self.assertEqual(self.save["activity_copy_state"]["copies"]["5"], {"cleared": 1, "used": 1, "tried": 1})
+        self.assertEqual(self.save["activity_copy_state"]["copies"]["5"], {"cleared": 1, "used": 1, "tried": 1, "bought": 0})
 
     def test_zhenfu_daily_35_counts_only_real_attempts_claims_two_symbols_and_two_points_once(self):
         self.clock.return_value = 1800172800

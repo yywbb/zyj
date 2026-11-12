@@ -195,6 +195,9 @@ def rosters(save, point, config, *, illusion_mode="pve", now=None):
             raise ValueError("无效阵位或缺少武将属性")
         raw = generals[iid]
         unit = {name: pb_get_varint(raw, field) or 0 for name, field in GENERAL_FIELDS.items()}
+        applied = save.get("exclusive_artifact_state", {}).get("applied", {}).get(str(iid), [0] * 12)
+        for name, field in exclusive_artifact.STAT_FIELDS.items():
+            unit[name] = unit.get(name, 0) - applied[field-6]
         if (any(unit[name] <= 0 for name in ("cid", "iid", "level", "atk", "hp", "speed"))
                 or any(not 0 <= value < (1 << 31) for value in unit.values())):
             raise ValueError("武将战斗属性无效")
