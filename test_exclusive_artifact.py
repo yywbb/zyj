@@ -200,6 +200,27 @@ class ExclusiveArtifactTests(unittest.TestCase):
         self.assertEqual(values(self.success(8109)), [iid, 1])
         self.assert_rejected(8103, [iid])
 
+    def test_activation_failure_reply_has_no_empty_artifact_message(self):
+        # 战败时原生回调不处理 field 2；空的 Ids 子消息会让 GameExclusiveArtifact:207
+        # 对 exclusiveArtifactDatas[1] 索引 nil 而报错（实机 2026-11-12 复现）。
+        iid = self.make_gold_general()
+        self.power()
+        report = {"result": 0, "star": 0, "meta": {"attack": {"n": "a"}, "defense": {"n": "b"}}}
+        with patch.object(artifact, "_fight", return_value=report):
+            parts = messages(self.success(8103, [iid], seq=183))
+        self.assertEqual(set(parts), {1})
+        self.assertEqual(protocol.pb_get_varint(parts[1], 1), 0)
+        self.assertEqual(self.state()["active"], {str(iid): 1})
+        self.assertEqual(self.state()["artifacts"], {})
+        self.assertEqual(values(self.success(8109)), [iid, 1])
+        # 次日次数刷新后可再次挑战（checkpoint 2 真实战斗，胜负都可能）。
+        self.clock.return_value = NOW + 86400
+        reply = self.success(8103, [iid], seq=184)
+        parts = messages(reply)
+        self.assertIn(set(parts), ({1}, {1, 2}))
+        if 2 in parts:
+            self.assertEqual(len(values(parts[2])), 12)
+
     def test_second_activation_attempt_uses_next_checkpoint(self):
         iid, _ = self.activate()
         self.state()["artifacts"].pop(str(iid))

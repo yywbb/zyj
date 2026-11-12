@@ -683,13 +683,15 @@ def activate(save, state, config, body, now, seed):
     state["active"][key] = used + 1
     report = _fight(save, point, config, seed, str(point["name"]))
     reward = activities.build_reward(save, "", config)
-    changed = []
+    messages = [(1, battle_result(report, reward))]
     if report["result"]:
         state["artifacts"][key] = {"cid": int(exclusive["id"]), "level": 0,
                                    "inlay": [0] * INLAY_SLOTS, "spent": {}}
-        changed.append(key)
+        # 战败时原生 NetExclusiveArtifactActiveCallBack 不处理 field 2；
+        # 空的 Ids 子消息会令 GameExclusiveArtifact:207 索引 nil 而报错。
+        messages.append((2, artifacts_reply(state, config, [key])))
     state["checked_at"] = now
-    return comb(((1, battle_result(report, reward)), (2, artifacts_reply(state, config, changed)))), b"", []
+    return comb(messages), b"", []
 
 
 def inlay(save, state, config, body, now):
