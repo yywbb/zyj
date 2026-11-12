@@ -6,6 +6,7 @@ import random
 import struct
 import unittest
 from unittest.mock import patch
+import zipfile
 
 import build_local_apk as builder
 import test_penglai
@@ -113,12 +114,72 @@ class EquipBaptizeTests(unittest.TestCase):
         self.session.save["role_state"].update(level=80, coin=100000000)
         current = self.preview(count=50)
         self.confirm(current, 0)
-        for count in (1, 9, 11, 1001, 1010):
+        for count in (1, 9, 11, 1001, equip_baptize.MAX_AUTOMATIC_ROLLS + 10):
             self.assert_rejected(1124, recharge.ids([self.iid, 1, count, 0, 0, 0, 0, 0]))
         self.give(20222, -self.props(20222) + 19)
         self.assert_rejected(1124, recharge.ids([self.iid, 1, 10, 0, 0, 0, 0, 0]))
         self.give(20222, 1981)
         self.assertEqual(len(protocol.parse_ids_pb(self.groups(self.call(1124, [self.iid, 1, 1000, 0, 0, 0, 0, 0])[0][16:])[2])), 500)
+
+    def test_large_auto_batches_ignore_old_level_and_config_caps_and_charge_once(self):
+        count = 2010
+        with patch.dict(self.config["global_kv"]["automatic_baptize_number"], value="100"):
+            for index, (level, vip) in enumerate(((55, 0), (26, 5), (80, 0))):
+                with self.subTest(level=level, vip=vip):
+                    iid = self.iid + 10 + index
+                    self.add_equip(iid, 21201)
+                    self.session.save["role_state"].update(level=level, vip=vip, coin=100000000)
+                    self.give(20222, 5000 - self.props(20222))
+                    self.sequence += 1
+                    body = recharge.ids([iid, 2, count, 0, 0, 0, 0, 0])
+                    with patch("random.getrandbits", return_value=7):
+                        packets = self.session.handle(1124, self.sequence, body)
+                    self.assertEqual(struct.unpack(">IIII", packets[0][:16])[2], 1124)
+                    self.assertEqual(len(protocol.parse_ids_pb(self.groups(packets[0][16:])[2])), count // 10 * 5)
+                    self.assertEqual(self.props(20222), 5000 - count)
+                    self.assertEqual(self.session.save["role_state"]["coin"], 100000000 - count * 20000)
+                    self.assertEqual(self.equip(iid)[10], count)
+                    self.assertEqual(self.session.save["qiankun_state"]["receipts"][f"equip:{iid}"]["costs"], [[20222, count]])
+                    saved, disk = copy.deepcopy(self.session.save), self.path.read_bytes()
+                    self.assertEqual(self.session.handle(1124, self.sequence, body), packets)
+                    self.assertEqual((self.session.save, self.path.read_bytes()), (saved, disk))
+                    self.session = self.reconnect()
+                    self.assertEqual(self.equip(iid)[10], count)
+                    self.assertEqual(self.props(20222), 5000 - count)
+                    self.assertEqual(self.session.save["role_state"]["coin"], 100000000 - count * 20000)
+
+    def test_large_auto_cost_shortfalls_overflow_and_save_failure_are_atomic(self):
+        self.session.save["role_state"]["level"] = 55
+        count = 2010
+        for method, stones, coin, gold in ((1, count * 2 - 1, 100000000, 100000),
+                                           (2, 5000, count * 20000 - 1, 100000),
+                                           (3, 5000, 100000000, count * 5 - 1)):
+            with self.subTest(method=method):
+                self.session.save["role_state"].update(coin=coin, gold=gold)
+                self.give(20222, stones - self.props(20222))
+                with patch.object(equip_baptize.random, "Random") as rng:
+                    self.assert_rejected(1124, recharge.ids([self.iid, method, count, 0, 0, 0, 0, 0]))
+                rng.assert_not_called()
+        self.session.save["role_state"].update(coin=100000000, gold=100000)
+        self.give(20222, 5000 - self.props(20222))
+        for count in (0, 2011, equip_baptize.MAX_AUTOMATIC_ROLLS + 10, (1 << 31) - 1):
+            with patch.object(equip_baptize.random, "Random") as rng:
+                self.assert_rejected(1124, recharge.ids([self.iid, 2, count, 0, 0, 0, 0, 0]))
+            rng.assert_not_called()
+        item = self.equip()
+        overflow = item[:]
+        overflow[10] = (1 << 31) - 2010
+        player.record_slot_update(self.session.save, protocol.encode_pb_field(2, 2, recharge.ids(overflow)))
+        self.path.write_text(json.dumps(self.session.save))
+        with patch.object(equip_baptize.random, "Random") as rng:
+            self.assert_rejected(1124, recharge.ids([self.iid, 2, 2010, 0, 0, 0, 0, 0]))
+        rng.assert_not_called()
+        player.record_slot_update(self.session.save, protocol.encode_pb_field(2, 2, recharge.ids(item)))
+        self.path.write_text(json.dumps(self.session.save))
+        saved, disk = copy.deepcopy(self.session.save), self.path.read_bytes()
+        with patch.object(player.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.call(1124, [self.iid, 2, 2010, 0, 0, 0, 0, 0])
+        self.assertEqual((self.session.save, self.path.read_bytes()), (saved, disk))
 
     def test_automatic_rows_cost_ten_rolls_and_only_actual_replacements_count(self):
         self.session.save["role_state"]["level"] = 55
@@ -290,7 +351,7 @@ class EquipBaptizeTests(unittest.TestCase):
     def test_vip_auto_unlock_caps_resources_and_invalid_config_do_not_partially_apply(self):
         self.session.save["role_state"]["vip"] = 5
         self.call(1124, [self.iid, 1, 10, 0, 0, 0, 0, 0])
-        self.assert_rejected(1124, recharge.ids([self.iid, 1, 210, 0, 0, 0, 0, 0]))
+        self.assert_rejected(1124, recharge.ids([self.iid, 1, equip_baptize.MAX_AUTOMATIC_ROLLS + 10, 0, 0, 0, 0, 0]))
         self.session.save["role_state"]["coin"] = 19999
         self.assert_rejected(1120, recharge.ids([self.iid, 2, 1]))
         self.session.save["role_state"]["gold"] = 4
@@ -396,12 +457,15 @@ class EquipBaptizeTests(unittest.TestCase):
         result = lua.globals().NetEquipBaptizePreviewCallBack(lua.table_from({b"rbuf": self.call(1120, [self.iid, 0, 0])[0][16:]}))
         self.assertEqual(result[b"equip"][b"preview_token"], 0)
         self.session.save["role_state"]["level"] = 55
-        request = lua.table_from({b"iid": self.iid, b"method": 2, b"xlnum": 30})
+        self.session.save["role_state"]["coin"] = 100000000
+        lua.globals().gamedata[b"cache"][b"role"][b"coin"] = 100000000
+        request = lua.table_from({b"iid": self.iid, b"method": 2, b"xlnum": 2010})
         _, opcode, body = lua.globals().UIEquipBaptizeAutomaticCallBack(request)
-        self.assertEqual((opcode, protocol.parse_ids_pb(body)), (1124, [self.iid, 2, 30, 0, 0, 0, 0, 0]))
-        result = lua.globals().NetEquipBaptizeAutomaticCallBack(lua.table_from({b"rbuf": self.call(1124, [self.iid, 2, 30, 0, 0, 0, 0, 0])[0][16:]}))
-        self.assertEqual(len(list(result[b"status"].items())), 3)
+        self.assertEqual((opcode, protocol.parse_ids_pb(body)), (1124, [self.iid, 2, 2010, 0, 0, 0, 0, 0]))
+        result = lua.globals().NetEquipBaptizeAutomaticCallBack(lua.table_from({b"rbuf": self.call(1124, [self.iid, 2, 2010, 0, 0, 0, 0, 0])[0][16:]}))
+        self.assertEqual(len(list(result[b"status"].items())), 201)
         self.assertEqual(lua.globals().gamedata[b"cache"][b"role"][b"coin"], self.session.save["role_state"]["coin"])
+        self.assertEqual(lua.globals().gamedata[b"cache"][b"props"][20222][b"num"], self.props(20222))
         lua.globals().gamedata[b"ext"][b"localBaptizeBusy"] = True
         lua.globals().NetErrorMessageCallback9(lua.table_from({b"rbuf": recharge.ids([1124, 0])}))
         self.assertFalse(lua.globals().gamedata[b"ext"][b"localBaptizeBusy"])
@@ -429,6 +493,7 @@ class EquipBaptizeTests(unittest.TestCase):
                     if k=="setString" then return function(self,v) self.text=v end end
                     if k=="setVisible" then return function(self,v) self.visible=v end end
                     if k=="setEnabled" then return function(self,v) self.enabled=v end end
+                    if k=="getContentSize" then return function() return {width=900,height=500} end end
                     return function() end
                 end})
             end
@@ -491,7 +556,82 @@ class EquipBaptizeTests(unittest.TestCase):
         window.numchange(window, 15)
         self.assertEqual(window.donum, 10)
         window.numchange(window, 2000)
-        self.assertEqual(window.donum, 10)
+        self.assertEqual(window.donum, 2010)
+        lua.execute('''CCBReaderLoad=function() return node(),layer.rootItems end
+            LuaEventHandler={create=function(self,fn) return fn end}
+            ui.createLuaTableView=function() return node() end
+            ui.IDconfig=function() return {name="洗炼石"} end
+            ui.creatInputEditBoxByNode=function(parent,mode,began,ended,args)
+                inputBegan,inputEnded,inputArgs=began,ended,args
+                return node()
+            end
+            setSpriteFrameByName=function() end''')
+        code = scripts["assets/scripts/window_equipBaptizeAutomatic.so"].decode()
+        self.assertNotIn("automatic_baptize_number", code)
+        for method in (1, 2, 3):
+            with self.subTest(method=method):
+                lua.globals().GameScene.roleinfo.coin = 1000000000
+                lua.globals().GameScene.roleinfo.gold = 100000
+                window.open(window, -103, lua.table_from({"iid": self.iid, "cid": 21201, "method": method}), None)
+                window.hasstonenum = 200000
+                self.assertEqual(lua.globals().inputArgs.length, len(str(equip_baptize.MAX_AUTOMATIC_ROLLS)))
+                lua.globals().inputBegan()
+                lua.globals().inputEnded("2017", lua.globals().node())
+                self.assertEqual((window.donum, window.rootItems.donum.text), (2010, 2010))
+                self.assertEqual((window.rootItems.costnum1.text, window.rootItems.costnum2.text),
+                                 (window.costnum * 2010, window.stonenum * 2010))
+                window.rootItems.doButton.callback()
+                request = lua.globals().requests[len(lua.globals().requests)]
+                self.assertEqual((request.type, request.xlnum, request.method), (1124, 2010, method))
+                for text in (str(equip_baptize.MAX_AUTOMATIC_ROLLS + 10), "invalid"):
+                    lua.globals().inputBegan()
+                    lua.globals().inputEnded(text, lua.globals().node())
+                    self.assertEqual((window.donum, window.rootItems.donum.text), (2010, 2010))
+                window.hasstonenum = 1
+                lua.globals().inputEnded("5000", lua.globals().node())
+                self.assertEqual(window.donum, 2010)
+                window.close(window)
+
+    def test_large_auto_result_list_refreshes_once_without_long_input_block(self):
+        from lupa.lua51 import LuaRuntime
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.execute('''print=function() end
+            table.getTableLength=function(t) local n=0 for _ in pairs(t) do n=n+1 end return n end
+            UIRequest=function() end
+            gameTouch={clickprofbytime=function(self,n) blocked=n end}
+            runGamePrompt=function(t) prompt=t.msg end
+            CCSequence={createWithTwoActions=function() error("结果不应逐组延时播放") end}''')
+        window = lua.execute(self.client_scripts()["assets/scripts/window_equipBaptizeAutomatic.so"].decode())
+        window.rootNode = lua.eval('{runAction=function() error("结果不应调度延时动作") end}')
+        window.rootItems = lua.eval('{listnode={getContentSize=function() return {height=500} end}}')
+        window.ListTableView = lua.eval('''{reloadData=function() reloads=(reloads or 0)+1 end,
+            setLuaContentOffset=function() offsets=(offsets or 0)+1 end}''')
+        status = {str(i): {"method": 1, "num1": 1, "num2": 0, "num3": 0, "num4": 0} for i in range(1, 502)}
+        window.reloadData(window, lua.table_from({"status": status}, recursive=True))
+        self.assertEqual((lua.globals().reloads, lua.globals().offsets), (1, 1))
+        self.assertEqual(lua.globals().table.getTableLength(window.status), 501)
+        self.assertLessEqual(lua.globals().blocked, 1)
+        self.assertEqual(lua.globals().prompt, "自动洗炼完成")
+
+    def test_auto_rule_updates_only_wash_limits_and_keeps_other_modes(self):
+        from lupa.lua51 import LuaRuntime
+        with zipfile.ZipFile(test_penglai.ROOT / "configs_sec5.zip") as archive:
+            intro = json.loads(archive.read("5/system_intro.json"))
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.globals().gamedata = lua.table_from({"config": {"system_intro": intro}}, recursive=True)
+        lua.execute('''CCBReaderLoad=function() return {},{labelNode={},closeButton={
+                addHandleOfControlEvent=function() end,setSwallowsTouch=function() end,setTouchPriority=function() end}} end
+            ui={createRichLabel=function(rows) shown=rows[1].content end}''')
+        window = lua.execute(self.client_scripts()["assets/scripts/window_zidong_rule.so"].decode())
+        window.open(window, -103, lua.table_from({"doType": 1}), None)
+        text = lua.globals().shown
+        self.assertNotIn("200次", text)
+        self.assertNotIn("1000次", text)
+        self.assertIn(f"单次安全上限{equip_baptize.MAX_AUTOMATIC_ROLLS}次", text)
+        self.assertTrue(text.startswith(intro["50"]["intro"].split("3.选择洗炼次数")[0]))
+        for mode, key in ((2, "51"), (3, "69")):
+            window.open(window, -103, lua.table_from({"doType": mode}), None)
+            self.assertEqual(lua.globals().shown, intro[key]["intro"])
 
 
 if __name__ == "__main__":

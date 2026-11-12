@@ -13,6 +13,7 @@ import shutil
 import re
 
 from zyj_server.configuration import iter_config_bytes
+from zyj_server.equip_baptize import MAX_AUTOMATIC_ROLLS as MAX_AUTOMATIC_BAPTIZE_ROLLS
 from zyj_server.magic import MAX_AUTOMATIC_ROLLS
 from zyj_server.timebag import GIFTS
 
@@ -1250,10 +1251,50 @@ end''')
     patched["UIEquips"] = code
 
     code = read_script("window_equipBaptizeAutomatic").decode("utf-8").replace("\r\n", "\n")
+    marker = '''    ui.creatInputEditBoxForNum(self.rootItems.inputNumNode,self.rootItems.donum,self.touchPriority,function (num)
+        self.donum = 0
+        self:numchange(num)
+    end)'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, f'''    ui.creatInputEditBoxByNode(self.rootItems.inputNumNode,kEditBoxInputModePhoneNumber,
+        function() self.rootItems.donum:setString("") end,
+        function(text,edit)
+            edit:setText("")
+            local num = tonumber(text)
+            if num then self:numchange(math.max(10,math.floor(num))-self.donum)
+            else runGamePrompt({{msg=gameConfig.strings:string_common("ui",73)}}) end
+            self.rootItems.donum:setString(self.donum)
+        end,
+        {{fontSize=33,fontColor=self.rootItems.donum:getColor(),PlaceHolder="",length={len(str(MAX_AUTOMATIC_BAPTIZE_ROLLS))}}}):setTouchPriority(self.touchPriority)''')
     marker = "    local donum = self.donum + num\n"
     assert code.count(marker) == 1
     code = code.replace(marker, "    local donum = math.floor((self.donum + num)/10)*10\n")
+    start = code.index("    local maxnum = 200", code.index("function equipbaptize.numchange("))
+    end = code.index("    if donum < 0 then return end", start)
+    assert "automatic_baptize_number" in code[start:end]
+    code = code[:start] + f"    local maxnum = {MAX_AUTOMATIC_BAPTIZE_ROLLS}\n\n" + code[end:]
+    # 大批量结果逐组延时会长期屏蔽点击，沿用原生列表一次刷新。
+    start = code.index("    local status = data.status or {}", code.index("function equipbaptize.reloadData("))
+    end = code.index("function equipbaptize.close(", start)
+    code = code[:start] + '''    self.status = data.status or {}
+    local rnum = table.getTableLength(self.status)
+    gameTouch:clickprofbytime(0.5)
+    if self.ListTableView then
+        self.ListTableView:reloadData()
+        self.ListTableView:setLuaContentOffset(0,(self.rootItems.listnode:getContentSize().height > rnum*220) and (self.rootItems.listnode:getContentSize().height - rnum*220) or 0)
+    end
+    if rnum > 0 then
+        runGamePrompt({msg = "自动洗炼完成"})
+    end
+end
+
+''' + code[end:]
     patched["window_equipBaptizeAutomatic"] = code
+    code = read_script("window_zidong_rule").decode("utf-8").replace("\r\n", "\n")
+    marker = 'gamedata.config.system_intro["50"].intro'
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + f':gsub("3%.选择洗炼次数.*", "3.选择洗炼次数（10次一组，按实际资源选择；单次安全上限{MAX_AUTOMATIC_BAPTIZE_ROLLS}次）")')
+    patched["window_zidong_rule"] = code
     return patched
 
 

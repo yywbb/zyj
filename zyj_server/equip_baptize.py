@@ -9,6 +9,8 @@ from .protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_vari
 OPCODES = (1120, 1121, 1124)
 ATTRS = ("atk", "def", "hp", "adddmg", "subdmg")
 KINDS = ("weapon", "armor", "head", "accessory")
+# shortcut: 单请求最多10万次以限制计算量和结果大小，更大批量需改为分段事务。
+MAX_AUTOMATIC_ROLLS = 100000
 
 
 def limits(row, level):
@@ -179,7 +181,7 @@ def prepare(opcode, save, body, config, seed):
             if count not in ((1, 10, 50) if large else (1, 10)):
                 raise ValueError("洗炼次数尚未解锁")
         elif (level < int(config["global_kv"]["free_automatic_level"]["value"]) and not vip["vip_baptize"]
-              or count < 10 or count % 10 or count > (int(config["global_kv"]["automatic_baptize_number"]["value"]) if large else 200)
+              or count < 10 or count % 10 or count > MAX_AUTOMATIC_ROLLS
               or any(v not in (0, 1) for v in flags) or pending):
             raise ValueError("自动洗炼未解锁、次数/筛选无效或尚有待确认预览")
         if all(data[5 + ATTRS.index(name)] == cap for name, cap in limits(row, data[2]).items() if cap):
