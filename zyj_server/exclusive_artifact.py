@@ -8,16 +8,24 @@
 所有等级、消耗、掉落、概率、次数与战斗都来自 configs_sec5.zip 的真实表；
 重生返还按本模块逐笔记录的真实消耗，不按理论累计值凭空发料。
 
+战斗加成：combat_bonuses() 只读计算本体基础/强化、器灵基础/强化、随机属性与
+套装，battle.rosters 按上阵 IID 注入 unit；已实现的静态属性行与动态被动行通过
+exclusive_skills 进入 battle._prepare_teams。未实现的触发型技能行会被显式过滤，
+不会让整场战斗抛「尚不支持该突破被动」。加成只作用于战斗 unit，不写
+world_state["1002"]，因此角色面板战力不变（与 cover/soul 的战斗专用加成同口径）。
+
 边界：激活副本按已尝试次数取 exclusive_copy 的对应 checkpoint，原生客户端一次
 胜利即打开激活窗口；阵位页图标是否置灰仍读取角色快照 General.ids[11] 的
 exclusiveArtifactCid，服务端不改写该幻化共用字段，详情/强化页按 8101 数据正常显示。
-build611–618 的本地 1 级开放随 configuration.apply_overrides 下发，需重打 APK 才可见。
+build611–618 的本地 1 级开放随 configuration.apply_overrides 下发，需重打 APK 才可见；
+guide_section 113 同步改为首次升级(2级)触发，S114–S119 仍由原生 NewSystem 首入触发。
 """
 
 import copy
 import json
 import random
 from collections import Counter
+from fractions import Fraction
 
 from . import activities, battle, cheer, formation, pets
 from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint
@@ -265,6 +273,155 @@ def suit_ids(artifact, state, config):
             activated.append(max(candidates, key=lambda row: (int(row["activate_suit"]), -int(row["sorting"]))))
     activated.sort(key=lambda row: int(row["sorting"]))
     return [*(int(row["id"]) for row in activated[:SUIT_SLOTS]), *([0] * max(0, SUIT_SLOTS - len(activated)))]
+
+
+# ---- 战斗加成（只读，不写存档、不改写 1002 面板战力） ----
+RATE_STATS = ("critical", "dodge", "parry", "resilience", "hit", "arp", "criticaldmg")
+BASE_STATS = ("atk", "def", "hp", "speed")
+ATTR_ALIAS = {name: name for name in (*BASE_STATS, *RATE_STATS)}
+ATTR_ALIAS.update({"g_atk": "atk", "g_def": "def", "g_hp": "hp",
+                   **{f"g_{name}": name for name in RATE_STATS}})
+MAX_COMBAT_SKILLS = 32
+
+
+def skill_ids(config):
+    """原生三张专属表里出现的全部 breakskill 行 ID，供 _prepare_teams 校验。"""
+    breakskill = config.get("breakskill", {})
+    result = set()
+
+    def include(skill):
+        if skill and str(skill) in breakskill:
+            result.add(int(skill))
+
+    for row in config.get("exclusive", {}).values():
+        for index in range(1, 6):
+            include(row.get(f"skill{index}"))
+    for row in config.get("exclusive_device_spirit_suit", {}).values():
+        include(row.get("suit_skill"))
+    for row in config.get("exclusive_device_spirit_random_properties", {}).values():
+        include(row.get("breakskill"))
+        for index in range(1, 6):
+            include(row.get(f"intensify{index}"))
+    return result
+
+
+def supported_skill(skill, config, dynamic):
+    """只把战斗引擎已实现的行注入 ids；未实现的触发型效果不会让整场战斗报错。"""
+    row = config.get("breakskill", {}).get(str(skill))
+    if not row:
+        return False
+    code = row["type_param"] or row["id"]
+    if row["type"] == 0 and code not in range(9100001, 9100005):
+        return (row["attr"] in (*BASE_STATS, *RATE_STATS, "ap", "dmg", "fdmg")
+                and row["target"] in ("1", "2", "3", "4", "5", "7"))
+    return code in dynamic
+
+
+def parse_attribute(text):
+    result = []
+    for entry in str(text).strip(";").split(";"):
+        if not entry:
+            continue
+        name, _, value = entry.partition(",")
+        result.append((name.strip(), Fraction(str(value))))
+    return result
+
+
+def add_stat(bonus, attr, value, method, fairy):
+    if attr in ("adddmg", "subdmg"):
+        bonus["flat"][0 if attr == "adddmg" else 1] += int(Fraction(str(value)))
+        return
+    name = ATTR_ALIAS.get(attr)
+    if name is None:
+        return
+    amount = Fraction(str(value))
+    if attr.startswith("g_"):
+        amount *= fairy  # 仙属性按 global_kv.fairy_turn_every 折算成凡属性
+    if method == "percent" and name in BASE_STATS:
+        bonus["percent"][name] = bonus["percent"].get(name, Fraction(0)) + amount
+    elif name in RATE_STATS:
+        bonus["rates"][name] = bonus["rates"].get(name, Fraction(0)) + amount
+    else:
+        bonus["fixed"][name] = bonus["fixed"].get(name, 0) + int(amount)
+
+
+def combat_bonuses(save, config):
+    """按上阵伙伴 IID 返回专属神器/器灵/套装的真实战斗加成。
+
+    纯只读：不调用会写存档的 get_state()/settle()，坏档只跳过该条，绝不让
+    别的系统战斗因专属神器状态崩溃。属性只在 battle.rosters 的 unit 上生效，
+    不改 world_state["1002"]，因此面板战力不变（与 cover/soul 的战斗专用加成同口径）。
+    """
+    state = save.get("exclusive_artifact_state")
+    if not isinstance(state, dict):
+        return {}
+    artifacts, qilings = state.get("artifacts"), state.get("qilings")
+    if not isinstance(artifacts, dict) or not isinstance(qilings, dict):
+        return {}
+    try:
+        fairy = Fraction(str(config.get("global_kv", {}).get("fairy_turn_every", {}).get("value", "0.1")))
+        dynamic = battle.supported_breakthrough(config)
+        allowed = skill_ids(config)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return {}
+    result = {}
+    for key, artifact in artifacts.items():
+        try:
+            iid = int(key)
+            bonus = {"fixed": {}, "percent": {}, "rates": {}, "flat": [0, 0], "skills": []}
+            exclusive = config["exclusive"].get(str(artifact["cid"]))
+            if not exclusive:
+                continue
+            attributes = parse_attribute(exclusive["attribute"])
+            level = int(artifact["level"])
+            table = config["exclusive_intensify"].get(str(exclusive["intensify_type"]), {})
+            current = table.get(str(level))
+            for name, value in attributes:
+                add_stat(bonus, name, value, "value", fairy)
+            if current:
+                for name, _ in attributes:
+                    add_stat(bonus, name, current["value"], "value", fairy)
+                for index in range(1, min(5, int(current["baptism_level"])) + 1):
+                    bonus["skills"].append(int(exclusive[f"skill{index}"]))
+            for slot_iid in artifact["inlay"]:
+                if not slot_iid:
+                    continue
+                qiling = qilings.get(str(slot_iid))
+                spirit = (config["exclusive_device_spirit"].get(str(qiling["cid"]))
+                          if isinstance(qiling, dict) else None)
+                if not spirit:
+                    continue
+                amount = Fraction(str(spirit["value"]))
+                qiling_level = int(qiling["level"])
+                if qiling_level:
+                    qtable = config["exclusive_device_spirit_intensify"].get(str(spirit["intensify_bonus_way"]), {})
+                    row = qtable.get(str(qiling_level))
+                    if row:
+                        amount += Fraction(str(row["value"]))
+                add_stat(bonus, spirit["attribute"], amount, spirit["method"], fairy)
+                for pid, plevel, pvalue in qiling["attrs"]:
+                    if not pid:
+                        continue
+                    prop = config["exclusive_device_spirit_random_properties"].get(str(pid))
+                    if not prop:
+                        continue
+                    if int(prop["type"]) == 1:
+                        add_stat(bonus, prop["attribute"], pvalue, prop["method"], fairy)
+                    else:
+                        skill = prop.get(f"intensify{plevel}") if plevel else None
+                        skill = skill or prop.get("breakskill")
+                        if skill:
+                            bonus["skills"].append(int(skill))
+            for suit_id in suit_ids(artifact, state, config):
+                suit = config["exclusive_device_spirit_suit"].get(str(suit_id))
+                if suit and suit.get("suit_skill"):
+                    bonus["skills"].append(int(suit["suit_skill"]))
+        except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError, OverflowError):
+            continue
+        bonus["skills"] = sorted({skill for skill in bonus["skills"]
+                                  if skill in allowed and supported_skill(skill, config, dynamic)})
+        result[iid] = bonus
+    return result
 
 
 def artifact_values(state, config, key):

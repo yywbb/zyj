@@ -170,6 +170,9 @@ def sweep(save, body, config):
 
 def rosters(save, point, config, *, illusion_mode="pve", now=None):
     """属性来自当前阵容快照；怪物属性来自关卡修正，绝不读取录制账号。"""
+    # 延迟导入：exclusive_artifact 顶层已导入 battle，避免循环依赖。
+    from . import exclusive_artifact
+    exclusive_bonuses = exclusive_artifact.combat_bonuses(save, config)
     fields = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))
     generals = {pb_get_varint(v, 2): v for n, w, v in fields if n == 1 and w == 2}
     attack, defense = {}, {}
@@ -287,6 +290,20 @@ def rosters(save, point, config, *, illusion_mode="pve", now=None):
                 unit[name] = max(1 if name != "def" else 0, unit[name]*(100-image[7])//100)
             unit.update(cid=image[8], advance=advance, skill=target["skillid"], gold_camp=image[6],
                         partner_skills=[target[f"gold{i}_will_skills_{image[i]}"] for i in range(1, 4) if image[i]])
+        # 专属神器/器灵/套装加成挂在伙伴 IID 上，幻化替换 cid 后仍按原 IID 生效。
+        bonus = exclusive_bonuses.get(iid)
+        if bonus:
+            general_row = config["general"][str(unit["cid"])]
+            for name, value in bonus["fixed"].items():
+                unit[name] = unit.get(name, 0) + int(value)
+            for name, value in bonus["percent"].items():
+                unit[name] += int(general_base(general_row, name, unit["level"], unit["advance"], config) * value)
+            for name, value in bonus["rates"].items():
+                unit["pet_rates"][name] = unit["pet_rates"].get(name, 0) + value
+            unit["flat_out"] += bonus["flat"][0]
+            unit["flat_in"] += bonus["flat"][1]
+            if bonus["skills"]:
+                unit["exclusive_skills"] = bonus["skills"]
         attack[POSITIONS[index - 1]] = unit
     if not attack:
         raise ValueError("没有上阵武将")
@@ -432,6 +449,14 @@ def _prepare_teams(teams, config):
                 allowed = {row[kind + "_activated"] for row in config["treasure2_star"].values() for kind in ("horse", "treasure")}
                 if not isinstance(extra, (list, tuple)) or len(extra) > 12 or any(type(pid) is not int or pid not in allowed or pid == 0 for pid in extra):
                     raise ValueError("宝物升星战斗被动无效")
+                ids.update(extra)
+            extra = unit.get("exclusive_skills", ())
+            if extra:
+                from . import exclusive_artifact
+                allowed = exclusive_artifact.skill_ids(config)
+                if (not isinstance(extra, (list, tuple)) or len(extra) > exclusive_artifact.MAX_COMBAT_SKILLS
+                        or any(type(pid) is not int or pid not in allowed or pid == 0 for pid in extra)):
+                    raise ValueError("专属神器战斗技能无效")
                 ids.update(extra)
             rows = [config["breakskill"][str(pid)] for pid in sorted(ids)]
             initial_ap = unit.get("initial_ap", 2)

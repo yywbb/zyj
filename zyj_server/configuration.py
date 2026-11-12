@@ -96,6 +96,12 @@ def apply_overrides(name, data, overrides):
         for key in ("113", "370", "371", "372", "387", "388", "405", "406", "407", "408", "409", "410", "411",
                     "450", "451", "611", "612", "613", "614", "615", "616", "617", "618", "664", "665"):
             data[key]["level"] = 1
+    if name == "guide_section":
+        # S113 原版在 130 级升级时弹出专属神器说明；本地入口已按 1 级开放，
+        # 改在首次升级（1→2）触发，避免说明永远等不到 130 级。S114–S119 是
+        # trigger=first，随 build611–618 的 1 级开放由原生 NewSystem 触发，不改条件。
+        if "113" in data:
+            data["113"]["condition"] = "2"
     if name == "treasure2_fragment":
         for row in data.values():
             row["default"] = 1
@@ -142,7 +148,7 @@ def iter_config_bytes(config_path):
             if name.startswith("._"):
                 continue
             raw = archive.read(entry)
-            if name in overrides or name in ("continue7_X1", "activity_time", "build", "treasure2_fragment", "props", "exchange_shop"):
+            if name in overrides or name in ("continue7_X1", "activity_time", "build", "guide_section", "treasure2_fragment", "props", "exchange_shop"):
                 raw = json.dumps(apply_overrides(name, json.loads(raw), overrides), ensure_ascii=False).encode("utf-8")
             yield name + ".json", raw
 
