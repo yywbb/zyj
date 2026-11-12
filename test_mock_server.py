@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import mock_server as server
 import build_local_apk as apk_builder
-from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, fashion, formation, guide, mieshendian, pets, player, protocol, qiankun, ranking, recharge, recruit, replay, rob, secret_shop, shop, training, welfare
+from zyj_server import accounts, activities, battle, blackmarket, daily_events, development, diagnostics, fashion, formation, guide, illusion, mieshendian, pets, player, protocol, qiankun, ranking, recharge, recruit, replay, rob, secret_shop, shop, training, welfare
 from zyj_server.session import Session
 
 
@@ -313,6 +313,7 @@ class ReplayRoutingTests(unittest.TestCase):
             saved = json.loads(self.save_path.read_text())
             body = daily_events.rewrite_periods(welfare.rewrite_activities(bytes.fromhex(expected)), saved,
                                                self.role_config, int(self.clock.return_value))
+            body = illusion.rewrite_activities(body, saved, self.role_config, int(self.clock.return_value))
             state = json.loads(self.save_path.with_name("rankings.json").read_text())
             self.assertEqual(bytes.fromhex(actual), ranking.rewrite_activities(body, state, self.role_config, int(self.clock.return_value)))
         elif opcode == 3210:

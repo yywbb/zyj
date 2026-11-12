@@ -403,6 +403,151 @@ class IllusionTests(unittest.TestCase):
     def task_ids(self, cycle):
         return sorted(int(key) for key in self.config[f"illusion_task_{cycle}"])
 
+    def activity_entries(self, body):
+        groups = dict(protocol.get_comb_messages(body))
+        statuses = {protocol.pb_get_varint(row, 1): protocol.pb_get_varint(row, 2)
+                    for n, w, row in protocol.iter_pb_fields(groups[1]) if (n, w) == (1, 2)}
+        values = protocol.parse_ids_pb(groups[2])
+        return statuses, {values[i]: values[i+1:i+3] for i in range(0, len(values), 3)}
+
+    def test_activity_entry_opens_at_65_without_granting_images(self):
+        self.account_age(1)
+        for level, has_role, guide_status, expected in ((64, True, 2, 0), (65, True, 2, 1),
+                                                       (65, False, 2, 0), (65, True, 1, 0)):
+            with self.subTest(level=level, has_role=has_role, guide_status=guide_status):
+                self.save["role_state"]["level"] = level
+                self.save["has_role"] = has_role
+                self.save["guide"]["sections"]["1"]["status"] = guide_status
+                statuses, periods = self.activity_entries(self.success(1, 2000))
+                self.refresh()
+                self.assertEqual([statuses[mid] for mid in (175, 176, 177)], [expected] * 3)
+                self.assertEqual([periods[mid] for mid in (175, 176, 177)], [[1, 1]] * 3)
+                self.assertNotIn("illusion_state", self.save)
+
+    def test_activity_entry_periods_match_reward_pages_and_initialization(self):
+        for day in (1, 4, 7, 8, 28, 29, 10000):
+            with self.subTest(day=day):
+                self.account_age(day)
+                statuses, periods = self.activity_entries(self.success(1, 2000))
+                self.assertEqual([statuses[mid] for mid in (175, 176, 177)], [1] * 3)
+                self.assertEqual(periods[175], [1, min(day, 4)])
+                self.assertEqual(periods[176], periods[175])
+                self.assertEqual(periods[177], [(min(day, 28)-1)//7+1, (min(day, 28)-1)%7+1])
+                self.assertEqual(protocol.parse_ids_pb(self.success(1, 8113))[0::3],
+                                 self.gift_ids("illusion_present_time_x1", periods[175][1]))
+                self.assertEqual(protocol.parse_ids_pb(self.success(1, 8117))[0::3], self.task_ids(periods[177][0]))
+        raw = next(raw for ids, raw in self.store.tables[1] if 8110 in ids and 2000 in ids)
+        player.save_role(self.sessions[1].save, self.store.path(1), self.store.step_counts)
+        messages = dict(protocol.get_comb_messages(self.success(1, 999900, raw=raw)))
+        self.assertEqual(self.activity_entries(messages[2000]), self.activity_entries(self.success(1, 2000)))
+
+    def test_activity_entry_rewrite_preserves_unrelated_rows_envelopes_and_unknown_fields(self):
+        self.account_age(8)
+        rows = {mid: illusion.ids_body([mid]) + protocol.encode_pb_field(2, 0, 0)
+                + protocol.encode_pb_field(9, 2, b"row") for mid in (175, 176, 177, 999)}
+        groups = {1: b"".join(protocol.encode_pb_field(1, 2, row) for row in rows.values()),
+                  2: illusion.ids_body([177, 9, 99, 999, 8, 9, 175, 9, 99]) + protocol.encode_pb_field(8, 2, b"period"),
+                  3: b"untouched"}
+        body = b"".join(protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, mid)
+                        + protocol.encode_pb_field(2, 2, raw) + protocol.encode_pb_field(9, 0, 42))
+                        for mid, raw in groups.items()) + protocol.encode_pb_field(7, 2, b"outer")
+        before = copy.deepcopy(self.save)
+        result = illusion.rewrite_activities(body, self.save, self.config, self.now)
+        self.assertEqual(self.save, before)
+        self.assertEqual(result, illusion.rewrite_activities(result, self.save, self.config, self.now))
+        actual = dict(protocol.get_comb_messages(result))
+        self.assertEqual(actual[3], groups[3])
+        self.assertEqual(formation.records(actual[1], 1, 1),
+                         {mid: protocol.pb_set_varint(row, 2, int(mid != 999)) for mid, row in rows.items()})
+        self.assertEqual(protocol.parse_ids_pb(actual[2]), [999, 8, 9, 175, 1, 4, 176, 1, 4, 177, 2, 1])
+        self.assertIn((8, 2, b"period"), list(protocol.iter_pb_fields(actual[2])))
+        self.assertIn((7, 2, b"outer"), list(protocol.iter_pb_fields(result)))
+        for n, w, raw in protocol.iter_pb_fields(result):
+            if (n, w) == (1, 2):
+                self.assertEqual(protocol.pb_get_varint(raw, 9), 42)
+        added = illusion.rewrite_activities(b"", self.save, self.config, self.now)
+        self.assertEqual(self.activity_entries(added), ({175: 1, 176: 1, 177: 1},
+                                                       {175: [1, 4], 176: [1, 4], 177: [2, 1]}))
+        broken = protocol.encode_pb_field(1, 2, protocol.encode_pb_field(1, 0, 2)
+                                          + protocol.encode_pb_field(2, 2, illusion.ids_body([177, 1])))
+        with self.assertRaisesRegex(ValueError, "三值组"):
+            illusion.rewrite_activities(broken, self.save, self.config, self.now)
+
+    def test_activity_entry_respects_switch_and_future_creation_without_mutating_state(self):
+        self.account_age(1)
+        self.config["build"]["600"]["switch"] = 0
+        before = copy.deepcopy(self.save)
+        statuses, _ = self.activity_entries(illusion.rewrite_activities(b"", self.save, self.config, self.now))
+        self.assertEqual(statuses, {175: 0, 176: 1, 177: 1})
+        self.assertEqual(self.save, before)
+        self.save["created_at"] = self.now + illusion.DAY
+        before = copy.deepcopy(self.save)
+        statuses, periods = self.activity_entries(illusion.rewrite_activities(b"", self.save, self.config, self.now))
+        self.assertEqual(statuses, {175: 0, 176: 0, 177: 0})
+        self.assertEqual(periods, {175: [0, 0], 176: [0, 0], 177: [0, 0]})
+        self.assertEqual(self.save, before)
+
+    def test_activity_claim_save_failure_keeps_costs_rewards_and_ledger_atomic(self):
+        self.account_age(1)
+        self.success(1, 2000); self.refresh()
+        for task_id in (1, 4):
+            with self.subTest(task_id=task_id):
+                before, disk = copy.deepcopy(self.save), self.store.path(1).read_bytes()
+                with patch.object(player, "save_role", return_value=False), self.assertRaises(OSError):
+                    self.request(1, 8118, values=[task_id])
+                self.assertEqual((self.sessions[1].save, self.store.path(1).read_bytes()), (before, disk))
+                self.success(1, 8118, values=[task_id]); self.refresh()
+                ledger = copy.deepcopy(self.save["illusion_state"])
+                self.success(1, 2000); self.refresh()
+                self.assertEqual(self.save["illusion_state"], ledger)
+                self.assert_rejected(8118, values=[task_id])
+
+    def test_native_activity_entry_queries_claim_and_illusion_list_form_one_path(self):
+        from lupa.lua51 import LuaRuntime
+        self.account_age(1)
+        lua = self.network_lua(native_protobuf=True)
+        code = self.client_scripts()["assets/scripts/gamedata.so"].decode()
+        for name in ("ActivityStatusData", "ActivityStatus", "DailyCpActivityTimeStatus", "illusionData"):
+            start = code.index("function gamedata." + name + "(")
+            lua.execute(code[start:code.index("\nfunction ", start+1)].encode())
+        lua.execute(b'gamedata.cache.activitystatus={};gamedata.cache.dailyCpActivityTimeStatus={};gamedata.cache.illusion={};require("GameActivityQuery");require("GameIllusion")')
+        entry = self.client_call(lua, 1, "UIActivityQueryCallBack", "NetActivityQueryCallBack", {"page": 5})
+        ui = LuaRuntime(encoding=None)
+        def native(value):
+            if isinstance(value, dict) or hasattr(value, "items"):
+                return ui.table_from({native(k): native(v) for k, v in value.items()})
+            return value.encode() if isinstance(value, str) else value
+        ui.globals().gamedata = ui.table_from({b"config": native(self.config)})
+        ui.globals().entry = native(entry)
+        ui.execute(b'''print=function() end;printT=print
+            table.merge=function(a,b) local r={} for k,v in pairs(a) do r[k]=v end for k,v in pairs(b) do r[k]=v end return r end
+            activity={realPageTable={},presentPage=1,pageTable1={},pageTable5={}}
+            deviceApi={channel="local"};local module={clear=function() end}
+            activity.pageTable1[177]={module=module};activity.pageTable5[175]={module=module};activity.pageTable5[176]={module=module}''')
+        code = self.client_scripts()["assets/scripts/Layer_activity.so"].decode()
+        start = code.index("function activity.setActivityData(")
+        ui.execute(code[start:code.index("\nfunction ", start+1)].encode())
+        ui.execute(b'''for _,page in ipairs({1,5}) do
+            activity.type=page;activity:setActivityData(entry)
+            assert(#activity.realPageTable==(page==1 and 1 or 2))
+        end''')
+        for send, receive, expected in (("UIIllusionActivityQueryCallBack", "NetIllusionActivityQueryCallBack", 8),
+                                         ("UIIllusionActivityQueryX1CallBack", "NetIllusionActivityQueryX1CallBack", 8)):
+            reply = self.client_call(lua, 1, send, receive, {})
+            self.assertEqual(len(reply[b"giftdata"]), expected)
+        tasks = self.client_call(lua, 1, "UIIllusionActivityTaskQueryCallBack", "NetIllusionActivityTaskQueryCallBack", {})
+        self.assertEqual([row[b"id"] for _, row in tasks[b"task"].items()], self.task_ids(1))
+        gold = self.sessions[1].save["role_state"]["gold"]
+        self.client_call(lua, 1, "UIIllusionActivityTaskRewardCallBack", "NetIllusionActivityTaskRewardCallBack", {"id": 1})
+        self.refresh()
+        self.assertEqual(self.save["role_state"]["gold"], gold)
+        self.assertIsNotNone(lua.globals().gamedata[b"cache"][b"illusion"][200503])
+        result = self.client_call(lua, 1, "UIIllusionQueryCallBack", "NetIllusionQueryCallBack", {})
+        self.assertEqual(result[b"data"][1][b"cid"], 200503)
+        self.reconnect(); self.refresh()
+        self.assertEqual(protocol.parse_ids_pb(self.success(1, 8110))[:2], [200503, 0])
+        self.assert_rejected(8118, values=[1])
+
     def test_activity_pages_are_read_only_and_report_configured_rows(self):
         self.account_age(1)
         self.assertEqual(self.gen(self.iid), self.gen(self.iid))
@@ -508,4 +653,3 @@ class IllusionTests(unittest.TestCase):
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 8113)), [])
         self.assertEqual(protocol.parse_ids_pb(self.success(1, 8117)), [])
         self.assert_rejected(8118, values=[1])
-

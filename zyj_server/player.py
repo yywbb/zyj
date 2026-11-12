@@ -945,6 +945,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
     elif opcode == 2000:
         body = welfare.rewrite_activities(body)
         body = daily_events.rewrite_periods(body, save, role_config, now)
+        body = illusion.rewrite_activities(body, save, role_config, now)
     elif opcode in activities.OPCODES:
         body = activities.prepare_response(opcode, save, request_body, role_config, now)
         if opcode == 5031:
