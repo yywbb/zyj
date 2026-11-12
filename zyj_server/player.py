@@ -554,6 +554,8 @@ def record_copy_box(save, request_body, role_config):
 
 def apply_reward(save, body, role_config, now=None):
     state = get_role_state(save, role_config)
+    # 按件奖励（装备/战魂/魔符）一次合并进 1002，避免每条实例都重扫整份存档。
+    slot_updates = []
     for field, wire, value in iter_pb_fields(body):
         if field in (1, 2, 3, 4) and wire == 0:
             name = {1: "coin", 2: "gold", 3: "stamina", 4: "energy"}[field]
@@ -596,18 +598,20 @@ def apply_reward(save, body, role_config, now=None):
                     else:
                         change_item_count(save, cid, count if field == 5 else -count, role_config, now)
         elif field == 6 and wire == 2:
-            record_slot_update(save, encode_pb_field(2, 2, value))
+            slot_updates.append(encode_pb_field(2, 2, value))
         elif field == 7 and wire == 2:
             for n, w, soul in iter_pb_fields(value):
                 if n == 1 and w == 2:
-                    record_slot_update(save, encode_pb_field(3, 2, soul))
+                    slot_updates.append(encode_pb_field(3, 2, soul))
         elif field == 11 and wire == 2:
-            record_slot_update(save, encode_pb_field(7, 2, value))
+            slot_updates.append(encode_pb_field(7, 2, value))
         elif field == 8 and wire == 2:
             record_protagonist_general(save, value)
             record_slot_update(save, encode_pb_field(1, 2, value))
         elif field == 18 and wire == 2:
             illusion.receive_reward(save, value, role_config, int(time.time()) if now is None else now)
+    if slot_updates:
+        record_slot_update(save, b"".join(slot_updates))
 
 
 def record_protagonist_general(save, general):

@@ -12,6 +12,20 @@ CLAIM_OPCODES = (3611, 2411, 5040)
 BEGIN_REWARDS = (*range(80001, 80015), 80030)
 LIVENESS_TASKS = (1, 3, 7, 8, 9, 11, 14, 16, 17, 20, 22, 23, 25, 27, 35, 37, 43, 48, 50)
 HINT_IDS = (40, *range(82, 110), 542, 30, 32, 36, 132, 245, 252, 429, 551, 44)
+# 装备/战魂/魔符按件生成实例，一次发放过多会撑大 1002 回包与存档（客户端魔符库存有限）。
+MAX_UNIT_REWARDS = 200
+UNIT_REWARD_TABLES = ("equip", "soul", "sigil")
+# 与 build_reward 的分支优先级保持一致：命中这些表的 CID 是可堆叠道具或由 recruit 单独路由，不生成实例。
+STACKABLE_CIDS = (1000, 1001, 1002, 1003, 1004, 1005, 1008, 1009, 1019, 1025, 1044, 1045, 70000)
+STACKABLE_TABLES = ("props", "general_fragment", "treasure2_fragment", "equip_fragment", "pet3_fragment",
+                    "redl_awake_item", "fashioncoat", "trump_gem", "token", "token_fragment", "exclusive")
+ROUTED_TABLES = ("general", "illusion", "pet3_attr")
+
+
+def is_unit_reward(cid, config):
+    if cid in STACKABLE_CIDS or any(str(cid) in config.get(name, {}) for name in (*STACKABLE_TABLES, *ROUTED_TABLES)):
+        return False
+    return any(str(cid) in config.get(name, {}) for name in UNIT_REWARD_TABLES)
 
 
 def get_state(save):
@@ -110,7 +124,28 @@ def _equipment(save):
     return equipment
 
 
+def unit_reward_count(specification, config, quantity=1):
+    """统计会按件生成实例的奖励数量，供领取与 GM 发邮件共用预检。"""
+    total = 0
+    for entry in specification.split(";"):
+        if not entry:
+            continue
+        cid, count = map(int, entry.split(","))
+        if is_unit_reward(cid, config):
+            total += count * quantity
+    return total
+
+
+def check_unit_reward_count(specification, config, quantity=1):
+    total = unit_reward_count(specification, config, quantity)
+    if total > MAX_UNIT_REWARDS:
+        raise ValueError(f"单次奖励的魔符/战魂/装备共 {total} 件，超过 {MAX_UNIT_REWARDS} 件上限，请分批领取")
+    return total
+
+
 def build_reward(save, specification, config, quantity=1):
+    """按件奖励在生成实例前预检总量，避免一次发放撑大 1002 回包与存档。"""
+    check_unit_reward_count(specification, config, quantity)
     coin, gold, stamina, energy, props, equipment = 0, 0, 0, 0, [], []
     souls, gems = [], []
     roster = list(iter_pb_fields(bytes.fromhex(save["world_state"]["1002"])))

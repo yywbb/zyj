@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 
-from .. import activity_copy, cheer, formation, player, qiankun, storage, training
+from .. import activities, activity_copy, cheer, formation, player, qiankun, storage, training
 from ..protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
 from ..session import Session
 from . import views
@@ -612,6 +612,13 @@ class Workbench:
             if count > 0:
                 attachments[str(cid)] = attachments.get(str(cid), 0) + count
 
+        # 魔符/战魂/装备按件生成实例，一次发太多会让领取端生成超大回包并长期占满连接线程。
+        unit_total = activities.unit_reward_count(
+            ";".join(f"{cid},{count}" for cid, count in attachments.items()),
+            self.accounts.role_config)
+        if unit_total > activities.MAX_UNIT_REWARDS:
+            raise ValueError(f"单封邮件的魔符/战魂/装备共 {unit_total} 件，"
+                             f"超过 {activities.MAX_UNIT_REWARDS} 件上限，请分批发送")
         mail_path = self.accounts.save_path.with_name("mails.json")
         details = {
             "target": target or "all",
