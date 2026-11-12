@@ -4,7 +4,7 @@ import random
 import time
 
 from . import activities
-from .protocol import encode_pb_field, iter_pb_fields, pb_get_varint, pb_set_field
+from .protocol import encode_pb_field, get_comb_messages, iter_pb_fields, pb_get_varint, pb_set_field, pb_set_varint
 
 QUERIES = (8110, 8113, 8115, 8117, 8252)
 MUTATIONS = (8111, 8112, 7021, 8114, 8116, 8118)
@@ -161,6 +161,43 @@ def period(save, config, now, activity_id):
     span = int(row["continued_time"]) or 1
     settled = min(day, span * (int(row["rounds"]) or 1))
     return (settled - 1) // span + 1, (settled - 1) % span + 1
+
+
+def rewrite_activities(body, save, config, now):
+    """2000 与幻化领奖共用周期；只替换三个入口，保留其他活动和未知字段。"""
+    from . import player
+    groups = dict(get_comb_messages(body))
+    periods = {mid: period(save, config, now, mid) for mid in (175, 176, 177)}
+    statuses = groups.get(1, b"")
+    for mid, (cycle, _) in periods.items():
+        build = config["build"][str(config["activity_time"][str(mid)]["systemid"])]
+        opened = (save.get("has_role") and cycle and build["switch"] == 1
+                  and save["role_state"]["level"] >= build["level"]
+                  and save.get("guide", {}).get("sections", {}).get("1", {}).get("status") == 2)
+        row = next((v for n, w, v in iter_pb_fields(statuses)
+                    if (n, w) == (1, 2) and pb_get_varint(v, 1) == mid), b"")
+        row = pb_set_varint(pb_set_varint(row, 1, mid), 2, int(bool(opened)))
+        statuses = player.merge_pb_records(statuses, encode_pb_field(1, 2, row), {1: 1})
+    groups[1] = statuses
+    fields = list(iter_pb_fields(groups.get(2, b"")))
+    values = [v for n, w, v in fields if (n, w) == (1, 0)]
+    if len(values) % 3:
+        raise ValueError("活动期次列表缺少完整的三值组")
+    groups[2] = (ids_body(v for i in range(0, len(values), 3) if values[i] not in periods for v in values[i:i+3])
+                 + ids_body(v for mid, current in periods.items() for v in (mid, *current))
+                 + b"".join(encode_pb_field(n, w, v) for n, w, v in fields if (n, w) != (1, 0)))
+    out, written = bytearray(), set()
+    for n, w, value in iter_pb_fields(body):
+        if (n, w) == (1, 2):
+            mid = pb_get_varint(value, 1)
+            if mid in (1, 2):
+                value = pb_set_field(value, 2, 2, groups[mid])
+                written.add(mid)
+        out.extend(encode_pb_field(n, w, value))
+    for mid in (1, 2):
+        if mid not in written:
+            out.extend(encode_pb_field(1, 2, encode_pb_field(1, 0, mid) + encode_pb_field(2, 2, groups[mid])))
+    return bytes(out)
 
 
 def gift_rows(config, table, position):
