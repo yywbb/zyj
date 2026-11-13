@@ -3865,12 +3865,16 @@ def patch_artifact_scripts(patched):
     end = code.index("\nfunction ", start+1)
     marker = "    gamedata:SlotInfoProcess(info)\n"
     assert code[start:end].count(marker) == 1
-    part = code[start:end].replace(marker, "    gamedata.cache.artifacts={}\n"+marker)
+    part = code[start:end].replace(marker, "    gamedata.cache.artifacts={}\n    gamedata.cache.jewels={}\n"+marker)
     put("GameSlots", code[:start]+part+code[end:])
     code = load("GameErrorMessage", "common_lua")
     marker = "    local error = initPb(ids_pb, fd)\n"
     assert code.count(marker) == 1
-    put("GameErrorMessage", code.replace(marker, marker+"    if LocalArtifactError then LocalArtifactError(error.ids[1]) end\n"), "common_lua")
+    code = code.replace(marker, marker+"    if LocalArtifactError and fd.ser~=0 then LocalArtifactError(error.ids[1],fd.ser) end\n")
+    marker = "gamedata.ext.localFormationBusy.opcode == error.ids[1] then"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "gamedata.ext.localFormationBusy.opcode == error.ids[1] and not gamedata.ext.localArtifactBusy then")
+    put("GameErrorMessage", code, "common_lua")
 
     for name, prefix, methods in (
         ("Layer_artifactCreate", "artifactCreate", ("init", "clear")),
@@ -3890,6 +3894,10 @@ def patch_artifact_scripts(patched):
         if prefix == "artifactCreate":
             code = block(code, prefix, "castSuccess", lambda p: guarded(p, animation=True, condition=' or self.selectpage~="cast"'))
             code = block(code, prefix, "setBtnFuncs", guarded)
+            marker = "        local executeFunc = function ( )\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, '        local artifactView=LocalArtifactContext()\n'+marker+
+                                '            if not LocalArtifactMatch(artifactView,"artifactCreate") then return end\n')
             marker = "    self.rootItems.startbutton:addHandleOfControlEvent(function()\n"
             assert code.count(marker) == 1
             start = code.index(marker)
@@ -3913,6 +3921,8 @@ def patch_artifact_scripts(patched):
         elif prefix == "artifactSelect":
             for method in ("setNormal", "setDetail", "createList"):
                 code = block(code, prefix, method, guarded)
+            code = block(code, prefix, "consumeStatus", lambda p: p.replace(
+                "if artifact.level1 > 0 then", "if artifact.level1 > 0 or (artifact.levelProbs or 0)>0 then"))
         elif prefix in ("onceCreateArtifact", "onceCheckup"):
             code = block(code, prefix, "open", guarded)
         if prefix == "slotsInfo":
@@ -3920,6 +3930,119 @@ def patch_artifact_scripts(patched):
             assert code.count(marker) == 1
             code = code.replace(marker, '                    local artifactView=LocalArtifactContext()\n'+marker+'                        if not LocalArtifactMatch(artifactView,"slotsInfo") then return end\n')
         put(name, code)
+    code = load("gamedata")
+    marker = "        resonanceSkillNum = data[33] and data[33].i or 0,"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker+"\n        localRevision = data[34] and data[34].i or 0,")
+    def artifact_data(part):
+        for index in (16, 17, 18):
+            part = part.replace(f"math.floor(tonumber(data[{index}].s))", f"tonumber(data[{index}].s)")
+        marker = "    return result\n"
+        assert part.count(marker) == 1
+        return part.replace(marker, '''    for i=1,3 do
+        if result["skill"..i]>0 and result["skillHole"..i]<=0 then result["skillHole"..i]=1 end
+        if result["skillHoleProbs"..i]==0 then
+            result["skillHoleProbs"..i]=tonumber(self.config.trump_config["skill_success_"..i].value)*100
+        end
+    end
+'''+marker)
+    code = block(code, "gamedata", "artifactData", artifact_data)
+    put("gamedata", code)
+
+    # 新页面沿用原生控件；确认窗、选择窗和动画均拒绝旧页面/旧目标。
+    for name, prefix, lifecycle in (
+        ("Layer_artifactStrengthen", "artifactStrengthen", ("init", "clear")),
+        ("Layer_artifactWash", "artifactWash", ("init", "clear")),
+        ("Layer_artifactMount", "artifactMount", ("init", "clear")),
+        ("Layer_artifactSkillSwop", "artifactSkillSwop", ("init", "clear")),
+        ("Layer_artifactSkillStrengthen", "artifactSkillStrengthen", ("init", "clear")),
+        ("window_onceRecoin", "onceRecoin", ("open", "close")),
+        ("window_onceAddStrengthen", "onceAddStrengthen", ("open", "close")),
+        ("window_artifactOpenPos", "artifactOpenPos", ("open", "close")),
+        ("window_jewelSelect", "jewelSelect", ("open", "close")),
+        ("window_jewelUp", "jewelUp", ("open", "close")),
+        ("window_jewelInfo", "jewelInfo", ("open", "close")),
+        ("window_artifactSkillUp", "artifactSkillUp", ("open", "close")),
+        ("window_artifactWashConfirm", "confirm", ("open", "close")),
+    ):
+        code = load(name)
+        for method in lifecycle:
+            code = block(code, prefix, method, generation)
+        methods = re.findall(rf"^function {prefix}[.](\w+)\(self\b", code, re.MULTILINE)
+        for method in methods:
+            if method == "close" or method == "clear":
+                continue
+            part_start = code.index(f"function {prefix}.{method}(")
+            part_end = code.find("\nfunction ", part_start+1)
+            if part_end == -1:
+                part_end = code.index(f"\nreturn {prefix}", part_start)
+            if "function(" in code[part_start:part_end] or re.search(r"function\s+\(", code[part_start:part_end]):
+                code = block(code, prefix, method, guarded)
+
+        def confirm_guard(match):
+            indent, variable, signature = match.groups()
+            view_name = "artifactWashConfirm" if prefix == "confirm" else prefix
+            return (f"{indent}local {variable}View=LocalArtifactContext()\n"
+                    f"{indent}local {variable} = {signature}\n"
+                    f'{indent}    if not LocalArtifactMatch({variable}View,"{view_name}") then return end\n')
+        code = re.sub(r"(?m)^([ \t]*)local (\w+)\s*=\s*(function\s*\([^\n]*\))\s*\n", confirm_guard, code)
+        if prefix == "artifactSkillUp":
+            code = code.replace("local cof2 = gamedata.config.trump_skillRnd", "local cof2 = gamedata.config.trump_washing_skill")
+            start = code.index("    local cofList = ui.getIDRandNums(")
+            end = code.index("\nend", start)
+            code = code[:start]+'''    self.castTable = {}
+    self.isCanLevelup = false
+    if skillConfig and skillConfig.quality==5 and nextSkillId then
+        self.castTable=ui.getIDandNUMs(gamedata.config.trump_config.skill_cost_5.value)
+        local cids={}
+        for _,v in ipairs(self.castTable) do cids[#cids+1]=v.cid end
+        UIRequest({type=12001,order=32003,cids=cids})
+    end
+'''+code[end:]
+            code = code.replace("self.rootItems.itemNode2:removeFromParentAndCleanup(true)", "self.rootItems.itemNode2:removeAllChildrenWithCleanup(true)")
+        if prefix == "artifactStrengthen":
+            for index in (1, 2, 3):
+                code = code.replace(f"math.floor((nextCof.attr{index}Value * self.data.attr1)/100)",
+                                    f"((nextCof.attr{index}Value * self.data.attr1)/100)")
+        put(name, code)
+
+    code = load("window_artifactInfo")
+    marker = '                        runGamePrompt({msg = "功能未开启，敬请期待！"})'
+    assert code.count(marker) == 1
+    code = code.replace(marker, '                        gameWindows:openWindow("artifactSkillUp",{data=self.data,pos=i})')
+    marker = "    self.data = data\n    self:setcell(self.scrollItems);"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "    self.data = data\n    self.rootItems.score:setString(data.score)\n    self:setcell(self.scrollItems);")
+    put("window_artifactInfo", code)
+    code = load("Layer_qiankunlu")
+    for method in ("init", "clear"):
+        code = block(code, "Layer_qiankunlu", method, generation)
+    code = block(code, "Layer_qiankunlu", "chongshengartifactSortfun", lambda p: p.replace(
+        "if v.level1 > 0 then", "if v.level1 > 0 or (v.levelProbs or 0)>0 then").replace(
+        'if v["jewel"..i] == 0 then', 'if v["jewel"..i] >= 0 then').replace(
+        "if kaikongNum > 1 then", "if kaikongNum > 1 or (v.jewel1 or 0)>0 then"))
+    marker = '''                local callback = function()
+                    UIRequest({type=5520,iid = ids[1], gold = self.allspendgold})
+                end'''
+    assert code.count(marker) == 1
+    code = code.replace(marker, '''                local artifactView=LocalArtifactContext()
+                local callback = function()
+                    if not LocalArtifactMatch(artifactView,"qiankunlu") then return end
+                    UIRequest({type=5520,iid = ids[1], gold = self.allspendgold,artifactView=artifactView})
+                end''')
+    def rebirth_animation(part):
+        return re.sub(r"(function\s*\([^)]*\)\s*\n)", r'\1        if artifactView and not LocalArtifactMatch(artifactView,"qiankunlu") then return end\n', part)
+    code = block(code, "Layer_qiankunlu", "reloadPageData", lambda p: rebirth_animation(p.replace(
+        "function Layer_qiankunlu.reloadPageData(self,data)\n",
+        "function Layer_qiankunlu.reloadPageData(self,data)\n    local artifactView=data and data.type==5520 and data.artifactView\n").replace(
+        "self:playEffectController()", "self:playEffectController(artifactView)").replace(
+        "UIRequest({type = 1001})", "if not artifactView then UIRequest({type = 1001}) end")))
+    code = block(code, "Layer_qiankunlu", "playEffectController", lambda p: rebirth_animation(p.replace(
+        "function Layer_qiankunlu.playEffectController( self )", "function Layer_qiankunlu.playEffectController( self,artifactView )").replace(
+        "self:playEffect(6,self.rootItems)", "self:playEffect(6,self.rootItems,artifactView)")))
+    code = block(code, "Layer_qiankunlu", "playEffect", lambda p: rebirth_animation(p.replace(
+        "function Layer_qiankunlu.playEffect( self, num ,Ttems)", "function Layer_qiankunlu.playEffect( self, num ,Ttems,artifactView)")))
+    put("Layer_qiankunlu", code)
     code = load("UIProps")
     for order, names in ((33009, ("artifactCreate",)), (33013, ("onceCheckup", "artifactCheck"))):
         marker = f"    elseif t.order == {order} then\n"
@@ -3935,6 +4058,23 @@ def patch_artifact_scripts(patched):
         if page then
             if name=="onceCheckup" or page.artifactSelect then page:checkPropNums(t.nums)
             else page.propNeed=t.nums end
+        end
+'''+code[end:]
+    for order, names in ((33016, ("artifactOpenPos",)), (33014, ("jewelUp", "artifactMount", "jewelInfo")),
+                         (32002, ("artifactWash",))):
+        start = code.index(f"    elseif t.order == {order} then\n")
+        end = code.index("    elseif ", start+1)
+        method = "setUpPropNum" if order == 32002 else "getUseIdNum"
+        code = code[:start]+f"    elseif t.order == {order} then\n        if not LocalArtifactFresh(t) then return end\n"+"".join(
+            f'        local page=LocalArtifactMatch(t.artifactView,"{name}")\n        if page then page:{method}(t.nums) end\n' for name in names)+code[end:]
+    start = code.index("    elseif t.order == 32003 then\n")
+    end = code.index("    elseif ", start+1)
+    code = code[:start]+'''    elseif t.order == 32003 then
+        if not LocalArtifactFresh(t) then return end
+        local name=t.artifactView and t.artifactView.property or "artifactInfo"
+        local page=LocalArtifactMatch(t.artifactView,name)
+        if page then
+            if name=="artifactSkillUp" then page:setUpPropNum(t.nums) else page:setPropNum(t.nums) end
         end
 '''+code[end:]
     put("UIProps", code)

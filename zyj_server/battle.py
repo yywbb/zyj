@@ -225,7 +225,8 @@ def rosters(save, point, config, *, illusion_mode="pve", now=None):
         worn = pb_get_varint(slot, 26) or 0
         if worn:
             data = artifact.values(artifacts[worn])
-            unit["artifact"] = {"cid": data[1], "level": data[13], "skills": [sid for sid in data[6:9] if sid]}
+            unit["artifact"] = {"cid": data[1], "level": data[13], "skills": [sid for sid in data[6:9] if sid],
+                                "stats_applied": True, "shield_damage": str(artifact.shield_damage(artifacts[worn], config))}
         mask = covers[index]
         if mask["level"]:
             unit.update(cover_l=mask["level"], cover_d=mask["value"], cover_p=mask["percent"], skill_resilience=mask["skill_resilience"])
@@ -487,6 +488,10 @@ def _prepare_teams(teams, config):
             unit["artifact_used"] = {}
             if "神降" in unit["artifact_effects"]:
                 unit["out_multiplier"] *= 1 + Fraction(str(unit["artifact_effects"]["神降"]["value"]))
+            if not (unit.get("artifact") or {}).get("stats_applied", False):
+                for row in unit["artifact_effects"].values():
+                    if row["type"] == 0:
+                        unit[row["attr"]] = unit.get(row["attr"], 0)+int(Fraction(str(row["value"])))
             unit["base"] = {name: unit.get(name, 0) for name in stats}
             for row in rows:
                 attr, code = row["attr"], row["type_param"] or row["id"]
@@ -933,8 +938,12 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
                 unit["hp"] += heal
                 event([dest(unit, m={"m": -heal, "f": 0, "u": "N", "U": 0})])
         absorbed = min(unit["cover_d"], int(max(0, amount) * Fraction(unit.get("cover_p", 0), 100))) if shield else 0
-        unit["cover_d"] -= absorbed
         amount -= absorbed
+        # 魔罩增伤宝石只额外消耗真实魔罩，不把增伤转移到生命伤害。
+        if absorbed and attacker:
+            absorbed += min(unit["cover_d"]-absorbed,
+                            int(absorbed*Fraction((attacker.get("artifact") or {}).get("shield_damage", "0"))))
+        unit["cover_d"] -= absorbed
         amount = max(- (unit["maxhp"] - unit["hp"]), min(unit["hp"], amount))
         if (amount == unit["hp"] and amount > 0 and 9000444 in unit["effects"] and not unit.get("last_stand")):
             unit["last_stand"] = True
@@ -2567,6 +2576,36 @@ def simulate(attack, defense, config, seed, *, attack_pet=None, defense_pet=None
             break
         for team in teams.values():
             for unit in living(team):
+                for name in ("聚气", "挣脱", "傲骨"):
+                    if name == "挣脱" and not (unit["dizzy"] or any(unit["states"].get(k, 0) > round_number for k in ("skilllock", "close"))):
+                        continue
+                    if name == "傲骨" and not (any(k[0] == "weaken" and k[1] in ("atk", "def") for k in unit["buffs"])
+                                             or any(k[2] in ("atk", "def") and v[0] < 0 for k, v in unit["passive_buffs"].items())):
+                        continue
+                    row = artifact_trigger(unit, name)
+                    if not row:
+                        continue
+                    changes = []
+                    if name == "聚气":
+                        changes.append(change_ap(unit, int(row["value2"])))
+                    elif name == "挣脱":
+                        if unit["dizzy"]:
+                            unit["dizzy"] = False
+                            changes.append(dest(unit, m=[], u={"u": "dizzy", "w": False}))
+                        for kind in ("skilllock", "close"):
+                            if unit["states"].pop(kind, None) is not None:
+                                changes.append(state_event(unit, kind, False))
+                    else:
+                        for key in list(unit["buffs"]):
+                            if key[0] == "weaken" and key[1] in ("atk", "def"):
+                                del unit["buffs"][key]
+                                changes.append(dest(unit, B={"R": key[1], "u": "weaken", "w": False}))
+                        for key, (amount, until) in list(unit["passive_buffs"].items()):
+                            if key[2] in ("atk", "def") and amount < 0:
+                                del unit["passive_buffs"][key]
+                                changes.append(dest(unit, B={"R": key[2], "u": "weaken", "w": False}))
+                    # 沿用原生怒气/解除状态显示，不依赖未验证的专用动画。
+                    event(changes)
                 if unit.get("attack_immunity_until") == round_number:
                     if unit.get("attack_immunity") and not invincible_display(unit):
                         event([state_event(unit, "invincible", False)])

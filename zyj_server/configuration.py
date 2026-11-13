@@ -125,6 +125,9 @@ def apply_overrides(name, data, overrides):
     if name == "exchange_shop":
         # 本地常驻入口复用treasure_discount_x2/8原配方，不改招募概率。
         data["5"] = {"1": dict(data["1"]["1"], type=5, name="伙伴兑换", generals="11511,5;", target="11598,1;")}
+    if name == "trump_config":
+        # 本地开放已有橙→红后继；原表没有红→金神技，不新增配置。
+        data["skill_up_lv"]["value"] = "5"
     for row, changes in overrides.get(name, {}).items():
         if row not in data:
             raise ValueError(f"配置条目不存在: {name}/{row}")
@@ -148,7 +151,7 @@ def iter_config_bytes(config_path):
             if name.startswith("._"):
                 continue
             raw = archive.read(entry)
-            if name in overrides or name in ("continue7_X1", "activity_time", "build", "guide_section", "treasure2_fragment", "props", "exchange_shop"):
+            if name in overrides or name in ("continue7_X1", "activity_time", "build", "guide_section", "treasure2_fragment", "props", "exchange_shop", "trump_config"):
                 raw = json.dumps(apply_overrides(name, json.loads(raw), overrides), ensure_ascii=False).encode("utf-8")
             yield name + ".json", raw
 

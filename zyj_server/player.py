@@ -69,7 +69,9 @@ def load_role_config(config_path):
                              "month_welfare", "month_growup", "week_growup_1", "week_growup_2_1",
                              "week_growup_money_1", "week_growup_money_2_1", "recharge_gift_1",
                              "speedup_gift_time_x1", "speedup_gift", "treasure2_fragment", "equip_fragment", "loot", "exchange_shop",
-                             "trump", "trump_gem", "trump_config", "trump_autweight", "trump_timeweight", "trump_skillRnd", "trump_rank", "trump_numskill", "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
+                             "trump", "trump_gem", "trump_config", "trump_autweight", "trump_timeweight", "trump_skillRnd", "trump_rank", "trump_numskill",
+                             "trump_compose", "trump_strengthen", "trump_Godstrengthen", "trump_washing_skill", "trump_rebirth", "trump_transfer", "resonance_attribute",
+                             "toplevel", "combat_rank", "wing_rank", "copy_rank", "mozhao_rank", "friend_rank",
                              "combat_grow", "combat_grow_x1", "combat_grow_x2", "sigil_rank", "soul_rank", "artifact_rank", "localTrump_rank",
                              "pet3_fragment", "pet3_attr", "pet3_talentskill", "pet3_passiveskill", "pet3_illustrated", "trigger_gift2", "boss2", "boss2_rewards1", "boss2_rewards2", "mieshendian_monster_param", "mieshendian_condition", "mieshendian_attr",
                              "mieshendian_award", "mieshendian_reward", "mieshendian_shop", "blackmarket_items", "blackmarket_pos", "blackmarket_refresh",
@@ -732,9 +734,11 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
     elif opcode in artifact.OPCODES:
-        body, costs, update = artifact.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
+        body, costs, reward, update = artifact.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
         for cid, count in costs:
             change_item_count(save, cid, -count, role_config, now)
+        if reward:
+            apply_reward(save, reward, role_config, now)
         if update:
             record_slot_update(save, update)
     elif opcode in skytoken.OPCODES:
@@ -1395,6 +1399,8 @@ def save_response_group(packets, save, before, save_path, step_counts, role_conf
             packets.append(pack_frame(205, 0, power))
         packets.append(pack_frame(1001, 0, apply_role_state(bytes.fromhex(save["role_snapshot"]), save, now)))
     if packets and int.from_bytes(packets[0][8:12], "big") in artifact.MUTATIONS:
+        if int.from_bytes(packets[0][8:12], "big") in artifact.GROWTH:
+            packets.append(pack_frame(1002, 0, bytes.fromhex(save["world_state"]["1002"])))
         if not update:
             packets.append(pack_frame(1027, 0, bytes.fromhex(save["world_state"]["1002"])))
         if int.from_bytes(packets[0][8:12], "big") == 5503:

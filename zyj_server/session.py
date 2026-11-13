@@ -197,10 +197,6 @@ class Session:
         if opcode == 1401:
             return unavailable_response(opcode, seq, body, "本地服暂未开放此招募方式，请使用普通招募。")
 
-        # 8204 专属神器重生已按逐笔消耗记录接通；5520 普通神器重生仍受安全保护。
-        if opcode == 5520:
-            return unavailable_response(opcode, seq, body, "此高级养成没有完整消耗记录，安全保护：未扣款、未重生。")
-
         if opcode == 8301:
             return unavailable_response(opcode, seq, body, "伙伴升星重生尚未接通，未扣费、未重置星级。")
 
