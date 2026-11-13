@@ -373,6 +373,13 @@ def _graduate_general(save, iid, config, now):
     partner_growth.check_combat(raw, config)
     raw = partner_growth.power(save, before_raw, raw)
     player.apply_reward(save, encode_pb_field(8, 2, raw), config, now)
+    update, ex_power = exclusive_artifact.differences(save, save, config)
+    for n, w, v in iter_pb_fields(update):
+        if n == 1 and w == 2:
+            player.apply_reward(save, encode_pb_field(8, 2, v), config, now)
+    if ex_power:
+        save["role_state"]["power"] += ex_power
+        save["role_state"]["power_all"] += ex_power
     player.settle_self_stats(save, config)
 
 
