@@ -144,7 +144,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         {"revision": data.get("revision"), "backup_id": data.get("backup_id")},
                         lambda: accounts.maintain(account, data.get("action"), data.get("revision"), data.get("backup_id"))))
                 if not writing and len(parts) == 3:
-                    result = views.detail(accounts.snapshot(account), accounts.step_counts, accounts.role_config)
+                    result = views.detail(self.server.gm.live_snapshot(account), accounts.step_counts, accounts.role_config)
                     result["backups"] = accounts.backups(account)
                     return self._send(200, result)
                 if writing and parts[3:] == ["kick"]:

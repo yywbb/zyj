@@ -191,9 +191,13 @@ function renderPossessions(detail, account, heroes) {
   filters.append(button(heroes ? "邮件发放武将" : "邮件发放物品", () => {
     $("mail-catalog-kind").value = heroes ? "武将" : ""; $("mail-catalog-query").value = ""; location.hash = `mails/${account.id}`;
   }));
-  const locked = account.online || account.error || !account.has_role || (heroes && account.states.guide?.sections?.["1"]?.status !== 2);
-  detail.append(node("p", account.online ? "玩家在线，退出游戏后可管理物品与武将。" : heroes
-    ? `武将等级上限 ${account.general_level_cap}，已开放 ${account.slot_limit} 个阵位。管理需完成新手引导。` : "直接修正目标数量，填 0 清空该物品；所有变更自动备份并记录。", "help"), filters, results);
+  // 背包物品修正支持在线执行；武将/阵容类修正仍需离线，避免在线战斗状态与客户端缓存不一致。
+  const locked = account.error || !account.has_role || (heroes && (account.online || account.states.guide?.sections?.["1"]?.status !== 2));
+  const help = account.online
+    ? (heroes ? "玩家在线，退出游戏后可管理武将。" : "在线也可清理背包：以服务端在线会话的真实数量为准，保存后同步在线会话；游戏内需重进背包或重新登录才会刷新显示。")
+    : (heroes ? `武将等级上限 ${account.general_level_cap}，已开放 ${account.slot_limit} 个阵位。管理需完成新手引导。`
+      : "直接修正目标数量，填 0 清空该物品；所有变更自动备份并记录。");
+  detail.append(node("p", help, "help"), filters, results);
   function control(text, action, item, unavailable = false) {
     const b = button(text, () => openManagement(account, action, item));
     b.dataset.manageAction = ""; b.dataset.unavailable = locked || unavailable ? "true" : "false";
@@ -258,12 +262,14 @@ function openManagement(account, action, item) {
     }
   }
   $("manager-help").textContent = {
-    inventory: `当前数量 ${number(item.count)}。保存的是目标总量，不会触发道具使用或奖励效果。`,
+    inventory: `当前数量 ${number(item.count)}。保存的是目标总量，不会触发道具使用或奖励效果。${account.online ? "在线清理会同步在线会话，游戏内请重进背包或重新登录刷新显示。" : ""}`,
     "general-level": "GM 直接升级，不扣经验丹。按现有成长规则同步属性、潜力与战力，保留已有培养加成。",
     formation: "替换闲置武将继承阵位装备；移动已上阵武将会交换阵位及装备。主角必须留在阵中。",
     "remove-general": "移除此闲置武将及其培养进度，不返还材料或碎片。可通过本次操作的备份恢复。",
     "role-exp": "按现有升级规则累加角色经验：自动结算升级、每级银币/元宝奖励与体力精力上限，到达配置最高等级后停止。",
   }[action];
+  $("manager-note").textContent = account.online && action === "inventory"
+    ? "自动备份 · 在线会话同步生效，游戏内需刷新背包" : "自动备份 · 重登生效";
   $("manager").showModal();
 }
 
@@ -423,7 +429,9 @@ async function sendPlayerOperation() {
     }
     rememberPending(null);
     if (result.status === "failed") throw new Error(result.error || "此操作已失败，请重新填写。");
-    showOperationResult(node("h2", `账号 ${request.account} 操作成功`), node("p", result.audit_warning || "已保存。重登游戏后可看到最新资源与物品。"),
+    const notice = result.audit_warning || (result.online && result.action === "inventory"
+      ? "已保存在线会话并落盘；游戏内背包需重新进入或重新登录刷新显示。" : "已保存。重登游戏后可看到最新资源与物品。");
+    showOperationResult(node("h2", `账号 ${request.account} 操作成功`), node("p", notice),
       fields([["操作类型", info.actions[result.action] || result.action], ["操作编号", result.id], ["备份编号", result.backup_id]]), changeTable(result.changes),
       link("返回玩家档案", `#account/${request.account}/${request.data.action === "inventory" ? "inventory" : "roster"}`), document.createTextNode(" · "), link("查看此玩家记录", `#operations/${request.account}`));
     message(result.audit_warning || `账号 ${request.account}：管理操作已完成。`);

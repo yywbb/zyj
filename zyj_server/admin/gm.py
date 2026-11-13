@@ -1,6 +1,7 @@
 """本机玩家管理与操作流水；与登录共用离线锁，先记录意图再修改存档。
 
-资源与物品发放统一走系统邮件，这里只处理玩家档案页的离线修正操作。
+资源与物品发放统一走系统邮件，这里只处理玩家档案页的修正操作。
+背包物品修正（inventory）允许账号在线执行，其余武将/经验类修正仍要求离线。
 """
 
 import copy
@@ -27,6 +28,9 @@ TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"inventory": {"cid", "count"},
                   "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"},
                   "role-exp": {"exp"}}
+# 背包物品修正可以在线执行：以在线会话内存存档为源，原子落盘后同步会话。
+# 武将/阵容/经验修正涉及战斗属性与客户端阵型缓存，仍要求账号离线。
+ONLINE_ACTIONS = frozenset({"inventory"})
 COMMON_ITEMS = (20081, 20014, 20019, 20015, 20020, 20100, 20619, 20618, *training.EXP_PROPS)
 # 系统邮件附件数量上限：可堆叠道具/碎片 1 亿，武将/装备/战宠等实体 1000。
 # 两者都远低于服务端与协议的 int32 上限，避免一次发放把背包数量顶到溢出。
@@ -220,7 +224,7 @@ def catalog(config):
 
 
 def validate(data, items):
-    """只接受玩家档案页的离线修正操作；资源与物品发放请使用系统邮件。"""
+    """只接受玩家档案页的修正操作；资源与物品发放请使用系统邮件。"""
     if not isinstance(data, dict):
         raise ValueError("管理操作必须为对象")
     action = data.get("action")
@@ -344,8 +348,8 @@ def changes(before, after):
     return result
 
 
-def _copy_count_save(store, account, snapshot):
-    """活动副本次数以在线会话的内存存档为准；否则会话下一次落盘会覆盖重置结果。"""
+def _live_save(store, account, snapshot):
+    """在线修正以在线会话的内存存档为准，否则会话下一次落盘会覆盖结果；无会话时用磁盘存档。"""
     session = store.sessions.get(account)
     if session is None:
         return snapshot["save"], None
@@ -412,13 +416,20 @@ class Workbench:
         return {"rows": [{k: v for k, v in row.items() if k != "request"} for row in rows[offset:offset + 50]],
                 "total": len(rows), "offset": offset}
 
+    def live_snapshot(self, account):
+        """档案页在线时展示在线会话的真实状态；revision 仍是磁盘版本，供管理操作做乐观锁。"""
+        with self.accounts.lock:
+            snapshot = self.accounts.snapshot(account)
+            save, _ = _live_save(self.accounts, account, snapshot)
+            return {**snapshot, "save": copy.deepcopy(save)}
+
     def copy_counts(self):
         """只读汇总各账号的活动副本次数，供独立页签核对重置前后。"""
         with self.accounts.lock:
             rows = []
             for account in self.accounts.account_ids():
                 snapshot = self.accounts.snapshot(account)
-                save, _ = _copy_count_save(self.accounts, account, snapshot)
+                save, _ = _live_save(self.accounts, account, snapshot)
                 state = save.get("activity_copy_state")
                 if snapshot["error"] or not snapshot["has_save"] or not isinstance(state, dict):
                     continue
@@ -458,7 +469,7 @@ class Workbench:
                     if snapshot["error"]:
                         skipped.append({"account": account, "reason": "存档损坏"})
                         continue
-                    live, session = _copy_count_save(store, account, snapshot)
+                    live, session = _live_save(store, account, snapshot)
                     save = copy.deepcopy(live)
                     if not snapshot["has_save"] or not save.get("has_role"):
                         continue
@@ -506,18 +517,23 @@ class Workbench:
                 return {k: v for k, v in row.items() if k != "request"}
             self._finish_pending(account)
             snapshot = store.snapshot(account)
+            online = snapshot["online"]
             row = {"id": data["operation_id"], "at": time.time(), "account": account, "action": action,
                    "reason": data["reason"], "status": "pending", "request": copy.deepcopy(data),
-                   "before_revision": snapshot["revision"], "after_revision": None, "backup_id": None, "changes": []}
+                   "online": online, "before_revision": snapshot["revision"], "after_revision": None,
+                   "backup_id": None, "changes": []}
             self._write(row)
             try:
-                if snapshot["online"]:
-                    raise ValueError("账号仍在线，请先退出游戏再执行管理操作")
+                if online and action not in ONLINE_ACTIONS:
+                    raise ValueError("账号仍在线，请先退出游戏再执行此管理操作")
+                # revision 始终按磁盘字节校验；在线背包数量以在线会话内存为准。
                 if snapshot["revision"] != data["revision"]:
                     raise ValueError("存档已变化，请刷新玩家档案后重新操作")
                 if snapshot["error"] or not snapshot["save"].get("has_role"):
                     raise ValueError(snapshot["error"] or "角色尚未创建")
-                save = Session(store.tables, store.path(account), store.step_counts, store.role_config).save
+                live, session = _live_save(store, account, snapshot)
+                save = (copy.deepcopy(live) if session is not None else
+                        Session(store.tables, store.path(account), store.step_counts, store.role_config).save)
                 before = copy.deepcopy(save)
                 now = int(time.time())
                 player.settle_self_stats(save, store.role_config)
@@ -525,14 +541,20 @@ class Workbench:
                 _manage(save, action, data, store.role_config, store.step_counts, now)
                 player.settle_stamina(save, store.role_config, now)
                 after = views.detail({**snapshot, "save": save}, store.step_counts, store.role_config)
-                previous = views.detail(snapshot, store.step_counts, store.role_config)
+                previous = views.detail({**snapshot, "save": before}, store.step_counts, store.role_config)
                 if previous["error"] or after["error"]:
                     raise ValueError(previous["error"] or after["error"])
                 row["changes"] = changes(previous, after)
-                row["backup_id"] = storage.backup(store.save_path.parent / "backups" / "accounts" / str(account), store.path(account).read_bytes())
+                # 在线时磁盘可能落后于会话，备份操作前的在线状态才能准确回滚。
+                raw_before = (json.dumps(copy.deepcopy(live), ensure_ascii=False, allow_nan=False).encode("utf-8")
+                              if session is not None else store.path(account).read_bytes())
+                row["backup_id"] = storage.backup(store.save_path.parent / "backups" / "accounts" / str(account), raw_before)
                 self._write(row)
                 save["gm_receipt"] = row["id"]
                 player.save_response_group([], save, before, store.path(account), store.step_counts, store.role_config, now)
+                # 与登录共用离线锁，在线会话无法并发写回；同步内存存档，避免下次落盘把旧背包带回来。
+                if session is not None and store.sessions.get(account) is session:
+                    session.save = save
             except (ValueError, TypeError, KeyError, OSError) as error:
                 row.update(status="failed", error=str(error))
                 self._write(row)

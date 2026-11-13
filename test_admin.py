@@ -1355,9 +1355,10 @@ class GmManagementTests(AdminFixture):
             self.gm.apply(1, self.request("role-exp", exp=100))
         self.assertEqual(self.detail()["level"], after["level"])
 
-    def test_new_actions_share_offline_revision_backup_and_save_guards(self):
+    def test_non_inventory_actions_share_offline_revision_backup_and_save_guards(self):
         before = self.store.path(1).read_bytes()
-        actions = [("inventory", {"cid": 20100, "count": 2}), ("general-level", {"iid": 7060, "level": 6}),
+        # inventory 已支持在线执行，由 GmOnlineInventoryTests 单独覆盖。
+        actions = [("general-level", {"iid": 7060, "level": 6}),
                    ("formation", {"iid": 7061, "position": 2}), ("remove-general", {"iid": 7061}),
                    ("role-exp", {"exp": 500_000})]
         for action, values in actions:
@@ -1413,6 +1414,157 @@ class GmManagementTests(AdminFixture):
                 with self.subTest(variant=variant, action=action), self.assertRaises(ValueError):
                     self.gm.apply(1, self.request(action, iid=7061, **values))
                 self.assertEqual(self.store.path(1).read_bytes(), before)
+
+
+class GmOnlineInventoryTests(AdminFixture):
+    """背包清理允许在线：以在线会话内存为源，落盘后同步会话，其它管理动作仍需离线。"""
+
+    def setUp(self):
+        super().setUp()
+        self.save()
+        save = self.store.snapshot(1)["save"]
+        player.change_item_count(save, 20014, 12, CONFIG)
+        player.save_role(save, self.store.path(1), COUNTS)
+        self.gm = gm.Workbench(self.store)
+
+    def request(self, cid=20014, count=0, **changes):
+        return {"operation_id": uuid.uuid4().hex, "revision": self.store.snapshot(1)["revision"],
+                "reason": "在线清理背包", "action": "inventory", "cid": cid, "count": count, **changes}
+
+    def online(self):
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        session = self.store.open_session(1, PASSWORD, ("phone", 1))
+        self.addCleanup(self.store.close_session, 1)
+        return session
+
+    def detail(self, save=None):
+        snapshot = self.store.snapshot(1)
+        return views.detail({**snapshot, "save": save} if save is not None else snapshot, COUNTS, CONFIG)
+
+    def count(self, cid=20014, save=None):
+        return next((row["count"] for row in self.detail(save)["inventory"] if row["item_id"] == cid), 0)
+
+    def raw_count(self, save, cid=20014):
+        return next((protocol.pb_get_varint(v, 2) or 0
+                     for n, w, v in protocol.iter_pb_fields(bytes.fromhex(save["world_state"]["1200"]))
+                     if n == 1 and w == 2 and protocol.pb_get_varint(v, 1) == cid), 0)
+
+    def test_online_clear_uses_live_save_syncs_session_and_survives_reconnect(self):
+        session = self.online()
+        disk_count = self.count()
+        player.change_item_count(session.save, 20014, 7, CONFIG)
+        live_count = self.count(save=session.save)
+        self.assertEqual(live_count, disk_count + 7)
+        request = self.request(count=0)
+        result = self.gm.apply(1, request)
+        self.assertEqual((result["status"], result["online"], result["action"]), ("success", True, "inventory"))
+        self.assertTrue(any(row.get("cid") == 20014 and row["before"] == live_count and row["after"] == 0
+                            for row in result["changes"]))
+        self.assertEqual(self.count(), 0)
+        self.assertEqual(self.count(save=session.save), 0)
+        self.assertEqual(self.raw_count(session.save), 0)
+        saved = self.store.path(1).read_bytes()
+        self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
+        self.assertEqual(self.store.path(1).read_bytes(), saved)
+        # 在线会话随后的落盘不能把清理前的背包写回。
+        self.assertTrue(player.save_role(session.save, self.store.path(1), COUNTS))
+        self.assertEqual(self.count(), 0)
+        # 备份保存的是操作前的在线状态，离线恢复后可还原未落盘的 7 枚道具。
+        backup = self.root / "backups" / "accounts" / "1" / (result["backup_id"] + ".json")
+        self.assertEqual(self.count(save=json.loads(backup.read_bytes())), live_count)
+        self.store.close_session(1)
+        self.store.maintain(1, "restore", self.store.snapshot(1)["revision"], result["backup_id"])
+        self.assertEqual(self.count(), live_count)
+
+    def test_online_fragment_clear_and_set_preserve_identity(self):
+        session = self.online()
+        fragment = next(row for row in self.detail()["inventory"] if row["kind"] == "武将碎片")
+        cid = fragment["item_id"]
+        self.assertNotEqual(cid, fragment["cid"])
+        self.assertEqual(self.gm.apply(1, self.request(cid=cid, count=9))["status"], "success")
+        self.assertEqual(self.count(cid), 9)
+        self.assertEqual(self.count(cid, save=session.save), 9)
+        result = self.gm.apply(1, self.request(cid=cid, count=0))
+        self.assertEqual((result["status"], result["online"]), ("success", True))
+        self.assertEqual(session.save["world_state"]["1012"], "")
+        self.assertEqual(self.store.snapshot(1)["save"]["world_state"]["1012"], "")
+
+    def test_online_active_without_session_clears_disk(self):
+        self.store.active[1] = {"address": "phone", "connected_at": 1}
+        result = self.gm.apply(1, self.request())
+        self.assertEqual((result["status"], result["online"]), ("success", True))
+        self.assertEqual(self.count(), 0)
+        self.assertTrue(self.gm.history(1, "inventory")["rows"][0]["online"])
+
+    def test_online_inventory_rejects_stale_revision_and_invalid_requests_without_writes(self):
+        session = self.online()
+        raw = self.store.path(1).read_bytes()
+        live = copy.deepcopy(session.save)
+        invalid = [{**self.request(), "revision": "0" * 64}, self.request(cid=1025),
+                   self.request(count=1 << 31), self.request(count=self.count(save=session.save))]
+        for request in invalid:
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                self.gm.apply(1, request)
+            self.assertEqual(self.store.path(1).read_bytes(), raw)
+            self.assertEqual(session.save, live)
+        # 前两项在 validate 阶段就被拒绝，不会留下流水；后两项在执行前/执行中失败并记账。
+        records = self.gm.history(1, "inventory")["rows"]
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(row["status"] == "failed" for row in records))
+
+    def test_online_inventory_failures_leave_disk_and_session_unchanged(self):
+        session = self.online()
+        raw = self.store.path(1).read_bytes()
+        live = copy.deepcopy(session.save)
+        original_replace = storage.os.replace
+
+        def fail_save(source, target):
+            if Path(target) == self.store.path(1):
+                raise OSError("save disk full")
+            return original_replace(source, target)
+
+        for owner, name, replacement in ((storage, "backup", {"side_effect": OSError("backup full")}),
+                                         (player, "save_role", {"return_value": False}),
+                                         (storage.os, "replace", {"side_effect": fail_save})):
+            with self.subTest(name=name):
+                with patch.object(owner, name, **replacement), self.assertRaises(OSError):
+                    self.gm.apply(1, self.request())
+                self.assertEqual(self.store.path(1).read_bytes(), raw)
+                self.assertEqual(session.save, live)
+        self.assertTrue(all(row["status"] == "failed" for row in self.gm.history(1, "inventory")["rows"]))
+
+    def test_online_inventory_receipt_recovers_missing_final_journal(self):
+        session = self.online()
+        write = self.gm._write
+
+        def fail_success(row):
+            if row["status"] == "success" and row["id"] == request["operation_id"]:
+                raise OSError("log full")
+            write(row)
+
+        request = self.request()
+        with patch.object(self.gm, "_write", side_effect=fail_success):
+            self.assertIn("audit_warning", self.gm.apply(1, request))
+        self.assertEqual(self.count(), 0)
+        self.assertEqual(self.count(save=session.save), 0)
+        saved = self.store.path(1).read_bytes()
+        self.assertEqual(gm.Workbench(self.store).apply(1, request)["status"], "success")
+        self.assertEqual(self.store.path(1).read_bytes(), saved)
+
+    def test_other_player_actions_still_require_offline_when_online(self):
+        session = self.online()
+        raw = self.store.path(1).read_bytes()
+        live = copy.deepcopy(session.save)
+        for action, values in (("general-level", {"iid": 7060, "level": 6}),
+                               ("formation", {"iid": 7061, "position": 2}),
+                               ("remove-general", {"iid": 7061}),
+                               ("role-exp", {"exp": 500_000})):
+            request = {"operation_id": uuid.uuid4().hex, "revision": self.store.snapshot(1)["revision"],
+                       "reason": "在线管理", "action": action, **values}
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, "在线"):
+                self.gm.apply(1, request)
+            self.assertEqual(self.store.path(1).read_bytes(), raw)
+            self.assertEqual(session.save, live)
 
 
 class GmResetCopyCountsTests(AdminFixture):
@@ -1902,6 +2054,39 @@ class AdminHttpTests(AdminFixture):
         changed = next(r for r in records["rows"] if r["action"] == "config")
         self.assertEqual(changed["result"]["changes"], [{"name": "param1", "before": "25", "after": "31"}])
         self.assertEqual(self.request("/api/configs/props?q=20014")[2]["rows"][0]["original"]["param1"], "25")
+
+    def test_online_inventory_http_clears_live_session_and_shows_live_counts(self):
+        save = self.store.snapshot(1)["save"]
+        player.change_item_count(save, 20014, 12, CONFIG)
+        player.save_role(save, self.store.path(1), COUNTS)
+        self.store.register(1, PASSWORD, self.store.snapshot(1)["revision"])
+        session = self.store.open_session(1, PASSWORD, ("phone", 1))
+        self.addCleanup(self.store.close_session, 1)
+        player.change_item_count(session.save, 20014, 5, CONFIG)
+        detail = self.request("/api/accounts/1")[2]
+        self.assertTrue(detail["online"])
+        self.assertEqual(next((row["count"] for row in detail["inventory"] if row["item_id"] == 20014), 0), 17)
+        payload = {"operation_id": uuid.uuid4().hex, "revision": self.store.snapshot(1)["revision"],
+                   "reason": "HTTP 在线清理背包", "action": "inventory", "cid": 20014, "count": 0}
+        code, _, result = self.request("/api/accounts/1/gm", payload)
+        self.assertEqual((code, result["status"], result["online"]), (200, "success", True))
+        after = self.request("/api/accounts/1")[2]
+        self.assertEqual(next((row["count"] for row in after["inventory"] if row["item_id"] == 20014), 0), 0)
+        self.assertEqual(session.save["world_state"]["1200"],
+                         self.store.snapshot(1)["save"]["world_state"]["1200"])
+        self.assertEqual(self.request("/api/accounts/1/gm", payload)[2]["status"], "success")
+
+    def test_inventory_page_allows_online_and_explains_refresh(self):
+        html = self.request("/")[2].decode()
+        script = self.request("/app.js")[2].decode()
+        self.assertIn('id="manager-note"', html)
+        self.assertIn("在线会话同步生效", script)
+        self.assertIn("在线也可清理背包", script)
+        self.assertIn("重进背包或重新登录", script)
+        self.assertIn("heroes && (account.online", script)
+        self.assertIn("result.online", script)
+        self.assertIn("roleExp.disabled = row.online", script)
+        self.assertNotIn("玩家在线，退出游戏后可管理物品与武将。", script)
 
     def test_transfer_http_uses_offline_checks_and_records_target_backup(self):
         self.save(10)
