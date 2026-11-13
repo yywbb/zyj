@@ -11,7 +11,7 @@ import time
 import zipfile
 
 from . import skytoken, activities, activity_copy, arena, battle, blackmarket, cheer, configuration, cornucopia, daily_events, development, equip_baptize, fashion, favorite, formation, friend_copy, general_foster, hades_copy, magic, mieshendian, online_rewards, penglai, pets, qiankun, recharge, recruit, resource_purchase, rob, secret_shop, shop, sigil, single_boss, star_copy, timebag, training, treasure_refine, watchstar, welfare, world_boss
-from . import achievements, antique, artifact, ascension_sendai, babel_tower, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, exclusive_artifact, gamestar, illusion, nightclub, partner_growth, pending_features, soul, wing
+from . import achievements, antique, artifact, ascension_sendai, babel_tower, blessing_cave, champion, collection, cover, cup, deployment, dragon_wishing, equip_evolve, examination, exchange, exclusive_artifact, gamestar, illusion, nightclub, partner_growth, pending_features, soul, wing
 from .guide import describe_guide, get_guide_sections, migrate_guide, record_guide_progress
 from .protocol import (
     encode_pb_field, get_comb_messages, iter_pb_fields, pack_frame,
@@ -93,7 +93,7 @@ def load_role_config(config_path):
                              "exclusive_device_spirit_suit", "exclusive_device_spirit_random_properties", "exclusive_device_spirit_random_pool",
                              "exclusive_copy", "exclusive_device_soul_copy", "exclusive_device_spirit_copy",
                              "ID_dictionary", "dew_pool_achievement", "dew_pool_task", "dew_pool_shop",
-                             "tongtianta_dazhangjie", "tongtianta_guaiwu", "tongtianta_shangdian", "tongtianta_tongguantiaojian",
+                             "xianku_guaiwu", "tongtianta_dazhangjie", "tongtianta_guaiwu", "tongtianta_shangdian", "tongtianta_tongguantiaojian",
                              "shengxian_interval", "shengxian_type", "shengxian_shop", "shengxian_battle", "shengxian_buy",
                              "shengxian_buff", "shengxian_praram", "shengxian_recover", "shengxian_reward",
                              "shengxian_hero", "shengxian_monster",
@@ -691,14 +691,18 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = online_rewards.prepare(opcode, save, request_body, role_config)
         if opcode == 2038:
             apply_reward(save, body, role_config, now)
-    elif opcode in (*babel_tower.OPCODES, *ascension_sendai.OPCODES, *exclusive_artifact.OPCODES, babel_tower.BUY_TIMES):
+    elif opcode in (*babel_tower.OPCODES, *blessing_cave.OPCODES, *ascension_sendai.OPCODES, *exclusive_artifact.OPCODES, babel_tower.BUY_TIMES):
         if opcode == babel_tower.BUY_TIMES:
-            buy = (exclusive_artifact.buy_times if exclusive_artifact.buy_times_supported(request_body)
+            buy = (blessing_cave.buy_times if blessing_cave.buy_times_supported(request_body)
+                   else exclusive_artifact.buy_times if exclusive_artifact.buy_times_supported(request_body)
                    else babel_tower.buy_times)
             body, reward, costs = buy(save, request_body, role_config, now)
         elif opcode in exclusive_artifact.OPCODES:
             body, reward, costs = exclusive_artifact.prepare(opcode, save, request_body, role_config, now,
                                                             random.getrandbits(64))
+        elif opcode in blessing_cave.OPCODES:
+            body, reward, costs = blessing_cave.prepare(opcode, save, request_body, role_config, now,
+                                                      random.getrandbits(64))
         else:
             module = babel_tower if opcode in babel_tower.OPCODES else ascension_sendai
             body, reward, costs = module.prepare(opcode, save, request_body, role_config, now, random.getrandbits(64))
@@ -938,6 +942,7 @@ def prepare_recorded_response(opcode, body, save, request_body, step_counts, rol
         body = arena.rewrite_vip(body, save, role_config, now)
         body = single_boss.rewrite_vip(body, save, role_config, now)
         body = activity_copy.rewrite_vip(body, save, role_config, now)
+        body = blessing_cave.rewrite_vip(body, save, role_config, now)
     elif opcode == 301:
         price = resource_purchase.prepare(save, request_body, role_config, now)
         change_item_count(save, 1001, -price, role_config, now)

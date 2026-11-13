@@ -933,6 +933,76 @@ def patch_arena_scripts():
     return patched
 
 
+def patch_blessing_cave_scripts(patched):
+    def load(name, folder="scripts"):
+        raw = patched.get(f"assets/{folder}/{name}.so")
+        if raw is None:
+            return read_script(name, folder).decode("utf-8").replace("\r\n", "\n")
+        data = xxtea_decrypt(raw, XXTEA_KEY)
+        return data[:struct.unpack("<I", data[-4:])[0]].decode("utf-8")
+
+    def put(name, code, folder="scripts"):
+        patched[f"assets/{folder}/{name}.so"] = xxtea_encrypt(code.encode("utf-8"), XXTEA_KEY)
+
+    code = load("GameBlessingCave")
+    marker = "    local battleTimes = Result.ids[1] or 0\n"
+    assert code.count(marker) == 1
+    code = code.replace(marker, marker + "    local trailer=(#Result.ids%5==2)\n    local bought=trailer and Result.ids[#Result.ids] or 0\n")
+    marker = "        table.insert(status,v)"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "        if not trailer or k<#Result.ids then status[tostring(k)]=v end")
+    marker = "times = battleTimes, copyInfo = status"
+    assert code.count(marker) == 1
+    code = code.replace(marker, "times = battleTimes, bought = bought, copyInfo = status")
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "blessing_cave_network.lua"), encoding="utf-8") as stream:
+        code += "\n" + stream.read()
+    put("GameBlessingCave", code)
+
+    code = load("UIBlessingCave")
+    with open(os.path.join(os.path.dirname(__file__), "client_patches", "blessing_cave_ui.lua"), encoding="utf-8") as stream:
+        code += "\n" + stream.read()
+    put("UIBlessingCave", code)
+
+    for name, owner, methods in (
+        ("Layer_blessingCave", "blessingCave", ("init", "clear", "setzhuan", "setCopyTouch", "setCopyClick", "reloadcopyDetails")),
+        ("window_blessingCaveBuy", "blessingCaveBuy", ("open", "close")),
+    ):
+        code = load(name)
+        if name == "Layer_blessingCave":
+            marker = "function blessingCave.init(self,parent,toppos,param)\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, marker + "    self.rolelv=param and param.rolelv or 0\n    self.maxPositon=1\n    self.isNewOpen=0\n")
+            marker = "    UIRequest({type = 6520})"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    if param and param.copyInfo then self:reload(param) else UIRequest({type=6520}) end")
+            start = code.index("local nowcount", code.index("self.rootItems.buyTime:addHandleOfControlEvent"))
+            start = code.rfind("\n", 0, start) + 1
+            end = code.index("    end, CCControlEventTouchUpInside)", start)
+            assert 'gameWindows:openWindow("blessingCaveBuy"' in code[start:end]
+            code = code[:start] + code[end:]
+        else:
+            marker = "    self.maxBuyTime = data.totalcount - data.alreadybuy\n"
+            assert code.count(marker) == 1
+            code = code.replace(marker, "    self.maxBuyTime = math.max(0, data.totalcount - data.alreadybuy)\n")
+        for method in methods:
+            start = code.index(f"function {owner}.{method}(")
+            end = code.find(f"\nfunction {owner}.", start + 1)
+            if end < 0:
+                end = code.index(f"return {owner}", start)
+            block = code[start:end]
+            header = block.index("\n") + 1
+            prefix = "    self.localBlessingGeneration=(self.localBlessingGeneration or 0)+1\n" if method in ("init", "clear", "open", "close") else ""
+            block = block[:header] + prefix + "    local generation=self.localBlessingGeneration\n" + block[header:]
+            block = re.sub(r"((?:local )?function(?: [A-Za-z_]\w*)?[ \t]*\([^\n]*\)\n)",
+                           r"\1        if not self.rootNode or self.localBlessingGeneration~=generation then return end\n", block)
+            code = code[:start] + block + code[end:]
+        put(name, code)
+    code = load("GameErrorMessage", "common_lua")
+    marker = "    local error = initPb(ids_pb, fd)\n"
+    assert code.count(marker) == 1
+    put("GameErrorMessage", code.replace(marker, marker + "    if LocalBlessingCaveError and fd.ser~=0 then LocalBlessingCaveError(error.ids[1]) end\n"), "common_lua")
+
+
 def patch_hades_scripts(patched):
     def load(name, folder="scripts"):
         raw = patched.get(f"assets/{folder}/{name}.so")
@@ -5118,6 +5188,7 @@ FOSTERCONFIRM.fields = {FOSTERCONFIRM_ID_FIELD, FOSTERCONFIRM_OPT_FIELD, token}'
     patch_hades_scripts(patched)
     patch_partner_growth_scripts(patched)
     patch_illusion_scripts(patched)
+    patch_blessing_cave_scripts(patched)
     code = read_script("Layer_main").decode("utf-8").replace("\r\n", "\n")
     start = code.index("function main.checkminigame(self)\n")
     end = code.index("\nend", start) + len("\nend")
