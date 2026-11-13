@@ -10,8 +10,8 @@ import re
 import time
 import uuid
 
-from .. import activities, activity_copy, cheer, formation, player, qiankun, storage, training
-from ..protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint
+from .. import activities, activity_copy, cheer, development, exclusive_artifact, formation, partner_growth, player, qiankun, storage, training
+from ..protocol import encode_pb_field, iter_pb_fields, parse_ids_pb, pb_get_varint, pb_set_varint
 from ..session import Session
 from . import views
 
@@ -19,14 +19,14 @@ RESOURCES = {"gold": "元宝", "coin": "银币", "stamina": "体力", "energy": 
 # "grant" 只用于展示与筛选功能下线前的历史流水，不再接受任何新的发放请求。
 ACTIONS = {"grant": "历史发放（已下线）", "register": "创建登录账号", "backup": "创建备份",
            "restore": "恢复备份", "reset": "重置账号", "reset-guide": "重置引导", "config": "修改配置",
-           "inventory": "修正物品数量", "general-level": "武将升级", "formation": "调整阵容", "remove-general": "移除闲置武将",
+           "inventory": "修正物品数量", "general-level": "武将升级", "graduate-general": "武将一键毕业", "formation": "调整阵容", "remove-general": "移除闲置武将",
            "role-exp": "赠送角色经验",
            "reset-copy-counts": "重置活动副本次数",
            "mail": "GM 发送邮件", "mail-delete": "GM 撤回邮件", "kick": "强制下线",
            "transfer": "转移账号数据到测试号"}
 TEST_ACCOUNT = 10
 PLAYER_ACTIONS = {"inventory": {"cid", "count"},
-                  "general-level": {"iid", "level"}, "formation": {"iid", "position"}, "remove-general": {"iid"},
+                  "general-level": {"iid", "level"}, "graduate-general": {"iid"}, "formation": {"iid", "position"}, "remove-general": {"iid"},
                   "role-exp": {"exp"}}
 # 背包物品修正可以在线执行：以在线会话内存存档为源，原子落盘后同步会话。
 # 武将/阵容/经验修正涉及战斗属性与客户端阵型缓存，仍要求账号离线。
@@ -252,6 +252,130 @@ def validate(data, items):
     return action
 
 
+def _sync_fairy_power(raw, config):
+    """同步伙伴的仙属性（24/25/26）与仙战力（34）。"""
+    attrs = partner_growth.fairy(raw, config)
+    for field, value in attrs.items():
+        raw = pb_set_varint(raw, field, value)
+    return pb_set_varint(raw, 34, attrs[25] + attrs[26] + attrs[24] // 10)
+
+
+def _graduate_general(save, iid, config, now):
+    """把指定武将（主角或伙伴）一键培养至当前角色等级上限下的毕业状态。"""
+    world = bytes.fromhex(save["world_state"]["1002"])
+    generals, slots, equips = formation.records(world, 1, 2), formation.records(world, 4, 2), formation.records(world, 2, 1)
+    raw = generals[iid]
+    before_raw = raw
+    row = config["general"][str(pb_get_varint(raw, 1))]
+    protagonist = pb_get_varint(bytes.fromhex(save.get("protagonist_snapshot", "")), 1)
+    max_level = min(save["role_state"]["level"] * int(config["global_kv"]["general_level"]["value"]),
+                    max(map(int, config["general_exp"])))
+    members, tiers = cheer.members(save, config), cheer.tiers(save, config)
+
+    # 1. 等级拉满
+    level = pb_get_varint(raw, 3) or 0
+    if level < max_level:
+        needed = sum(config["general_exp"][str(lv)][f'{row["quality"]}exp'] for lv in range(level, max_level))
+        gained = max(0, needed - (pb_get_varint(raw, 5) or 0))
+        raw, increase, _ = training.grow_general(raw, gained, slots.get(iid, b""), members, equips, config,
+                                                 max_level, cheer_tiers=tiers, wing_state=save.get("wing_state"))
+        player.apply_reward(save, encode_pb_field(8, 2, raw), config, now)
+        if iid in slots:
+            for key in ("power", "power_all"):
+                save["role_state"][key] += increase
+        world = bytes.fromhex(save["world_state"]["1002"])
+        raw = formation.records(world, 1, 2)[iid]
+        before_raw = raw
+        row = config["general"][str(pb_get_varint(raw, 1))]
+
+    if iid == protagonist or row["actor"] == "lead":
+        max_awake = max(map(int, config["protagonist_awaken"]))
+        if (pb_get_varint(raw, 18) or 0) < max_awake:
+            raw = pb_set_varint(raw, 18, max_awake)
+            player.apply_reward(save, encode_pb_field(8, 2, raw), config, now)
+        if save.get("protagonist_snapshot"):
+            player.record_slot_update(save, encode_pb_field(6, 2, bytes.fromhex(save["protagonist_snapshot"])))
+        player.settle_self_stats(save, config)
+        return
+
+    # 2. 突破至 13 阶（含红将转换）
+    limit_13 = min(13, row.get("breach_upper_limit", 10))
+    while (pb_get_varint(raw, 4) or 0) < limit_13:
+        raw, _ = partner_growth.breakthrough(save, raw, 0, config, preview=True)
+        raw = _sync_fairy_power(raw, config)
+        row = config["general"][str(pb_get_varint(raw, 1))]
+
+    # 3. 觉醒拉满
+    if row.get("awaken"):
+        max_awake = max(map(int, config["general_awaken"]))
+        if (pb_get_varint(raw, 18) or 0) < max_awake:
+            raw = partner_growth.rebase(save, raw, pb_set_varint(raw, 18, max_awake), config)
+
+    # 4. 仙阶/文理科进修拉满
+    pg_state = partner_growth.state(save, config)
+    progress = partner_growth.research(save, iid, config)
+    before_stats = partner_growth.research_stats(progress, config)
+    max_immortal = max(map(int, config["Immortal_level"]["1"]))
+    for kind in (1, 2):
+        offset = (kind - 1) * 5
+        progress[offset] = max_immortal
+        max_char = config["Immortal_level"][str(kind)][str(max_immortal)]["character"]
+        rem = max(0, max_char - progress[offset + 4])
+        if rem > 0:
+            q, r = divmod(rem, 3)
+            for idx in range(1, 4):
+                progress[offset + idx] += q + (1 if idx <= r else 0)
+            progress[offset + 4] = max_char
+    pg_state["research"][str(iid)] = progress
+    after_stats = partner_growth.research_stats(progress, config)
+    changes = {f: after_stats[name] - before_stats[name] for name, f in (("atk", 6), ("def", 7), ("hp", 8))}
+    raw = development.adjust(raw, changes)[0]
+    raw = pb_set_varint(raw, 20, (pb_get_varint(raw, 20) or 0) + sum(after_stats[n] - before_stats[n] for n in ("adddmg", "subdmg")))
+
+    # 5. 飞升拉满
+    if row.get("soaring"):
+        max_soar = max(map(int, config["partner_soaring"]))
+        cur_soar = pb_get_varint(raw, 23) or 0
+        if cur_soar < max_soar:
+            origin = config["general"][str(row["init_cid"])]
+            prev_spd = config["partner_soaring"][str(cur_soar)][str(origin["basic"]) + "speed"]
+            next_spd = config["partner_soaring"][str(max_soar)][str(origin["basic"]) + "speed"]
+            raw = pb_set_varint(raw, 23, max_soar)
+            raw = development.adjust(raw, {9: next_spd - prev_spd})[0]
+            raw = _sync_fairy_power(raw, config)
+
+    # 6. 彩金突破 14..16 阶
+    max_adv = min(16, row.get("breach_upper_limit", 10))
+    while (pb_get_varint(raw, 4) or 0) < max_adv:
+        raw, _ = partner_growth.breakthrough(save, raw, 1, config, preview=True)
+        raw = _sync_fairy_power(raw, config)
+        row = config["general"][str(pb_get_varint(raw, 1))]
+
+    # 7. 升星拉满
+    if row.get("rising_star") and (pb_get_varint(raw, 4) or 0) >= 14:
+        max_star = max(map(int, config["general_star"]))
+        if (pb_get_varint(raw, 22) or 0) < max_star:
+            raw = pb_set_varint(raw, 22, max_star)
+            raw = _sync_fairy_power(raw, config)
+
+    # 8. 专属神器激活并拉满等级
+    if row.get("exclusive"):
+        ex_state = exclusive_artifact.get_state(save)
+        ex_cid = int(row["exclusive"])
+        ex_row = config["exclusive"].get(str(ex_cid))
+        if ex_row:
+            max_ex_lv = max(map(int, config["exclusive_intensify"][str(ex_row["intensify_type"])]))
+            art = ex_state["artifacts"].setdefault(str(iid), {"cid": ex_cid, "level": 0, "inlay": [0] * 6, "spent": {}})
+            art["level"] = max(art.get("level", 0), max_ex_lv)
+            ex_state["checked_at"] = now
+
+    partner_growth.validate(raw, config)
+    partner_growth.check_combat(raw, config)
+    raw = partner_growth.power(save, before_raw, raw)
+    player.apply_reward(save, encode_pb_field(8, 2, raw), config, now)
+    player.settle_self_stats(save, config)
+
+
 def _manage(save, action, data, config, step_counts, now):
     if action == "inventory":
         fragment = config["general_fragment"].get(str(data["cid"]))
@@ -304,6 +428,8 @@ def _manage(save, action, data, config, step_counts, now):
         save["world_state"]["1002"] = b"".join(encode_pb_field(n, w, v) for n, w, v in iter_pb_fields(world)
             if not (n == 1 and w == 2 and pb_get_varint(v, 2) == iid)).hex()
         general_foster.remove(save, iid)
+    elif action == "graduate-general":
+        _graduate_general(save, iid, config, now)
     else:
         level = pb_get_varint(raw, 3) or 0
         maximum = min(save["role_state"]["level"] * int(config["global_kv"]["general_level"]["value"]),

@@ -216,6 +216,7 @@ function renderPossessions(detail, account, heroes) {
       ["阵位", (r) => r.position ? `阵位 ${r.position}` : r.cheer_position ? `助阵 ${r.cheer_position}` : "闲置"],
       ["管理", (r) => { const a = node("div", undefined, "actions"); a.append(
         control("升级", "general-level", r, r.level >= account.general_level_cap || !!r.cheer_position),
+        control("一键毕业", "graduate-general", r, !!r.cheer_position),
         control("上阵 / 下阵", "formation", r, !!r.cheer_position),
         control("移除", "remove-general", r, r.protagonist || !!r.position || !!r.cheer_position)); return a; }],
     ] : [["物品", (r) => r.name], ["类型", (r) => r.kind], ["数量", (r) => number(r.count)], ["配置 ID", (r) => r.item_id || r.cid],
@@ -232,8 +233,8 @@ function openManagement(account, action, item) {
   $("manager-target").textContent = action === "role-exp"
     ? `账号 ${account.id} · ${account.name} / 当前等级 ${account.level} · 经验 ${number(account.exp)}`
     : `账号 ${account.id} · ${account.name} / ${item.name} (${item.iid || item.item_id})`;
-  $("manager-submit").textContent = action === "remove-general" ? "移除武将" : "保存变更";
-  if (action !== "remove-general") {
+  $("manager-submit").textContent = action === "remove-general" ? "移除武将" : action === "graduate-general" ? "确认一键毕业" : "保存变更";
+  if (action !== "remove-general" && action !== "graduate-general") {
     const input = node(action === "formation" ? "select" : "input"), label = node("label", { inventory: "目标数量", formation: "目标阵位", "role-exp": "经验数量" }[action] || "目标等级");
     input.id = "manager-value"; label.htmlFor = input.id;
     if (action === "formation") {
@@ -264,6 +265,7 @@ function openManagement(account, action, item) {
   $("manager-help").textContent = {
     inventory: `当前数量 ${number(item.count)}。保存的是目标总量，不会触发道具使用或奖励效果。${account.online ? "在线清理会同步在线会话，游戏内请重进背包或重新登录刷新显示。" : ""}`,
     "general-level": "GM 直接升级，不扣经验丹。按现有成长规则同步属性、潜力与战力，保留已有培养加成。",
+    "graduate-general": "GM 一键毕业该武将，不扣培养材料：自动拉满等级、突破（含升红/升金与彩金突破）、觉醒、仙阶进修、飞升、升星与专属神器等级。",
     formation: "替换闲置武将继承阵位装备；移动已上阵武将会交换阵位及装备。主角必须留在阵中。",
     "remove-general": "移除此闲置武将及其培养进度，不返还材料或碎片。可通过本次操作的备份恢复。",
     "role-exp": "按现有升级规则累加角色经验：自动结算升级、每级银币/元宝奖励与体力精力上限，到达配置最高等级后停止。",
